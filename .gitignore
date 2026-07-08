@@ -1,0 +1,48 @@
+# Gradle Build Directories
+.gradle/
+build/
+earlywindow/build/
+
+# IDE files
+.eclipse/
+.settings/
+.classpath
+.project
+bin/
+earlywindow/bin/
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Logs and Crash Reports
+*.log
+*.err.log
+hs_err_pid*.log
+
+# Minecraft Runtime run directory
+run/
+
+# Excluded folders (testing specific / backups)
+scratch/
+reference/
+docs/
+bamfmenu-backups/
+
+# Exclude compiled files/logs from tools
+tools/doom-spike/build/
+tools/doom-spike/out/
+tools/doom-spike/mc-classes/
+tools/doom-spike/*.err
+tools/doom-spike/*.out
+tools/doom-spike/*.log
+
+# Generated test wavs and frame outputs
+earlywindow/*.wav
+earlywindow/*.png
+earlywindow/doom-frame.txt
+earlywindow/doom-frame-ingame.txt
+*.wav
+*.png
+!src/main/resources/**/*.png

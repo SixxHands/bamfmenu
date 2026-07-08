@@ -1,0 +1,10 @@
+{
+  "name": "B-0000B1-ES",
+  "label": "B-0000B1-ES by Autumonapia",
+  "order": 0,
+  "ogg": "B-0000B1-ES.ogg",
+  "bpm": 0,
+  "detector": {
+    "minF0Hz": 1.0
+  }
+}

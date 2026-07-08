@@ -1,0 +1,152 @@
+/* The BAMF: Menu early-window terminal provider, built as its own service-only jar (no
+   neoforge.mods.toml). It MUST be a separate top-level jar from the main mod: FancyModLoader selects
+   the ImmediateWindowProvider on its service layer, before mods are discovered, so a provider bundled
+   with the @Mod would pull the whole module to the service layer and the mod would never load. This
+   jar is plain Java compiled against FancyModLoader's early-display + SPI (provided at runtime by
+   NeoForge); it ships alongside bamfmenu.jar in the pack's mods folder. */
+plugins {
+    id 'java-library'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = "${mod_id}-earlywindow"
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Force UTF-8 so box-drawing and block glyphs don't get mangled on Windows defaults.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+/* Keep our scattered architecture docs SOURCE-ONLY. The 24 co-located package README.md files (and any other
+   .md) explain the internals for us, but must never be packaged into the service jar. They live under
+   src/main/java, which Gradle's default already filters to java sources only -- so today the jar carries none.
+   These excludes make that a GUARANTEE that survives a future source-set change or a doc accidentally dropped
+   into src/main/resources: no .md is copied at the resource step, and the final jar drops any that slip through.
+   The READMEs stay exactly where they are in the repo. */
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+    // Merge vendored Mocha Doom classes into this service jar (drop its META-INF so our manifest wins).
+    from(zipTree('libs/mochadoom.jar')) {
+        exclude 'META-INF/**'
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.neoforged.net/releases' }
+    maven { url = 'https://libraries.minecraft.net' } // com.mojang:* transitives of FancyModLoader
+}
+
+configurations {
+    /* DEV-ONLY: a runtime classpath (with Windows natives) for the headless chart generator. The main deps
+       are compileOnly (NeoForge provides LWJGL at game runtime), so the genCharts JavaExec below needs its own
+       LWJGL + STB + their natives to decode/analyze a song outside the game. Not part of the shipped jar. */
+    chartgen
+}
+
+dependencies {
+    // Provided at runtime by NeoForge / MC 1.21.1.
+    compileOnly 'net.neoforged.fancymodloader:earlydisplay:4.0.42'
+    compileOnly 'net.neoforged.fancymodloader:loader:4.0.42'
+    compileOnly 'org.lwjgl:lwjgl:3.3.3'
+    compileOnly 'org.lwjgl:lwjgl-glfw:3.3.3'
+    compileOnly 'org.lwjgl:lwjgl-opengl:3.3.3'
+    compileOnly 'org.lwjgl:lwjgl-openal:3.3.3'
+    compileOnly 'org.lwjgl:lwjgl-stb:3.3.3'
+
+    // Vendored Mocha Doom (GPLv3); merged into the service jar above since FML loads this as a single top-level jar.
+    compileOnly files('libs/mochadoom.jar')
+
+    /* DEV-ONLY chart generator runtime: the LWJGL java classes AudioPlayer links against (openal is referenced
+       by play() even though the headless analyzeOnly() never opens a device), STB for the OGG decode, plus the
+       Windows natives LWJGL extracts at runtime (core + stb; openal natives are not needed -- never called). */
+    chartgen 'org.lwjgl:lwjgl:3.3.3'
+    chartgen 'org.lwjgl:lwjgl-stb:3.3.3'
+    chartgen 'org.lwjgl:lwjgl-openal:3.3.3'
+    chartgen 'org.lwjgl:lwjgl:3.3.3:natives-windows'
+    chartgen 'org.lwjgl:lwjgl-stb:3.3.3:natives-windows'
+}
+
+// Dev: regenerate committed song charts headlessly via DspCharter (-PoutDir=/abs/path to override).
+tasks.register('genCharts', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Generate committed normal.chart files for the bundled songs (headless DspCharter).'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath + configurations.chartgen
+    mainClass = 'com.retro.bamfmenu.early.core.rhythm.chart.ChartBootstrap'
+    args = [ (project.findProperty('outDir') ?: "${projectDir}/src/main/resources/songs").toString() ]
+}
+
+// Dev: render the offline SongSpike synth test to a .wav (-Pout, -Pseed, -Pharmony=prog|static).
+tasks.register('genSong', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Render the A Song Is Born spike to a .wav (offline musicality gate).'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.retro.bamfmenu.early.core.gen.SongSpike'
+    args = [ (project.findProperty('out') ?: "${projectDir}/song_spike.wav").toString(),
+             (project.findProperty('seed') ?: '').toString(),
+             (project.findProperty('harmony') ?: 'prog').toString() ]
+}
+
+// Dev: convert an osu!mania beatmap (.osz / .osu / folder) to a BAMFBEAT song folder (-Posu=..., [-Pout=...], [-PminHold=ms]).
+tasks.register('importOsu', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Convert an osu!mania beatmap (.osz / .osu / folder) to a BAMFBEAT song folder.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.retro.bamfmenu.early.core.convert.OsuManiaImport'
+    args = [ (project.findProperty('osu') ?: '').toString(),
+             (project.findProperty('out') ?: "${projectDir}/build/osu-import").toString(),
+             (project.findProperty('diffs') ?: '').toString(),
+             (project.findProperty('ffmpeg') ?: '').toString(),
+             (project.findProperty('minHold') ?: '').toString() ]
+}
+
+// Dev: headless DOOM probe that boots Mocha Doom with no window and dumps an ASCII frame (doom-frame.txt).
+tasks.register('genDoomFrame', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Headless DOOM framebuffer probe (Phase 1): boot Mocha Doom with no window, measure frames, dump an ASCII frame.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath + files('libs/mochadoom.jar')
+    mainClass = 'com.retro.bamfmenu.early.core.doom.DoomFramebufferProbe'
+    systemProperty 'java.awt.headless', 'true'
+}
+
+// Dev: dump DOOM framebuffer and ASCII render as PNGs for visual checks.
+tasks.register('genDoomImage', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Dump the DOOM framebuffer + ASCII render as PNGs for visual inspection.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath + files('libs/mochadoom.jar')
+    mainClass = 'com.retro.bamfmenu.early.core.doom.DoomImageProbe'
+    systemProperty 'java.awt.headless', 'true'
+}
+
+// Dev: rasterise DOOM menus to PNGs for offline layout checks.
+tasks.register('genDoomMenu', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Rasterise the DOOM menus to PNGs (offline layout check).'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.retro.bamfmenu.early.core.doom.DoomMenuProbe'
+    systemProperty 'java.awt.headless', 'true'
+}
+
+// Dev: rasterise the DOOM status bar to PNGs for offline layout checks.
+tasks.register('genDoomHud', JavaExec) {
+    group = 'bamfmenu'
+    description = 'Rasterise the DOOM status bar to PNGs (offline layout check).'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.retro.bamfmenu.early.core.doom.DoomHudProbe'
+    systemProperty 'java.awt.headless', 'true'
+}

@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.retro.bamfmenu.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "SplashManagerMixin",
+    "SplashRendererMixin",
+    "NeoForgeLoadingOverlayMixin",
+    "LoadingOverlayMixin",
+    "WindowTitleMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -1,0 +1,82 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '1.0.11'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+repositories {
+    mavenCentral()
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = project.neo_version
+
+    /* Client only: this mod is purely cosmetic and registers nothing on the server. */
+    runs {
+        client {
+            client()
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    /* The early-window terminal provider is a separate, service-only module: it must ship as its own
+       TOP-LEVEL jar (built by the :earlywindow subproject) placed in the mods folder next to
+       bamfmenu.jar -- it cannot be a classpath dependency or a jar-in-jar, because FancyModLoader
+       selects the early-window provider from a mods-folder scan before either is visible. For dev it
+       is dropped into run/mods/ (see the copyEarlyWindowToRunMods task below). */
+}
+
+/* Build the early-window jar whenever the client run is prepared, and drop it into run/mods/ so the
+   dev run discovers it as a top-level provider jar (mirroring the production two-jar layout). */
+tasks.register('copyEarlyWindowToRunMods', Copy) {
+    dependsOn ':earlywindow:jar'
+    from project(':earlywindow').tasks.named('jar')
+    into file('run/mods')
+}
+tasks.matching { it.name == 'prepareClientRun' || it.name == 'prepareRunClient' }.configureEach {
+    dependsOn 'copyEarlyWindowToRunMods'
+}
+
+/* Keep internal docs SOURCE-ONLY: the architecture READMEs / .md notes explain the code for us but must never
+   ship inside the mod jar. Excluded both at the resource-copy step (the realistic accident -- a doc dropped into
+   resources) and on the final jar (catches a .md from any source dir). They stay in the repo where they are. */
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties
+    }
+}

@@ -1,0 +1,7 @@
+wads/* linguist-vendored=true
+
+*.png binary
+*.lmp binary
+*.zip binary
+*.wad binary
+*.dat binary

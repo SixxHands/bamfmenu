@@ -1,0 +1,8 @@
+{
+  "music.menu": {
+    "replace": false,
+    "sounds": [
+      { "name": "bamfmenu:music/far", "stream": true }
+    ]
+  }
+}
