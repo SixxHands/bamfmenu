@@ -1,6 +1,6 @@
 package com.retro.bamfmenu.early.core.rhythm.score;
 
-/* The read-only face of the scoring state, for whoever DRAWS or REPORTS it -- the rhythm renderer, a
+/* The read-only face of the scoring state, for whoever DRAWS or REPORTS it: the rhythm renderer, a
    special's HUD, the results capture, the editor's test view. It exposes every value a GUI needs without
    granting the ability to mutate the economy (only the owning game logic holds the ScoringEngine and calls
    apply/tickDrain). RhythmRenderer takes a ScoreView, not a ScoringEngine. */
@@ -32,7 +32,7 @@ public interface ScoreView {
     /* The current combo multiplier (1..maxMult) derived from the meter. */
     int comboMult();
 
-    /* Raw health (0..healthMax) and the 0..1 fraction (the bar + the SAFE/low-health colour). */
+    /* Raw health (0..healthMax) and the 0..1 fraction (the bar + the SAFE/low-health color). */
     float health();
 
     float healthFraction();

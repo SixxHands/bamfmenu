@@ -1,13 +1,14 @@
 package com.retro.bamfmenu.early.core.rhythm.chart;
 
-import com.retro.bamfmenu.early.core.rhythm.RhythmEngine;
+import com.retro.bamfmenu.early.core.rhythm.model.Note;
+import com.retro.bamfmenu.early.core.rhythm.engine.RhythmEngine;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /* Read/write the committed .chart text format. Hand-rolled + dependency-free (the service jar ships no libs),
    human-readable + hand-editable, and TOLERANT on read the same way Json is: unknown header keys are ignored,
-   missing ones fall back to defaults, and a malformed note row is skipped rather than throwing -- so a partial
+   missing ones fall back to defaults, and a malformed note row is skipped rather than throwing, so a partial
    or future-extended chart never crashes the runtime (a truly empty result just makes the song unplayable).
 
    Format (one song-difficulty per file):
@@ -42,11 +43,11 @@ public final class ChartIO {
         if (c.approachMs() > 0) { // omit when default so untouched charts stay clean (and keep the default feel)
             sb.append("approach ").append(c.approachMs()).append('\n');
         }
-        List<RhythmEngine.Note> notes = c.notes() == null ? List.of() : new ArrayList<>(c.notes());
+        List<Note> notes = c.notes() == null ? List.of() : new ArrayList<>(c.notes());
         notes.sort((a, b) -> Integer.compare(a.timeMs, b.timeMs));
         sb.append("notes ").append(notes.size()).append('\n');
         sb.append("# timeMs lane holdMs\n");
-        for (RhythmEngine.Note n : notes) {
+        for (Note n : notes) {
             sb.append(n.timeMs).append(' ').append(n.lane).append(' ').append(n.holdMs).append('\n');
         }
         return sb.toString();
@@ -54,13 +55,13 @@ public final class ChartIO {
 
     /* Parse the text form into a Chart. Tolerant: bad/unknown lines are skipped, missing header fields default
        (difficulty -> the supplied fallback, bpm/preroll -> 0). Never throws; worst case the notes list is
-       empty. The declared "notes N" count is informational -- we trust the actual rows, not the header. */
+       empty. The declared "notes N" count is informational, we trust the actual rows, not the header. */
     public static Chart read(String text, String fallbackDifficulty) {
         String difficulty = fallbackDifficulty;
         double bpm = 0;
         int preRoll = 0;
         int approach = 0;
-        List<RhythmEngine.Note> notes = new ArrayList<>();
+        List<Note> notes = new ArrayList<>();
         if (text != null) {
             for (String raw : text.split("\n", -1)) {
                 String line = raw.trim();
@@ -68,7 +69,7 @@ public final class ChartIO {
                     continue;
                 }
                 if (Character.isDigit(line.charAt(0))) {
-                    RhythmEngine.Note note = parseNote(line);
+                    Note note = parseNote(line);
                     if (note != null) {
                         notes.add(note);
                     }
@@ -95,7 +96,7 @@ public final class ChartIO {
 
     /* "timeMs lane holdMs" -> Note, or null if the row is malformed. holdMs is optional (defaults 0) so a
        hand-author can write just "timeMs lane". Negative lanes/times are rejected. */
-    private static RhythmEngine.Note parseNote(String line) {
+    private static Note parseNote(String line) {
         String[] tok = line.split("\\s+");
         if (tok.length < 2) {
             return null;
@@ -107,7 +108,7 @@ public final class ChartIO {
             if (timeMs < 0 || lane < 0 || holdMs < 0) {
                 return null;
             }
-            return new RhythmEngine.Note(lane, timeMs, holdMs);
+            return new Note(lane, timeMs, holdMs);
         } catch (NumberFormatException e) {
             return null;
         }

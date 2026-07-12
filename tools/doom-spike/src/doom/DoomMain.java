@@ -2151,6 +2151,7 @@ public class DoomMain<T, V> extends DoomStatus<T, V> implements IDoomGameNetwork
                 }
             }
 
+            build.insert(0, mochadoom.Engine.SAVE_DIR); // EMBEDDED: host save dir ("" = vanilla cwd)
             build.append(String.format("%s%d.dsg", SAVEGAMENAME, savegameslot));
             name = build.toString();
 
@@ -3094,6 +3095,7 @@ public class DoomMain<T, V> extends DoomStatus<T, V> implements IDoomGameNetwork
                 file.append("c:\\doomdata\\");
             }
 
+            file.insert(0, mochadoom.Engine.SAVE_DIR); // EMBEDDED: host save dir ("" = vanilla cwd)
             file.append(String.format("%s%d.dsg", SAVEGAMENAME, c));
             LoadGame(file.toString());
         });

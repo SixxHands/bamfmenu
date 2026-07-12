@@ -4,7 +4,7 @@ package com.retro.bamfmenu.early.core.rhythm.score;
    numbers are tunable per caller. defaults() reproduces EXACTLY the rhythm game's historical constants
    (health bounds + per-grade health deltas + multiplier cap + the point table) so the extraction is
    behavior-identical. A bespoke SPECIAL can pass its own ScoreRules (e.g. hMiss()==0 if a miss should not
-   cost health) and still get the identical combo/multiplier behaviour -- the rules vary, the engine does not. */
+   cost health) and still get the identical combo/multiplier behavior, the rules vary, the engine does not. */
 public record ScoreRules(
         float healthMax,
         float healthStart,

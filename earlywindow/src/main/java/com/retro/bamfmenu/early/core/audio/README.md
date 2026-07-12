@@ -1,58 +1,55 @@
-# early/core/audio — self-contained OpenAL playback + decode-time DSP feature extraction for the pre-Minecraft window
-## Intent
-This layer owns sound for the BIOS/BAMFBEAT early window, which runs *before* Minecraft has initialized. It cannot
-touch Minecraft's audio stack, so it decodes a bundled OGG with STB Vorbis and plays it through its **own** OpenAL
-device/context, then tears that down at the Minecraft hand-off so MC's own sound init is unaffected (the class
-header is explicit about this and about staying Minecraft-ref-free so it survives in the service jar). Per its own
-"SPIKE" comment, the original point was just to prove audio can run pre-MC and close cleanly; everything is
-best-effort — any failure logs and degrades to "no audio" rather than breaking boot. Beyond playback it doubles as
-the rhythm engine's **master clock** (OpenAL `AL_SEC_OFFSET`) and as the **DSP feature source** the auto-charter
-consumes, computed once at decode time before the PCM is freed. It belongs in `core/` because it imports no `bios/`
-GL/presentation classes — only LWJGL, `core.tuning.DetectorConfig`, and `core.dsp.SpectralAnalyzer`.
+# early/core/audio, self-contained OpenAL playback for the pre-Minecraft window
+## Features
+Sound for the BIOS/BAMF! early window, which runs before Minecraft has initialized. It cannot touch
+Minecraft's audio stack, so it decodes an OGG with STB Vorbis and plays it through its own OpenAL
+device/context, then tears that down at the Minecraft hand-off so MC's own sound init is unaffected. No
+Minecraft refs anywhere, so it survives in the service jar. Everything is best-effort: any failure logs and
+degrades to "no audio" rather than breaking boot. Beyond playback it is the rhythm engine's master clock
+(OpenAL `AL_SEC_OFFSET`).
+
+This is pure playback. The song analysis that used to be fused in here moved to
+`core/tools/audio/SongAnalysis`, so plain playback (menu music, the wysi clip) carries no detector machinery
+and `bios/` never sees a `DetectorConfig`. `waveform()` stays here on purpose: it is cfg-free presentation
+data (the rhythm header and the editor timeline draw it), not analysis.
 
 ## Components
-- **`AudioPlayer`** (`public final`) — the one class in this layer. Owns an OpenAL `device`/`context`, the song
-  `source`/`buffer`, and a *second* `sfxSource`/`sfxBuffer` pair kept in the **same** context (so a one-shot SFX
-  mixes over the song without a competing second context). Threading: the OpenAL context is owned by the **render
-  thread**, which is the thread that calls `play`/`playSfx`/`pause`/`resume`/`close`; analysis getters return
-  `volatile` arrays so other threads can read the charting features safely. Key methods:
-  - `play(resource, DetectorConfig)` — decode OGG, open device/context, upload to the AL buffer, run all
-    decode-time analysis, start playback. Returns `false` and degrades on any failure. The `DetectorConfig` drives
-    the per-song band analysis so each song charts with its own settings.
-  - `analyzeOnly(resource, DetectorConfig)` — the **headless** path: identical decode + analysis as `play` but
-    *without* opening OpenAL or starting playback. Populates the same feature getters so a generator can chart a
-    song with no audio device (the Phase-4 `genCharts` chart-bootstrap path). The instance is **not** `ready` for
-    playback afterward.
-  - `positionSeconds()` — the rhythm master clock (`AL_SEC_OFFSET`); `durationSeconds()`.
-  - Analysis getters (all `volatile`-backed): `waveform()` (512-bucket header profile), legacy `onsets()`/`zcr()`/
-    `hopMs()`, and the SuperFlux/SpectralAnalyzer front end `superflux()`, `centroid()`, `melodicOdf()`,
-    `melodicPitch()`, `melodicF0()`, `percussionOdf()`, `cdConf()`, and `superfluxFrameMs()` (exact, drift-free
-    frame spacing for non-44.1kHz rates).
-  - SFX: `loadSfx(resource)` (decode a one-shot into the second source; call after a successful `play`),
-    `playSfx(gain)` (rewind + retrigger, used for back-to-back miss sounds).
-  - Transport/lifecycle: `setVolume(gain)`, `stop()`, `pause()`/`resume()` (preserve `AL_SEC_OFFSET` so the rhythm
-    clock freezes and continues exactly), `isReady()`/`isPlaying()`, `status()`, and `close()` (full teardown of
-    both source/buffer pairs, context, and device — called before the Minecraft hand-off).
-  - Private helpers: `computeOnsets` (legacy RMS-flux + zero-crossing, one linear pass over channel 0),
-    `computeWaveform` (peak-amplitude downsample), `readResource` (classpath OGG → native `ByteBuffer`), `fmt`.
+- **`AudioPlayer`** is the one class in this layer. It owns the OpenAL `device`/`context`, the song
+  `source`/`buffer`, and a second `sfxSource`/`sfxBuffer` pair in the SAME context, so a one-shot SFX mixes
+  over the song instead of fighting it from a competing second context. The context is owned by the render
+  thread, the thread that calls `play`/`playSfx`/`pause`/`resume`/`close`. `waveform` is a `volatile` array
+  so other threads can read it.
+  - `play(String resource)`: decode the OGG, open the device/context, upload, compute the waveform, start.
+    Returns `false` and degrades on any failure.
+  - `positionSeconds()`: the rhythm master clock (`AL_SEC_OFFSET`). `durationSeconds()` beside it.
+  - `waveform()`: a 512-bucket 0..1 peak profile, computed once at decode time before the native PCM is
+    freed.
+  - `loadSfx(resource)` / `playSfx(gain)`: the one-shot channel, rewind + retrigger for back-to-back miss
+    sounds. Load after a successful `play`.
+  - transport: `setVolume`, `stop`, `pause`/`resume`. Pause preserves `AL_SEC_OFFSET` so the rhythm clock
+    freezes and continues exactly. `resume` only un-pauses a genuinely paused source, never replays a
+    stopped one.
+  - `seekSeconds(sec)`: editor audition, `AL_SEC_OFFSET` is writable on our non-streaming buffer.
+    `playFrom(sec)`: seek then play, so the editor's "play from the cursor" works from paused or stopped.
+  - `close()`: full teardown of both source/buffer pairs, the context, and the device.
+  - `readResource(String)`: a `"file:"` resource reads off disk (user songs under `<gameDir>/BAMFOS/songs/`),
+    anything else is a bundled classpath resource. Public because `SongAnalysis` reuses this exact read,
+    analysis sees the same bytes playback does.
 
 ## How it works
-Two entry points share one decode-and-analyze core. `play` (live) and `analyzeOnly` (headless) both call
-`readResource` to pull the OGG off the classpath, `STBVorbis.stb_vorbis_decode_memory` to get interleaved PCM, then
-run `computeWaveform`, `computeOnsets`, and `SpectralAnalyzer.analyze(pcm, channels, frames, sampleRate, cfg)` —
-storing the results in the `volatile` feature fields *before* the native PCM is freed in the `finally` block. `play`
-additionally opens the AL device/context, uploads the PCM with `alBufferData`, and starts the source. From then on
-the rhythm screen polls `positionSeconds()` as its clock, reads the analysis getters once to build the chart, draws
-the `waveform()`, and drives `pause`/`resume`/`setVolume`/`playSfx` from gameplay. At hand-off, `close()` deletes
-everything and releases the device. The auto-charter only ever *reads* the feature getters; it never drives the
-device.
+`play` calls `readResource` for the OGG bytes, decodes to PCM, computes duration + waveform, opens the AL
+device/context, uploads, and starts the source (the decode buffers are freed in `finally`, AL copied them).
+`bios/` reaches it through two `BiosContext` seams: `startSongAudio(SongDef)` for the rhythm/special/editor
+screens (the provider closes the old player, plays the song, pauses at 0 for the lead-in) and
+`playMusic(resource)` for plain music (jukebox preview, the cutscene jingle, tetris themes). From then on
+gameplay polls `positionSeconds()` as its clock, draws `waveform()`, and drives the transport. At hand-off,
+`close()` deletes everything and releases the device.
 
-## Boundaries
-Depends on: LWJGL (`openal.AL`/`ALC`/`AL10`/`AL11`/`ALC10`, `stb.STBVorbis`, `system.MemoryStack`/`MemoryUtil`/
-`LibCStdlib`), `core.tuning.DetectorConfig`, and `core.dsp.SpectralAnalyzer` (which produces the `Result` record
-unpacked into the feature fields). Imports **no** `bios/` classes and **no** Minecraft classes — the core/-never-
-imports-bios/ invariant holds, and the no-Minecraft-refs rule keeps it valid in the service jar. Depended on by the
-`bios/` presentation host (the rhythm/special/cutscene screens, via the `BiosContext` audio seam) and by the
-headless `genCharts` chart generator. Invariants: the OpenAL context is render-thread-owned; only one
-`AudioPlayer`/context is current at a time (the reason the SFX rides in the same context); `analyzeOnly` instances
-are read-only (never `ready`); every public op is best-effort and swallows failures into `status`/`no audio`.
+## Dependencies
+- Depends on LWJGL only (OpenAL, STB Vorbis, native memory helpers). It imports nothing from `core/tools/`,
+  the arrow points the other way: `tools/audio/SongAnalysis` imports `AudioPlayer.readResource`.
+- No `bios/` classes, no Minecraft classes, so it stays valid in the service jar.
+- Depended on by the `bios/` presentation host (the `startSongAudio`/`playMusic` seams and the screens'
+  transport calls) and by `SongAnalysis` (the shared read only).
+- The OpenAL context is render-thread-owned, and only one `AudioPlayer`/context is current at a time (the
+  reason the SFX rides in the same context). Every public op is best-effort and swallows failures into
+  `status`/"no audio". `close()` MUST run before the Minecraft hand-off.

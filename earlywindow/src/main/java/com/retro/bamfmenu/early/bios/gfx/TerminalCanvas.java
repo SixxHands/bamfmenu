@@ -13,9 +13,6 @@ import static org.lwjgl.opengl.GL32C.*;
    math, the layout constants, and the pure string helpers (clip/rule/center). The provider refreshes the
    per-frame state (framebuffer size + theme) via setFrame() once per frame before any screen draws.
 
-   .75: the text core landed in STEP 1; STEP 2 adds the colours / fb-size / layout so screens have a
-   complete rendering context. The scissor-cleared popups + the cutscene wipe still live provider-side and
-   fold in with their owning screens (they need the per-frame bg-clear the provider's renderFrame owns).
    This is the only early.screen class that touches GL, and it holds zero game state; constructed on the
    render thread in initRender after the font is built. */
 public final class TerminalCanvas {
@@ -42,6 +39,12 @@ public final class TerminalCanvas {
     private int fbWidth = 854;
     private int fbHeight = 480;
     private boolean blueTheme;
+
+    /* The one real-BITMAP slot (the wysi cutscene's full-quality reveal): a canvas-owned GL texture on its own
+       unit (7, one above the RichFont atlas on 6), uploaded lazily when the frame key changes. */
+    private static final int IMAGE_TEX_UNIT = 7;
+    private int imageTexId;
+    private Object imageKey;
 
     public TerminalCanvas(ElementShader shader, RichFont font, SimpleBufferBuilder buffer, int fontTex) {
         this.shader = shader;
@@ -93,7 +96,7 @@ public final class TerminalCanvas {
         return Math.max(1, LOGICAL_W * fbHeight / Math.max(1, fbWidth));
     }
 
-    /* ---- theme-aware colours (read the per-frame theme) ---- */
+    // theme-aware colours (read the per-frame theme)
     public int cFg() {
         return blueTheme ? 0xFFFFFFFF : FG;
     }
@@ -110,11 +113,10 @@ public final class TerminalCanvas {
         return FG_GOLD;
     }
 
-    /* ---- GL text primitives (render thread, inside the provider's bound FBO) ---- */
+    // GL text primitives (render thread, inside the provider's bound FBO)
 
     /* The per-frame preamble every screen runs before drawing: activate the shader, set the logical canvas
-       size, bind the font texture, select the FONT render type. Replaces the 4-line block formerly copied
-       into each draw* method. */
+       size, bind the font texture, select the FONT render type. */
     public void beginFrameShader(int logicalW, int logicalH) {
         shader.activate();
         shader.updateScreenSizeUniform(logicalW, logicalH);
@@ -138,6 +140,52 @@ public final class TerminalCanvas {
         buffer.draw();
     }
 
+    /* Draw a REAL bitmap as a textured quad at (x,y) sized w x h logical px, the ONE non-glyph thing the
+       terminal ever shows (the wysi cutscene's full-quality reveal). Pixels are ARGB (BufferedImage.getRGB
+       order), uploaded to the canvas-owned texture only when `key` changes (per-frame draws of the same
+       frame re-use the upload). `tint` is ABGR like text(): pass cBright() for the image as-is, or drop the
+       alpha byte to fade it against the black terminal. Restores the FONT shader state + active texture
+       unit, so surrounding text draws are unaffected. */
+    public void image(int x, int y, int w, int h, int imgW, int imgH, int[] argb, Object key, int tint) {
+        if (argb == null || imgW <= 0 || imgH <= 0 || argb.length < imgW * imgH) {
+            return;
+        }
+        if (imageTexId == 0) {
+            imageTexId = glGenTextures();
+            glActiveTexture(GL_TEXTURE0 + IMAGE_TEX_UNIT);
+            glBindTexture(GL_TEXTURE_2D, imageTexId);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        if (!java.util.Objects.equals(imageKey, key)) {
+            imageKey = key;
+            java.nio.ByteBuffer px = org.lwjgl.system.MemoryUtil.memAlloc(imgW * imgH * 4);
+            for (int i = 0; i < imgW * imgH; i++) { // ARGB int -> RGBA bytes
+                int p = argb[i];
+                px.put((byte) (p >> 16)).put((byte) (p >> 8)).put((byte) p).put((byte) (p >>> 24));
+            }
+            px.flip();
+            glActiveTexture(GL_TEXTURE0 + IMAGE_TEX_UNIT);
+            glBindTexture(GL_TEXTURE_2D, imageTexId);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, imgW, imgH, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            glActiveTexture(GL_TEXTURE0);
+            org.lwjgl.system.MemoryUtil.memFree(px);
+        }
+        shader.updateTextureUniform(IMAGE_TEX_UNIT);
+        shader.updateRenderTypeUniform(ElementShader.RenderType.TEXTURE);
+        buffer.begin(SimpleBufferBuilder.Format.POS_TEX_COLOR, SimpleBufferBuilder.Mode.QUADS);
+        buffer.pos(x, y).tex(0, 0).colour(tint).endVertex();
+        buffer.pos(x + w, y).tex(1, 0).colour(tint).endVertex();
+        buffer.pos(x, y + h).tex(0, 1).colour(tint).endVertex();
+        buffer.pos(x + w, y + h).tex(1, 1).colour(tint).endVertex();
+        buffer.draw();
+        shader.updateTextureUniform(fontTex); // back to glyph state for whoever draws next
+        shader.updateRenderTypeUniform(ElementShader.RenderType.FONT);
+    }
+
     /* The widest line's font-measured pixel width, for centering ASCII-art blocks. */
     public int blockWidth(String[] lines) {
         int w = 1;
@@ -151,7 +199,7 @@ public final class TerminalCanvas {
        centered within it. Because we use the ASCII look by choice (not a real fixed terminal), art does not have
        to match the base text grid: this lets a "pop" (e.g. the rhythm judgment) drop in arbitrarily big/long art
        and always have it fill its own reserved area instead of overflowing the playfield. It works by the
-       header-logo trick -- temporarily remap the logical canvas so the SAME font renders bigger/smaller -- then
+       header-logo trick (temporarily remap the logical canvas so the SAME font renders bigger/smaller), then
        restores the body coordinate space before returning, so later draws this frame are unaffected. Aspect is
        preserved (uniform scale); ABGR colour. No-op for empty art or a degenerate rect. */
     public void drawScaledCentered(String[] lines, int rx, int ry, int rw, int rh, int colour) {
@@ -239,7 +287,7 @@ public final class TerminalCanvas {
         glDisable(GL_SCISSOR_TEST);
     }
 
-    /* ---- pure terminal-string helpers (no GL) ---- */
+    // pure terminal-string helpers (no GL)
 
     /* Truncate a line to at most maxChars columns. */
     public static String clip(String s, int maxChars) {

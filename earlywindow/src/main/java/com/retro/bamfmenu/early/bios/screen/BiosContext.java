@@ -1,202 +1,191 @@
 package com.retro.bamfmenu.early.bios.screen;
 
-import com.retro.bamfmenu.early.bios.Mode;
-import com.retro.bamfmenu.early.core.audio.AudioPlayer;
-import com.retro.bamfmenu.early.core.rhythm.RhythmEngine;
-import com.retro.bamfmenu.early.core.tuning.DetectorConfig;
-import com.retro.bamfmenu.early.core.song.SongDef;
-import com.retro.bamfmenu.early.core.song.SongDifficulty;
-
 import java.util.List;
 
-/* The cross-cutting host seam screens call back into. MAP 1 of the decomposition analysis showed the
-   provider's CORE -- the `state` machine, the single AudioPlayer, the transitional lead-in, persistence,
-   and the overlay/jukebox state -- resists single-screen ownership, so it STAYS provider-owned and screens
-   reach it only through this small interface. Crucially the provider remains the SOLE writer of `state`
-   (screens only request transitions via enterMode, which writes state last/once), so the hand-off hold loop
-   never observes a half-built mode.
+import com.retro.bamfmenu.early.bios.host.Mode;
+import com.retro.bamfmenu.early.core.audio.AudioPlayer;
+import com.retro.bamfmenu.early.core.rhythm.model.Note;
+import com.retro.bamfmenu.early.core.rhythm.model.SongDef;
+import com.retro.bamfmenu.early.core.rhythm.model.SongDifficulty;
 
-   Backed by a provider-side adapter; screens hold a BiosContext, never the TerminalWindowProvider type, so
-   no screen can reach the render-thread executor / renderLock / GL handles. The surface grows as screens
-   are extracted; this is the .75 STEP 0 baseline. */
+/**
+ * The host screens call back into this context for the provider-owned core: state,
+ * the single AudioPlayer, lead-in, and persistence.
+ */
 public interface BiosContext {
 
-    /* ---- transitions: the provider stays the SOLE `state` writer; screens only request ---- */
+    // for when we request to change the active screen `state`
+    /** Requests to change the active screen state mode. */
     void enterMode(Mode mode);
 
+    /** Retrieves the current mode active in the BIOS context. */
     Mode mode();
 
-    /* ---- the single shared AudioPlayer (render-thread owned); may be null when nothing is playing ---- */
+    // shared AudioPlayer state, null when nothing is playing
+    /** Retrieves the shared AudioPlayer state (null when nothing is playing). */
     AudioPlayer audio();
 
+    /** Closes the active audio resources and player. */
     void closeAudio();
 
-    /* ---- the shared transitional lead-in + the special-event input lock ---- */
+    // shared transitional lead-in + special-event input lock
+    /** Arms the shared transitional lead-in and special-event input lock. */
     void armLeadIn();
 
-    boolean holdingLeadIn();
+    /** Checks whether the system is currently waiting on a lead-in. */
+    boolean holdingLeadIn(); // currently stuck/waiting on a lead in?
 
-    boolean inSpecialEvent();
+    /** Checks if the system is currently in a special screen sequence that blocks generic user inputs. */
+    boolean inSpecialEvent(); // currently in a special screen sequence? when true, it blocks generic user inputs.
 
-    /* ---- overlays (host-composited layers, not Modes) ---- */
-    boolean volumeMenuOpen();
+    // Overlay menus, different from modes
+    /** Returns whether the volume control menu overlay is open. */
+    boolean volumeMenuOpen(); 
 
+    /** Returns whether the pause menu overlay is open. */
     boolean pauseMenuOpen();
 
+    /** Opens the pause menu overlay. */
     void openPauseMenu();
 
-    /* Defensive clear of the active game's input queues (the pause overlay does this so a stale press does
-       not replay on resume). */
-    void clearGameInputQueues();
+    /** Clears pending game input queues so stale keypresses do not replay on resume. */
+    void clearGameInputQueues(); // we pause overlay calls so a stale press does not replay on resume.
 
-    /* ---- persistence: scores / keybinds / flags, written through to the obfuscated BiosCache ---- */
+    /** Persists configuration settings and scores to the cache file (BiosCache.dat). */
     void save();
 
-    /* ---- the jukebox selection a game launches + banks under ---- */
+    /** Gets the currently selected song definition. */
     SongDef currentSong();
 
+    /** Gets the current song difficulty. */
     SongDifficulty currentDifficulty();
 
-    /* ---- launching a song's audio (the close+create+play+pause+setVolume both RHYTHM and SPECIAL share) ----
-       Closes any current audio, decodes + plays the song's OGG with the given detector config (paused at ~0
-       for the lead-in, at the saved volume) and makes it the single shared AudioPlayer. Returns the player, or
-       null if the OGG is unreadable (the player is still set, so a later closeAudio frees it). */
-    AudioPlayer startSongAudio(SongDef song, DetectorConfig detector);
+    /** Loads the sound file for a designated song. Starts the song's OGG paused at the saved volume. Null if the OGG is unreadable */
+    AudioPlayer startSongAudio(SongDef song);
 
-    /* Set the SETUP notice line (e.g. an error to show after returning to BIOS). */
+    /** Sets the text notice message inside the interface overlay */
     void setNotice(String notice);
 
-    /* Clear any pending transitional lead-in (e.g. quitting during it). */
-    void clearLeadIn();
+    /** Reset and remove any pending lead-ins */
+    void clearLeadIn(); 
 
-    /* ---- Tetris ("Enable Mechanics"): play its theme immediately (no lead-in) at the saved volume ---- */
+    /** Immediately plays sound/music from a resource path. */
     void playMusic(String resource);
 
-    /* The persisted Tetris high score (part of "the cache"). */
+    /** Get the saved high score for Tetris. */
     int tetrisHighScore();
 
+    /** Sets the saved high score for Tetris. */
     void setTetrisHighScore(int score);
 
-    /* Return to BIOS SETUP landing on a given option row (>=0) with an optional notice, clearing any open
-       confirm/password dialog. The provider stays the pack host of the SETUP-nav fields. */
+    /** Aborts active mini-game instances and returns the screen to the main BIOS Setup */
     void exitToSetup(int row, String notice);
 
-    /* ---- F2 volume overlay: the value is persisted + read by the audio launch, so it stays provider-side ---- */
+    /** Gets the current system volume scalar parameter. */
     int volume();
 
+    /** Sets the global volume parameter. */
     void setVolume(int v);
 
-    /* Flash the brief red ERROR (an action blocked by a special event, e.g. F2 during the cutscene). */
+    /** Trigger error flash for an action blocked by a special event */
     void flashError();
 
-    /* ---- in-game pause overlay needs ---- */
-    /* Quit from the pause menu: leave whichever game mode is active (routes to the screen's onExit). */
+    // pause overlay needs
+    /** Exit active mini-game instance. */
     void exitCurrentGame();
 
-    /* The rhythm lane keybinds as the LIVE int[] (the remap UI mutates it in place, then calls save()). */
+    /** Active keyboard bind keys for rhythm lanes */
     int[] laneKeys();
 
-    /* A short display name for a GLFW key code (the remap UI). */
+    /** Short display name for a GLFW key code. */
     String keyName(int key);
 
-    /* ---- the render-thread-only frame counter (POST reveal + spinners) ---- */
+    /** Render-thread-only frame counter. */
     int frame();
 
-    /* ---- rhythm / results hand-off ---- */
-
-    /* Set the active jukebox song (RhythmScreen.onEnter resolves a default + records it). */
+    /** Specifies the current song definition. */
     void setCurrentSong(SongDef song);
 
-    /* The dev "Safe For Retro" no-fail/no-score flag, read when building the engine + banking. */
+    // debug/dev flag, blocks logging
+    /** Checks if developer mode is active. */
     boolean safeForRetro();
 
-    /* Bank a finished rhythm run: high score on any run, grade only on a completion, Recovery unlock on a
-       completion (all no-ops in Safe For Retro). Returns whether this run set a new high score. */
+    /** Logs final track completions and performance scores to disk. All no-ops in Safe For Retro. returns whether this run set a new high score. */
     boolean bankRhythm(SongDef song, SongDifficulty diff, int score, int perfectPct, boolean completed);
 
-    /* Hand the finished run's numbers to the RESULTS card, free the audio, and switch to Mode.RESULTS. */
+    /** display the final scoreboard cards screen. */
     void showResults(boolean completed, int score, int grade, boolean newBest);
 
-    /* Perfect-% -> letter grade (S/A/B/C/D/F), for the RESULTS rank line. */
+    /** Translates raw percentage. Perfect-% -> letter grade (S/A/B/C/D/F). */
     String gradeLetter(int perfectPct);
 
-    /* Start (or restart) the rhythm game for the current song -- the single funnel for the jukebox launch,
-       the cutscene hand-off, and RESULTS retry. */
+    /** Transitions mode state and begins a rhythm song game phase. Also cutscene hand-off, RESULTS retry. */
     void startRhythm();
 
-    /* Leave the rhythm/results flow back to BIOS SETUP (frees audio + engine). */
+    /** Ends active rhythm plays and return back to BIOS SETUP. frees audio/engine. */
     void exitRhythm();
 
-    /* ---- cutscene ---- */
-
-    /* Draw the BIOS SETUP screen underneath (the cutscene's opening wipe erases it). Backed by the provider's
-       SETUP renderer -- the ONE SetupScreen once SETUP is extracted; never a second instance. */
+    // cutscene needs (CutsceneScreen)
+    /**  Draws the underlying Bios Setup UI graphics beneath overlay screens/wipes. */
     void renderSetupUnder();
 
-    /* The Recovery-Mode face art frames (eyes / smile). Shared with the SETUP achievement panel so they stay
-       provider-owned; the cutscene reads them for the stab-synced reveal. */
+    // The Recovery face art frames (eyes / smile), shared with the SETUP achievement panel so they stay provider-owned.
     String[] recoveryFaceA();
 
-    String[] recoveryFaceB();
+    String[] recoveryFaceB(); // why are these living here?
 
-    /* ---- chart editor load/save (file I/O stays provider-side, like save()/BiosCache) ---- */
+    // chart editor load/save (file I/O stays provider-side, like save()/BiosCache)
+    /** Load <gameDir>/BAMFOS, the absolute path string pointing to the active BAMFOS configuration workspace.). */
+    String bamfosDir();
 
-    /* The editor's chart text for a song-difficulty: the on-disk BAMFOS save if present, else the bundled
-       chart (the seed to remap), else null (start a new chart). */
+    /** Loads the chart layout text content for a song. */
     String loadChartText(String songId, String token);
 
-    /* Best-effort write of the editor's chart to <gameDir>/BAMFOS/songs/<id>/<token>.chart; returns success
-       (degrades to a notice on failure, never throws on the render thread). */
+    /** Writes the chart layout text to disk. Returns true if successful. */
     boolean saveChart(String songId, String token, String text);
 
-    /* ---- chart editor mouse: convert a GLFW window pixel to the logical drawing space, + the live
-       cursor position (window space), so the editor hit-tests clicks + tracks drags on the render thread ---- */
+    // Mapping a physical GLFW window X/Y coordinate into the editor logical space.
+    /** Maps a physical GLFW window X coordinate into the editor logical space. */
     double editorLogicalX(double winX);
 
+    /** Maps a physical GLFW window Y coordinate into the editor logical space. */
     double editorLogicalY(double winY);
 
+    /** Gets the raw horizontal cursor position in GLFW window space. */
     double editorMouseWinX();
 
+    /** Gets the raw vertical cursor position in GLFW window space. */
     double editorMouseWinY();
 
-    /* ---- chart editor TEST PLAY: run the editor's in-memory chart in the real rhythm game ---- */
+    // chart editor test play: run the editor's in-memory chart in the real rhythm game
+    /** Loads customized map layouts directly inside a testing playground rhythm session. Runs a COPY, the editor's notes are never changed. */
+    void startRhythmTest(List<Note> notes, int startMs, int approachMs);
 
-    /* Launch the rhythm game on a COPY of these notes, starting at startMs (notes before startMs are dropped),
-       at the given note fall speed (approachMs; 0 = the default), and route the run's end/quit back to the editor
-       instead of RESULTS/SETUP. */
-    void startRhythmTest(List<RhythmEngine.Note> notes, int startMs, int approachMs);
+    /** Returns and clears the pending test chart, null for a normal play. */
+    List<Note> consumeTestChart();
 
-    /* The pending editor-test chart for RhythmScreen.onEnter to use instead of the committed chart (returns it
-       AND clears it; null for a normal play). */
-    List<RhythmEngine.Note> consumeTestChart();
-
-    /* The song time the editor test starts at (the cursor for P, 0 for O). */
+    /** Gets the start time offset in milliseconds chosen for the playtest run. */
     int testStartMs();
 
-    /* The note fall speed (approachMs) the editor test should use (0 = the default). */
+    /** Gets the speed approach travel time in milliseconds chosen for the playtest run. */
     int testApproachMs();
 
-    /* Whether the current rhythm run is an editor test, so RhythmScreen routes its end back to the editor. */
+    /** Checks whether a chart playtest run is currently active. */
     boolean editorTestActive();
 
-    /* End an editor test: re-establish the editor (audio + Mode.EDITOR) WITHOUT reloading its in-memory chart. */
+    /** Stops testing sessions and returns the player directly to the map editor state. */
     void returnToEditor();
 
-    /* ---- chart editor: on-disk user songs ---- */
-
-    /* User songs discovered under <gameDir>/BAMFOS/songs/ (the pack's forks + drop-ins), each with a file: OGG. */
+    // chart editor: on-disk user songs
+    /** Finds and retrieves <gameDir>/BAMFOS/songs/ forked bundled songs, and custom external songs imported locally by the user. */
     List<SongDef> userSongs();
 
-    /* Fork a bundled song: copy its WHOLE folder to a new numbered id under BAMFOS/songs/, returning the new
-       on-disk SongDef (or null on failure). */
+    /** Copies a bundled song to the local user directory to make it editable. */
     SongDef forkSong(SongDef bundled);
 
-    /* Mirror the on-disk layout: rename a user song's folder to match its OGG base name (if needed + safe),
-       synchronously, returning the (possibly renamed) SongDef. Returns the input unchanged when no rename is
-       needed/safe, and falls back to the input on failure (never null for a valid input). */
+    /** Renames a user song's folder to match its OGG base name when needed, never null for a valid input. */
     SongDef normalizeUserSong(SongDef userSong);
 
-    /* Create a new empty user song folder (next-free new-song / new-song-N), fully scaffolded but with no audio
-       yet; returns its id (folder name), or null on failure. */
+    /** Generates an empty custom track directory skeleton. */
     String createNewSong();
 }

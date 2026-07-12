@@ -8,16 +8,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /* Shared ASCII-art utilities + constants, relocated out of TerminalWindowProvider so song/panel code can
-   load and colour art WITHOUT depending on the god-class. First step of the project restructure (relocate
-   shared utilities to a neutral public home -- see docs/BAMF_STRUCTURE_PLAN.md ). Pure stdlib, no
+   load and color art WITHOUT depending on the god-class. First step of the project restructure (relocate
+   shared utilities to a neutral public home, see docs/BAMF_STRUCTURE_PLAN.md runtime). Pure stdlib, no
    GL/MC, safe in the service jar. Resources resolve from the classpath root exactly as before (the loader
-   class doesn't matter -- both are in this one jar). */
+   class doesn't matter, both are in this one jar). */
 public final class Art {
 
     private Art() {
     }
 
-    /* The four lane colours (ABGR): purple, yellow, green, red. */
+    /* The four lane colors (ABGR): purple, yellow, green, red. */
     public static final int[] LANE_COLORS = {0xFFFF00AA, 0xFFFFFF00, 0xFF00FF00, 0xFF0000FF};
 
     /* Load a bundled ASCII-art resource into trimmed lines, sanitizing un-bakeable glyphs to spaces. A

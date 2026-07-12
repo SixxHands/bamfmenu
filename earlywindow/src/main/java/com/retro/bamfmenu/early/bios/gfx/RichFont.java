@@ -21,7 +21,7 @@ import org.lwjgl.stb.STBTTPackedchar;
 /* Our own bitmap-font baker for the early window, so we are NOT limited to FML SimpleFont's ASCII-only
    atlas (SimpleFont bakes only codepoints 32..126 AND re-encodes every string to US-ASCII, collapsing any
    non-ASCII to '?'). RichFont bakes a bundled TTF (Consolas, for the authentic Windows look) over SEVERAL
-   Unicode ranges -- printable ASCII plus box-drawing, block-element/shade and arrow glyphs -- into one
+   Unicode ranges (printable ASCII plus box-drawing, block-element/shade and arrow glyphs) into one
    GL_RED atlas via STBTruetype, and draws BY CODEPOINT. It reuses FML's public SimpleBufferBuilder +
    ElementShader.RenderType.FONT to draw, so the GL path is identical to SimpleFont's; only the glyph set and
    lookup differ. The baked quads use the SAME baseline convention as SimpleFont (origin at y = fontSize), so
@@ -160,7 +160,7 @@ public final class RichFont {
     }
 
     /* Emit quads for one text run into bb (which the caller has begun in POS_TEX_COLOR/QUADS with our atlas
-       bound and the FONT render type active). Iterates by char -- every baked range is in the BMP. Same
+       bound and the FONT render type active). Iterates by char, every baked range is in the BMP. Same
        baseline + advance model as SimpleFont, so existing draw coordinates are unchanged. */
     public void draw(int x, int y, SimpleBufferBuilder bb, String text, int colour) {
         int startX = x;

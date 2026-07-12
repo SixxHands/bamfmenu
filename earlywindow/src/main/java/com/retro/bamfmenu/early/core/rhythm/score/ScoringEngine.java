@@ -1,14 +1,14 @@
 package com.retro.bamfmenu.early.core.rhythm.score;
 
 /* The uniform scoring / combo / multiplier / health state machine, lifted VERBATIM out of RhythmEngine so it can be driven by ANY game mode, not just the rhythm highway. The rhythm game
-   classifies a press's timing window into a Grade then calls apply(); a bespoke SPECIAL classifies its OWN
-   conditions into Grades and calls the IDENTICAL apply() -- the economy is byte-identical because it lives
+   classifies a press's timing window into a Grade then calls apply; a bespoke SPECIAL classifies its OWN
+   conditions into Grades and calls the IDENTICAL apply, the economy is byte-identical because it lives
    only here. Single-threaded (render thread), like the rest of the early-window game logic; nothing here is
    synchronized.
 
    PERMISSIVE BY CONSTRUCTION: a caller emits only the grades it uses. {PERFECT, MISS}-only works; unused
    grade branches never fire. FAIL (stray-input penalty) and tickDrain (the time-based meter decay) are
-   opt-in -- a mode with no input-bounds / no song clock simply never calls them. The numbers are a ScoreRules
+   opt-in, a mode with no input-bounds / no song clock simply never calls them. The numbers are a ScoreRules
    the caller supplies, so a special can soften/disable a penalty while keeping the same combo machine. */
 public final class ScoringEngine implements ScoreView {
 
@@ -76,7 +76,7 @@ public final class ScoringEngine implements ScoreView {
                     pts = rules.okayPts();
                     health += rules.hOkay();
                     type = "OKAY";
-                } else { // BAD: a late catch -- counts + scores, keeps the combo, knocks the meter down one
+                } else { // BAD: a late catch, counts + scores, keeps the combo, knocks the meter down one
                     bad++;
                     combo++;
                     comboPerfects = Math.max(0, comboPerfects - 1);
@@ -100,7 +100,7 @@ public final class ScoringEngine implements ScoreView {
                 health = clamp(health + rules.hMiss());
                 setJudgment("MISS", stampMs);
                 return;
-            case DROP: // a dropped sustain -- combo break + lighter penalty, no tally. (Clamp deferred to clampAndLatch.)
+            case DROP: // a dropped sustain, combo break + lighter penalty, no tally. (Clamp deferred to clampAndLatch.)
                 breakCombo();
                 health += rules.hDrop();
                 setJudgment("DROP", stampMs);
@@ -123,7 +123,7 @@ public final class ScoringEngine implements ScoreView {
         }
     }
 
-    /* Drain the multiplier meter by 1 per second of song time (continues through note gaps -- no
+    /* Drain the multiplier meter by 1 per second of song time (continues through note gaps, no
        forgiveness); only the multiplier decays, the combo streak + bucket are untouched. When the meter
        empties the clock re-syncs to songMs so a freshly-earned perfect is not instantly over-drained after a
        lag stall or audio scrub. Time-based + opt-in: call ONCE per frame BEFORE per-note work; a caller with
@@ -148,7 +148,7 @@ public final class ScoringEngine implements ScoreView {
     }
 
     /* End the current combo: bank its accumulated (multiplied) points into the score and reset the streak +
-       meter. Internal -- triggered by MISS/FAIL/DROP via apply(). */
+       meter. Internal, triggered by MISS/FAIL/DROP via apply(). */
     private void breakCombo() {
         score += comboBucket;
         comboBucket = 0;
@@ -156,7 +156,7 @@ public final class ScoringEngine implements ScoreView {
         combo = 0;
     }
 
-    /* Bank any pending combo points into the score WITHOUT resetting the streak -- for a natural finish, where
+    /* Bank any pending combo points into the score WITHOUT resetting the streak, for a natural finish, where
        the song ends mid-combo and the bucket should still count. */
     public void flushPending() {
         score += comboBucket;
@@ -183,7 +183,7 @@ public final class ScoringEngine implements ScoreView {
         return h < 0f ? 0f : (h > rules.healthMax() ? rules.healthMax() : h);
     }
 
-    /* ---- ScoreView (read-only) ---- */
+    // ScoreView (read-only)
     @Override public int score() { return score; }
     @Override public int combo() { return combo; }
     @Override public int maxCombo() { return maxCombo; }

@@ -48,6 +48,9 @@ public class Engine {
        kill the whole Minecraft JVM, not just DOOM. */
     public static volatile boolean HEADLESS = false;
     public static volatile boolean RUN = true;
+    /* EMBEDDED: where savegames live (doomsavN.dsg). Empty = the process working dir (vanilla behavior);
+       the host sets an absolute dir WITH a trailing separator before boot so saves land in BAMFOS/doom/. */
+    public static volatile String SAVE_DIR = "";
 
     /**
      * Mocha Doom engine entry point

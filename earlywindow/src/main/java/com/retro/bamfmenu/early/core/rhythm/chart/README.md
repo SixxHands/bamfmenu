@@ -1,68 +1,62 @@
-# early/core/rhythm/chart — the chart seam: where BAMFBEAT notes come from, and the committed `.chart` model/format
-## Intent
-This layer is the single seam between *"where the note chart comes from"* and the rhythm game, plus the in-memory
-model and text format for a committed chart. It exists so the head (`RhythmScreen.onEnter`) is simply *"fed a
-chart"* — it only ever calls `Charter.build(req)` and reads the returned `List<RhythmEngine.Note>` — while the
-*source* of those notes can swap in ONE place. Per the plan doc's , the runtime stops DSP-charting live
-every play and instead loads a committed `songs/<id>/<difficulty>.chart`; the `Charter` interface makes that a true
-one-line swap from `DspCharter` to `FileCharter`. `Chart`/`ChartIO` are the Phase-4 on-disk form; `ChartBootstrap`
-is the dev-only generator that commits those files so file-loaded play reproduces today's live output exactly.
-Everything here is pure data + logic — no GL, no OpenAL, no Minecraft.
+# early/core/rhythm/chart, the chart seam
+## Features
+The one seam between where a chart comes from and everything that consumes charts, plus the in-memory model
+and text format for a committed chart. Gameplay loads committed charts, no DSP at play:
+`RhythmScreen.onEnter` fetches chart text via `ctx.loadChartText(songId, token)` (on-disk `BAMFOS/songs`
+first, then bundled `/songs/<id>/<token>.chart`) and parses it with `ChartIO.read`, so editor saves and
+user/osu-imported songs load off-disk too. `Charter` stays the seam for generated charts; its one live caller
+is the dev `genCharts` bootstrap (`tools/gen/ChartBootstrap` -> `impl/DspCharter`), which commits the files
+gameplay then loads. `ChartRequest` was lifted here from `impl/`, fixing the inversion where the
+interface's own parameter type lived below its implementations; it carries a `SongAnalysis` feature bank,
+not the old fused `AudioPlayer`. `ChartBootstrap` itself was evicted to `tools/gen/`.
 
 ## Components
-- **`Charter`** (interface) — the ONE generate seam. Single method `List<RhythmEngine.Note> build(ChartRequest req)`,
-  never null; an empty list means "no chart" and the caller decides the fallback. Implementations live in `impl/`.
-- **`Chart`** (record) — one committed difficulty's chart: `String difficulty` (also the filename token), `double bpm`
-  (informational tempo hint, 0 = auto), `int preRollMs` (Phase-4 silent scroll-in lead-in; `0` today), and
-  `List<RhythmEngine.Note> notes` (sorted ascending by `timeMs` on load). `static final int VERSION = 1` is bumped
-  only on incompatible format changes; helper `isEmpty()`. Pure data, the in-memory form of a `.chart` file.
-- **`ChartIO`** (final, static utility; private ctor) — read/write the hand-rolled, dependency-free `.chart` text
-  format. `static String write(Chart)` serializes (header `key value` lines + `timeMs lane holdMs` note rows, notes
-  written in time order); `static Chart read(String text, String fallbackDifficulty)` parses **tolerantly** — unknown
-  header keys ignored, missing ones defaulted, malformed note rows skipped, never throws (worst case = empty notes).
-  The header `notes N` count is informational; the actual rows are trusted. Private helpers `parseNote` (rejects
-  negative time/lane/hold; `holdMs` optional), `parseDouble`, `trimNum` (whole numbers print without `.0`).
-- **`ChartBootstrap`** (final; `main`) — DEV-ONLY Phase-4 bootstrap, run **headless** via the `:earlywindow:genCharts`
-  Gradle task, **never invoked at runtime**. For every `SongRegistry.SONGS` song it decodes audio via
-  `AudioPlayer.analyzeOnly()` (no OpenAL/GL), runs the EXACT runtime charter `new DspCharter().build(...)` with the
-  song's own `DetectorConfig` (forced `withLeadInMs(0)` to keep opening notes), wraps the notes in a `Chart`, and
-  writes `<outputDir>/<songId>/normal.chart` via `ChartIO.write`. Usage: `java ... ChartBootstrap <outputDir>`.
+- **`Charter`** is the one generate seam: `List<Note> build(ChartRequest req)`, never null, an empty
+  list means "no chart" and the caller decides the fallback. Implementations live in `impl/`.
+- **`ChartRequest`** is the unchangeable inputs handed to a `Charter`. Forward-compat by design: a builder ignores
+  fields it does not need (`FileCharter` ignores the analysis, `DspCharter` ignores `chartPath`).
+  - `analysis`: the song's `SongAnalysis` feature bank, null for a file-backed build.
+  - `det`: the difficulty's tuned `DetectorConfig`.
+  - `bpm`: grid tempo hint, 0 = auto.
+  - `chartPath`: committed-chart resource path, only `FileCharter` reads it.
+- **`Chart`** is a record, one committed difficulty's chart, the in-memory form of a `.chart` file.
+  `VERSION` is bumped only on incompatible format changes, readers tolerate unknown/missing fields.
+  - `difficulty`: also the filename token.
+  - `bpm`: informational tempo hint, 0 = auto.
+  - `preRollMs`: silent scroll-in lead-in, 0 today.
+  - `approachMs`: per-chart note fall speed = ms of look-ahead, 0 = engine default.
+  - `notes`: sorted ascending by `timeMs` on load.
+- **`ChartIO`** is read/write for the hand-rolled, dependency-free `.chart` text format. `read` parses
+  tolerantly: unknown header keys ignored, missing ones defaulted, malformed note rows skipped, never throws,
+  worst case = empty notes.
+  - `write(Chart)`: header `key value` lines + `timeMs lane holdMs` note rows in time order; the `approach`
+    header is omitted when 0 so untouched charts stay clean.
+  - format leniency: the `notes N` header is informational, the rows are trusted; `holdMs` is optional so a
+    hand-author can write just `timeMs lane`.
 
 ## How it works
-There are two flows through this layer. **Authoring (dev-time):** `ChartBootstrap.main` walks `SongRegistry.SONGS`,
-decodes each song, calls `DspCharter` to produce notes that match what the live game charts today, packs them into a
-`Chart`, and serializes with `ChartIO.write` to `<id>/normal.chart`. **Runtime:** the head builds a
-`ChartRequest` and calls `Charter.build(req)`; the file-backed `impl/FileCharter` resolves `req.chartPath()`, reads
-the classpath resource, and calls `ChartIO.read` to parse it back into a `Chart`, returning `chart.notes()` to the
-engine. `Chart`'s note type is `RhythmEngine.Note` (lane/timeMs/holdMs) — the same type the engine consumes — so the
-seam keeps handing the head a `List<Note>` and nothing downstream changes regardless of which `Charter` is active.
+Three flows through this layer. Play: `RhythmScreen` resolves the `SongDifficulty`, loads text via
+`ctx.loadChartText`, parses with `ChartIO.read`, hands `notes()` to the engine and applies `approachMs()`
+when > 0; an empty result = "Uncharted" and the screen bails rather than start an empty highway (editor Test
+Play skips files entirely, the chart arrives via `ctx.consumeTestChart()`). Author: `ChartBootstrap.main`
+walks `SongRegistry.SONGS`, runs `SongAnalysis.analyze` headless, calls `new DspCharter().build(...)`, and
+writes through `ChartIO.write` to `<out>/<id>/normal.chart`. The editor (`EditChart`) and the osu importer
+write charts through `ChartIO` too, and `SongLoader` writes an empty chart when scaffolding a user song.
+Generate: any `Charter` impl consumes a `ChartRequest` and returns `List<Note>`, the same type the engine
+plays, so chart sources swap without consumers changing.
 
-```mermaid
-graph TD
-  Boot[ChartBootstrap.main] -->|DspCharter.build| Notes1[List Note]
-  Notes1 --> ChartRec[Chart record]
-  ChartRec -->|ChartIO.write| File[(songs/id/diff.chart)]
-  Head[RhythmScreen.onEnter] -->|build ChartRequest| Seam{Charter.build}
-  Seam -.runtime.-> FC[impl/FileCharter]
-  File --> FC
-  FC -->|ChartIO.read| ChartRec2[Chart record]
-  ChartRec2 -->|notes| Head
-  Seam -.editor/legacy.-> DC[impl/DspCharter]
-  DC --> Head
-```
-
-## Boundaries
-- **Depends on:** `early.core.rhythm.RhythmEngine` (for `Note`), and — only in the editor/bootstrap-facing classes —
-  `early.core.rhythm.chart.impl` (`ChartRequest`, `DspCharter`), `early.core.audio.AudioPlayer`,
-  `early.core.song.SongDef`/`SongRegistry`, and `early.core.tuning.DetectorConfig`. All `early.core.*` — this is core
-  logic, headless and editor-reusable.
-- **Depended on by:** the rhythm head/host in `bios/` (which calls `Charter.build` and consumes `Chart.notes()`),
-  the `impl/` charters, and the dev `genCharts` Gradle task.
-- **Invariants:** core never imports `bios/` — nothing here touches GL/OpenAL/Minecraft (pure data + parsing).
-  `ChartIO.read` never throws (tolerant parse). `Charter.build` is never null (empty list = "no chart"). `Chart`
-  notes are sorted ascending by `timeMs` after `read`/`write`. `ChartBootstrap` runs only headless at dev time.
+## Dependencies
+- Depends on the rhythm root's `Note` and, via `ChartRequest`, `tools/audio` (`SongAnalysis`,
+  `DetectorConfig`); the `impl/` children add `RhythmEngine` (`demoChart`), `tools.audio.dsp`, and
+  `Difficulty`, all `early.core.*`, headless and editor-reusable.
+- Depended on by the rhythm and editor screens in `bios/`, `rhythm/editor`'s `EditChart`, `SongLoader` (the
+  USER-song scaffold chart), `ChartBootstrap`, and `tools/convert/OsuManiaImport`.
+- Core never imports `bios/`, nothing here touches GL/OpenAL/Minecraft. `ChartIO.read` never throws,
+  `Charter.build` never returns null, `Chart` notes sort ascending by `timeMs` after `read`/`write`.
+- Gameplay never analyzes audio: `SongAnalysis` is produced only by dev tools and the Recovery cutscene's
+  stab-sync, never in the play path.
 
 ## Child layers
-- `impl/` — the `Charter` implementations and the `ChartRequest` carrier: `DspCharter` (runtime/editor DSP onset
-  charter chain), `FileCharter` (Phase-4 committed-chart loader + jukebox `hasChart` source of truth), `ChartRequest`
-  (immutable build inputs), `ChartGenerator` (the peak-picking note generator). See its README.
+- `impl/`, the `Charter` implementations: `DspCharter` (the DSP cascade off `req.analysis()`), `FileCharter`
+  (classpath committed-chart loader, currently no live callers), `ChartGenerator` (the peak-picking note
+  generators).

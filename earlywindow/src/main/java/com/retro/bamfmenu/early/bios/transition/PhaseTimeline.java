@@ -2,7 +2,7 @@ package com.retro.bamfmenu.early.bios.transition;
 
 /* A Transition backed by cumulative phase-END times (ms from start) + a wall-clock start. The reusable core
    the cutscene + the lead-in (and future transitions) share: nanoTime->ms, "which phase are we in", and "are
-   we past the end". No GL, no audio, no state beyond the start time -- pure timing. */
+   we past the end". No GL, no audio, no state beyond the start time, pure timing. */
 public abstract class PhaseTimeline implements Transition {
 
     private final long[] phaseEndsMs; // cumulative phase-end times (ascending); the last entry = total duration
@@ -44,7 +44,7 @@ public abstract class PhaseTimeline implements Transition {
         return phaseEndsMs.length == 0 || elapsedMs(nowNanos) >= phaseEndsMs[phaseEndsMs.length - 1];
     }
 
-    /* The cumulative end time (ms) of phase i -- for subclasses that expose named boundaries. */
+    /* The cumulative end time (ms) of phase i, for subclasses that expose named boundaries. */
     protected final long phaseEnd(int i) {
         return phaseEndsMs[i];
     }

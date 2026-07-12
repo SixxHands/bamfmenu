@@ -11,26 +11,11 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 
-/* reskins NeoForge's early bootstrap window (the "red screen" shown while mods load, before
-   Minecraft itself starts) into a black IBM/DOS-style terminal.
-
-   This runs on FancyModLoader's SERVICE module layer, BEFORE any @Mod/Minecraft/Mixin class exists,
-   so it must be completely self-contained: only FancyModLoader's early-display + the SPI + reflection,
-   never a Minecraft or mod class.
-
-   Rather than reimplement the GLFW window creation and (very fragile) hand-off to Minecraft, we
-   extend FancyModLoader's own DisplayWindow and inherit all of that untouched. We only change what is
-   DRAWN: force the background to black and replace its render-element list with the text-only elements
-   (the real startup log messages + progress + performance, in the bundled Monocraft monospace font),
-   dropping the Mojang logo and mascot. The result is a black terminal that reports exactly what is
-   loading, matching the in-game loading screen. All of this is best-effort reflection wrapped in
-   try/catch: if FancyModLoader's internals ever change, we silently fall back to the normal window and
-   the game still boots, because the inherited hand-off is never touched.
-
-   Discovery: META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider names
-   this class. Activation: the instance's config/fml.toml must set earlyWindowProvider="bamfmenu_terminal"
-   (and earlyWindowControl=true). That file is per-instance and cannot ship in the jar, so the pack
-   profile seeds it (see docs/BAMF_MENU_PLAN.md). DisplayWindow already implements ImmediateWindowProvider. */
+/* Reskins NeoForge's early "red screen" into a black DOS-style terminal by extending FML's own
+   DisplayWindow: the GLFW window + (very fragile) Minecraft hand-off stay inherited and untouched, we only
+   swap what is DRAWN. Runs on the SERVICE module layer, BEFORE any @Mod/Minecraft/Mixin class exists, so
+   nothing but early-display + the SPI + reflection may be touched here. All curation is best-effort
+   try/catch: if FML's internals change, the stock window renders and the game still boots. */
 public class TerminalEarlyWindow extends DisplayWindow {
 
     private boolean curated;
@@ -38,19 +23,15 @@ public class TerminalEarlyWindow extends DisplayWindow {
 
     @Override
     public String name() {
-        /* Legacy fallback provider (DisplayWindow subclass with FML's own elements). The real text
-           terminal is TerminalWindowProvider ("bamfmenu_terminal"); this one is kept selectable so that
-           if the from-scratch provider ever fails to hand off, config/fml.toml can point back here.
-           Must be unique and must NOT be "fmlearlywindow"; matched against config/fml.toml. */
+        /* Legacy fallback, kept selectable so config/fml.toml can point back here if the from-scratch
+           TerminalWindowProvider ("bamfmenu_terminal") ever fails to hand off. Must be unique, NOT "fmlearlywindow". */
         return "bamfmenu_terminal_legacy";
     }
 
-    /* DisplayWindow.updateModuleReads does `getClass().getModule().addReads(neoforge)`, which is
-       caller-sensitive: when subclassed, getClass() resolves to OUR module while the caller is the
-       fml_earlydisplay module, so the inherited version throws IllegalCallerException. We override it
-       and run the same logic from our own module's caller context (legal), then reflectively set
-       DisplayWindow's private `loadingOverlay` method handle exactly as the original does so the
-       inherited phase-2 hand-off still works. */
+    /* The inherited updateModuleReads throws IllegalCallerException when subclassed: its addReads is
+       caller-sensitive, and getClass() resolves to OUR module while the caller is fml_earlydisplay. Rerun
+       the same logic from our own caller context, then wire DisplayWindow's private `loadingOverlay`
+       exactly as the original does so the inherited phase-2 hand-off still works. */
     @Override
     public void updateModuleReads(ModuleLayer layer) {
         Module neoforge = layer.findModule("neoforge").orElseThrow();
@@ -85,8 +66,7 @@ public class TerminalEarlyWindow extends DisplayWindow {
         };
     }
 
-    /* Force the black scheme every tick (cheap, idempotent) and, once DisplayWindow has built its
-       elements/font, swap in the text-only terminal set a single time. */
+    // Every tick: force the black scheme (cheap, idempotent); once the font/context exist, swap in the text-only elements a single time.
     private void curate() {
         forceBlack();
         forceTerminalForeground();
@@ -97,13 +77,10 @@ public class TerminalEarlyWindow extends DisplayWindow {
         if (font == null) {
             return; // initRender hasn't run yet; try again next tick
         }
-        /* FancyModLoader captures the colour scheme BY VALUE into the render context at initRender time,
-           and by then it is the default RED scheme. forceBlack() only flips the live field that the
-           background clear reads (DisplayWindow.render), which is why the background already goes black;
-           the progress bars and log text instead read context.colourScheme(), so they stayed red. We
-           rebuild the context with the BLACK scheme (every other field copied as-is) so the elements
-           render on the terminal scheme too. ElementShader/PerformanceInfo are public, so this is a
-           plain record copy, not reflection. */
+        /* FML captures the colour scheme BY VALUE into the render context at initRender, and by then it is
+           the default RED: forceBlack() only flips the live field the background clear reads, so the
+           background went black while the bars + log text (which read context.colourScheme()) stayed red.
+           Rebuild the context with BLACK, every other field copied as-is. */
         RenderElement.DisplayContext ctx = readField("context", RenderElement.DisplayContext.class);
         if (ctx == null) {
             return; // context not built yet; try again next tick
@@ -132,12 +109,8 @@ public class TerminalEarlyWindow extends DisplayWindow {
         }
     }
 
-    /* The BLACK scheme's foreground is pure white; classic DOS text mode is the softer light gray
-       (text attribute 0x07 ~ 0xAAAAAA). Retint BLACK's foreground once so the terminal text and bars
-       read as authentic gray-on-black. This is the same in-package reflection forceBlack() already
-       relies on; best-effort, and on any failure the stock white foreground is still a clean
-       white-on-black terminal. Done once (the flag is set before the attempt so a hopeless reflection
-       call is not retried every tick). */
+    /* Retint BLACK's pure-white foreground to classic DOS light gray (text attribute 0x07 ~ 0xAAAAAA).
+       The flag is set before the attempt so a hopeless reflection call is not retried every tick. */
     private void forceTerminalForeground() {
         if (colourTinted) {
             return;

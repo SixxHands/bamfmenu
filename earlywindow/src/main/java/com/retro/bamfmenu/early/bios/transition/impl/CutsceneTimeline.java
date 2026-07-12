@@ -4,10 +4,10 @@ import com.retro.bamfmenu.early.bios.transition.PhaseTimeline;
 
 /* The Recovery-Mode intro cutscene's phase timeline: an opening right-to-left wipe -> a blank cleared hold ->
    the header text-scramble settling on "Unzipping..." -> the face animation (synced to the jingle stabs) ->
-   a full-screen scramble that hands off to the song. TIMING ONLY -- the art / draw / jingle / stab-sync stay
-   in the owning code (the provider today, CutsceneScreen at step 9); this holds the cumulative phase
-   boundaries (verbatim from the provider's old CS_* constants + computeCutsceneTimeline) so the cutscene runs
-   on one shared transition clock. Wall-clock, no freeze. */
+   a full-screen scramble that hands off to the song. TIMING ONLY: the art / draw / jingle / stab-sync stay
+   in the owning code (CutsceneScreen); this holds the cumulative phase boundaries (verbatim from the
+   provider's old CS_* constants + computeCutsceneTimeline) so the cutscene runs on one shared transition
+   clock. Wall-clock, no freeze. */
 public final class CutsceneTimeline extends PhaseTimeline {
 
     public static final long WIPE1 = 600;                        // erase the SETUP screen, right-to-left

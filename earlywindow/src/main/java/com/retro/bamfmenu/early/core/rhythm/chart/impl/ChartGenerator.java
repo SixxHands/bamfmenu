@@ -1,15 +1,16 @@
 package com.retro.bamfmenu.early.core.rhythm.chart.impl;
 
-import com.retro.bamfmenu.early.core.dsp.BeatGrid;
-import com.retro.bamfmenu.early.core.dsp.OnsetPicker;
-import com.retro.bamfmenu.early.core.rhythm.RhythmEngine;
+import com.retro.bamfmenu.early.core.rhythm.model.Note;
+import com.retro.bamfmenu.early.core.tools.audio.dsp.BeatGrid;
+import com.retro.bamfmenu.early.core.tools.audio.dsp.OnsetPicker;
+import com.retro.bamfmenu.early.core.rhythm.engine.RhythmEngine;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/* Turns a song's onset envelope (from AudioPlayer's decode-time analysis) into a playable note chart by
-   peak-picking. This is the runtime auto-charter; a song with no hand-authored .chart gets one of these.
-   No GL, no audio -- pure arrays in, notes out.
+/* Turns a song's onset envelope (the SongAnalysis feature bank) into a playable note chart by
+   peak-picking. The auto-charter DspCharter drives for dev genCharts; committed charts start life here.
+   No GL, no audio, pure arrays in, notes out.
 
    sensitivity (0..1) is the difficulty knob: higher = lower threshold + smaller minimum gap = denser,
    harder charts. Lanes are assigned from the per-hop zero-crossing rate (a cheap brightness proxy: bass
@@ -24,9 +25,9 @@ public final class ChartGenerator {
        OnsetPicker, with lanes bucketed from the per-frame spectral centroid (brightness): low -> left, high
        -> right. This replaces the legacy RMS-flux + global-threshold + ZCR path (kept below as a fallback).
        Taps only for now; beat-snapping, proper pitch/contour lanes, and holds are later phases. */
-    public static List<RhythmEngine.Note> generateV2(float[] odf, float[] centroid, double frameMs, float sensitivity,
+    public static List<Note> generateV2(float[] odf, float[] centroid, double frameMs, float sensitivity,
                                               int lanes, int leadInMs) {
-        List<RhythmEngine.Note> notes = new ArrayList<>();
+        List<Note> notes = new ArrayList<>();
         if (odf == null || odf.length < 3 || frameMs <= 0 || lanes < 1) {
             return notes;
         }
@@ -47,7 +48,7 @@ public final class ChartGenerator {
             if (lane == prevLane) {
                 lane = (lane + 1) % lanes; // light anti-jack; proper lane logic is a later phase
             }
-            notes.add(new RhythmEngine.Note(lane, (int) Math.round(f * frameMs), 0));
+            notes.add(new Note(lane, (int) Math.round(f * frameMs), 0));
             prevLane = lane;
         }
         return notes;
@@ -77,13 +78,13 @@ public final class ChartGenerator {
        for now (beat-snap + holds are later phases). */
     /* cdFloor (a per-song DetectorConfig value): onsets whose complex-domain phase confidence is below it are
        vetoed as steady-tone / reverb / drone false positives (phase-stable events, not real attacks). 0
-       disables the veto. DetectorConfig.defaults() uses ~0.40 -- gentle on crisp songs (their onsets sit well
+       disables the veto. DetectorConfig.defaults() uses ~0.40: gentle on crisp songs (their onsets sit well
        above it), aggressive on reverb-soaked ones. */
-    public static List<RhythmEngine.Note> generateMelodic(float[] melOdf, float[] melPitch, float[] percOdf,
+    public static List<Note> generateMelodic(float[] melOdf, float[] melPitch, float[] percOdf,
                                                    float[] cdConf, double frameMs, float sensitivity,
                                                    int lanes, int leadInMs, double knownBpm, float cdFloor,
                                                    float[] melF0, float minF0Hz) {
-        List<RhythmEngine.Note> notes = new ArrayList<>();
+        List<Note> notes = new ArrayList<>();
         if (melOdf == null || melOdf.length < 3 || frameMs <= 0 || lanes < 1) {
             return notes;
         }
@@ -97,8 +98,8 @@ public final class ChartGenerator {
            same-pitch re-triggers within REFRACT_MS: a held / reverberating piano note keeps producing flux at
            its own pitch, which the detector would otherwise fragment into several notes ("the echo turned into
            individual notes"). Different-pitch notes (a real new note) are kept even if close in time. */
-        /* beat grid: if the song has a clear enough beat, SNAP each onset to the 16th grid and DROP
-           off-grid onsets -- real notes land on beats, drone/reverb noise does not, so this both quantizes
+        /* runtime beat grid: if the song has a clear enough beat, SNAP each onset to the 16th grid and DROP
+           off-grid onsets: real notes land on beats, drone/reverb noise does not, so this both quantizes
            the chart (curated feel) and removes the dreamy-reverb false notes. Weak beat -> raw onset times. */
         BeatGrid grid = BeatGrid.estimate(melOdf, frameMs, knownBpm);
         boolean snapping = grid.confident();
@@ -193,13 +194,13 @@ public final class ChartGenerator {
             if (lane == prevLane) {
                 lane = (lane + 1) % lanes; // light anti-jack so a held pitch does not stack one lane
             }
-            notes.add(new RhythmEngine.Note(lane, (int) Math.round(onF[i] * frameMs), 0));
+            notes.add(new Note(lane, (int) Math.round(onF[i] * frameMs), 0));
             prevLane = lane;
         }
 
         if (minF0Hz <= 0f) {
             /* The percussion fill pulls from the 5-6kHz band, which for a fundamental-gated bit-crushed song
-               (Recovery) is pure hiss -- it would add back exactly the junk the gate removed. Skip it there. */
+               (Recovery) is pure hiss, it would add back exactly the junk the gate removed. Skip it there. */
             addPercussionFill(notes, percOdf, frameMs, s, lanes, leadInFrames, snapping ? grid : null);
         }
         notes.sort((a, b) -> Integer.compare(a.timeMs, b.timeMs));
@@ -209,7 +210,7 @@ public final class ChartGenerator {
     /* Sparse fill: only where the melody RESTS (no note within FILL_GAP_MS/2) drop in a strong percussion
        onset, so a busy melodic song (e.g. FAR) stays piano-only but a sparse one gets a light backbone. When
        a beat grid is active the fill is snapped + off-grid-rejected too, so it stays on-beat with the rest. */
-    private static void addPercussionFill(List<RhythmEngine.Note> notes, float[] percOdf, double frameMs,
+    private static void addPercussionFill(List<Note> notes, float[] percOdf, double frameMs,
                                           float s, int lanes, int leadInFrames, BeatGrid grid) {
         if (percOdf == null || percOdf.length < 3 || notes.isEmpty()) {
             return;
@@ -226,7 +227,7 @@ public final class ChartGenerator {
             int gf = (grid != null) ? grid.nearestFrame(f) : f; // quantize fill to the grid too
             int t = (int) Math.round(gf * frameMs);
             boolean near = false;
-            for (RhythmEngine.Note n : notes) {
+            for (Note n : notes) {
                 if (Math.abs(n.timeMs - t) < fillGapMs / 2) {
                     near = true;
                     break;
@@ -235,14 +236,14 @@ public final class ChartGenerator {
             if (near) {
                 continue;
             }
-            notes.add(new RhythmEngine.Note(fillLane % lanes, t, 0));
+            notes.add(new Note(fillLane % lanes, t, 0));
             fillLane++;
         }
     }
 
-    public static List<RhythmEngine.Note> generate(float[] onsets, int[] zcr, int hopMs, float sensitivity,
+    public static List<Note> generate(float[] onsets, int[] zcr, int hopMs, float sensitivity,
                                             int lanes, int leadInMs) {
-        List<RhythmEngine.Note> notes = new ArrayList<>();
+        List<Note> notes = new ArrayList<>();
         if (onsets == null || onsets.length < 3 || hopMs <= 0 || lanes < 1) {
             return notes;
         }
@@ -271,7 +272,7 @@ public final class ChartGenerator {
             if (lane == prevLane) {
                 lane = (lane + 1) % lanes;
             }
-            notes.add(new RhythmEngine.Note(lane, h * hopMs, 0));
+            notes.add(new Note(lane, h * hopMs, 0));
             lastHop = h;
             prevLane = lane;
         }

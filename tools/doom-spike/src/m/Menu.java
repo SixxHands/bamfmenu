@@ -362,7 +362,7 @@ public class Menu<T, V> extends AbstractDoomMenu<T, V> {
             if (DOOM.cVarManager.bool(CommandVariable.CDROM)) {
                 name = "c:\\doomdata\\" + SAVEGAMENAME + (i) + ".dsg";
             } else {
-                name = SAVEGAMENAME + (i) + ".dsg";
+                name = mochadoom.Engine.SAVE_DIR + SAVEGAMENAME + (i) + ".dsg"; // EMBEDDED
             }
 
             try {
@@ -1789,7 +1789,7 @@ public class Menu<T, V> extends AbstractDoomMenu<T, V> {
             if (DOOM.cVarManager.bool(CommandVariable.CDROM)) {
                 name = ("c:\\doomdata\\" + SAVEGAMENAME + (choice) + ".dsg");
             } else {
-                name = (SAVEGAMENAME + (choice) + ".dsg");
+                name = (mochadoom.Engine.SAVE_DIR + SAVEGAMENAME + (choice) + ".dsg"); // EMBEDDED
             }
             DOOM.LoadGame(name);
             ClearMenus();

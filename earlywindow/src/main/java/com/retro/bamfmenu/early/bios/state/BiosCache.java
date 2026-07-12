@@ -11,7 +11,7 @@ import java.util.Properties;
 
 /* Persistence for the BIOS's saved state (unlocks, the Recovery/achievement flags, the Safe-For-Retro
    switch, per-song high scores + grades, volume, theme, lane keybinds). It lives OUT of the config
-   folder, in the mod's own data directory <gameDir>/BAMFOS/cache/bios.dat, as an OPAQUE BINARY blob --
+   folder, in the mod's own data directory <gameDir>/BAMFOS/cache/bios.dat, as an OPAQUE BINARY blob,
    not a plaintext .properties a player edits in Notepad.
 
    Deterrent only, by design: the de-scramble logic ships in this jar, so a determined user with the jar
@@ -21,7 +21,7 @@ import java.util.Properties;
    The in-memory shape stays java.util.Properties (so the provider's load/save logic is unchanged); only
    the on-disk encoding + location differ. First run migrates the old plaintext
    <gameDir>/config/bamfos_bios.properties into the new cache, then deletes it, so existing saves carry
-   over. No GL/Minecraft refs -- safe in the service jar. */
+   over. No GL/Minecraft refs, safe in the service jar. */
 public final class BiosCache {
 
     private static final String DATA_DIR = "BAMFOS";
@@ -30,7 +30,7 @@ public final class BiosCache {
 
     /* A 3-byte magic so a stray/foreign file is rejected (load returns empty) rather than mis-decoded. */
     private static final byte[] MAGIC = {(byte) 0xB1, 0x05, 0x01};
-    /* Fixed scramble key -- deterrent only (it ships in the jar). */
+    /* Fixed scramble key, deterrent only (it ships in the jar). */
     private static final byte[] KEY = "b4mf0s.k3y.v1".getBytes(StandardCharsets.US_ASCII);
 
     private BiosCache() {}
@@ -98,7 +98,7 @@ public final class BiosCache {
         }
     }
 
-    /* magic header + position-varying XOR -> opaque bytes (no integrity check, deterrent only). */
+    /* Magic header + position-varying XOR -> opaque bytes (no integrity check, deterrent only). */
     private static byte[] encode(byte[] plain) {
         byte[] out = new byte[MAGIC.length + plain.length];
         System.arraycopy(MAGIC, 0, out, 0, MAGIC.length);

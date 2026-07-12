@@ -1,79 +1,87 @@
-# early/core/rhythm — the headless "BAMFBEAT" rhythm engine (pure game logic, no GL/audio/Minecraft)
-
-## Intent
-This is the rhythm game's pure logic — the Recovery Mode "BAMFBEAT" engine: 4 lanes, scrolling notes with hit
-windows, and hold/sustain notes. It lives under `core/` precisely so it has **no GL, no audio, no Minecraft** —
-the host (`bios/.../RhythmScreen`) feeds it the current song time and the player's lane presses/releases, and the
-engine returns scored game state. This split is what lets the editor's "test my chart" loop drive the exact same
-timing-fidelity path headless. In the .75 rhythm re-architecture the scoring /
-combo / multiplier / health economy was pulled out of this engine into a uniform `ScoringEngine` (the `score/`
-child) that `RhythmEngine` now *holds and delegates to*; chart generation was pulled behind a `Charter` seam (the
-`chart/` child); and the input-time conversion was factored out into `RhythmClock`. What remains directly here is
-the rhythm-specific core plus the timing helper.
+# early/core/rhythm, BAMF! song definitions + discovery at root, gameplay members
+## Features
+This is a `core/` category. `model/` keeps the definitions, `registry/` keeps discovery, and gameplay lives
+in the sibling subfolders. `model/` is the song catalog: `SongDef`/`SongDifficulty`/`Difficulty` which say
+what a song IS, while `registry/`'s `SongRegistry`/`SongLoader` say how songs are FOUND. `Note` is a shared note definition, the
+direct analog of `SecretDef`/`SecretRegistry` in `core/secret`. A `SongDef` carries EVERYTHING about one song
+in one place, not smeared across the provider as `"recovery".equals(...)` branches. The catalog is discovered
+and not authored in Java: adding a built-in song is as easy as dropping only a folder with a `song.json` and OGG.
+`Note` moved here from `RhythmEngine` because half its importers reached into the engine only to
+name the type.
 
 ## Components
-- **`RhythmEngine`** (`final`) — the engine itself; single-threaded, **render-thread only**, so nothing is
-  synchronized. Owns the time-sorted `List<Note> notes`, the current `int songMs`, a `final ScoringEngine scoring`
-  (the economy it delegates to, read externally through its `ScoreView`), per-lane `boolean[] laneHeld`, the
-  pre-roll `countDigit`, the per-chart visual fall speed `approachMs` (defaults to `DEFAULT_APPROACH_MS=1500`; the
-  host overrides it from the loaded chart — purely visual, judgment never depends on it), and the chart-driven
-  left-panel react signals (`reactLane`, `reactChord`, `reactLaneMs`, `reactMissMs`). Constructor takes
-  `(List<Note> chart, boolean noFail, int tailMs)` and sorts the chart by time. Key methods: `update(int songMs)`
-  (drains the multiplier meter via `scoring.tickDrain`, auto-misses notes past `LATE_MS`, resolves held-through
-  sustains, then `scoring.clampAndLatch()` + `announceReactions()`); `press(int lane, int t)` (finds the nearest
-  unjudged note in `[-EARLY_MS, +LATE_MS]`, classifies the timing window into a `Grade`, calls `scoring.apply`);
-  `release(int lane, int t)` (now timing-aware — a live sustain resolves as a *graded tail* by `|t-endMs|` →
-  PERFECT/GOOD/OKAY/BAD, or a DROP if released earlier than `-EARLY_MS`); `setLaneVisual(int lane, boolean down)`
-  (count-in only: lights a lane so buttons respond without judging anything); `isFinished()` / `finishMs()` /
-  `chartEndMs()`; and the static `demoChart()` — a hand-authored Phase-1 test pattern (NOT synced to music)
-  exercising taps, chords, bursts and holds. The nested `public static final class Note` carries
-  `lane`/`timeMs`/`holdMs` plus the judgment flags `headJudged`, `headHit`, `holdActive`, `holdResolved`, and
-  `faded` (MISSED or DROPPED → renders greyed-out and lingers until it falls off), with `isHold()` / `endMs()`.
-  Hit windows are `static final` knobs, **tightened** (was too forgiving): `PERFECT_MS=35`,
-  `GOOD_MS=70`, `OKAY_MS=100`, `LATE_MS=145` (catchable-late → BAD), `EARLY_MS=100` (earlier = ignored ghost tap);
-  `LANES = 4`.
-- **`RhythmClock`** (`final`, non-instantiable) — a pure timing helper, factored out of `RhythmScreen.step`. One static method `eventMs(int songMs, long nowNanos, long eventNanos)` converts a queued
-  input event's capture time back to song time (`eventMs = songMs - (now - eventNanos)/1e6`) so hit accuracy
-  survives the input queue. The editor's chart-test loop reuses it to feed `RhythmEngine.press()` at the right song
-  time — no AudioPlayer / BiosContext / GL needed.
-- **`JudgmentArt`** (`final`, non-instantiable) — Phase C2 data-driven judgment "pop" art. `render(judgment,
-  comboMult)` maps the engine's `lastJudgment` ("PERFECT x3"/"MISS"/…; grade = its first word, lowercased) to the
-  lines of a banner under `/ui/judge/` (shipped set = the FIGlet "graffiti" font), or `null` so the host falls
-  back to plain text (zero regression). **Per-combo-tier:** the hit grades (perfect/good/okay/bad) resolve
-  `/ui/judge/<grade>.<tier>.txt` first (tier = the combo multiplier 1..maxMult, e.g. `perfect.2.txt`), then the
-  un-tiered `/ui/judge/<grade>.txt`, then plain text — so you author only the tiers you want. **miss/drop/fail are
-  EXCLUDED from tiers** (a miss breaks combo) and always use `/ui/judge/<grade>.txt`. Each banner is its own
-  editable file; lazy cache per (grade,tier), the resolved result (incl. fallback / "none") cached so a missing
-  file isn't re-read. Pure — no GL; the host (`RhythmRenderer`) scales the returned lines to fit the judgment grid.
+- **`SongDef`** is a `record`, one song's whole definition lives in one place. `newLeftPanel()`/`newSpecial()` build a
+  FRESH instance per play so state never leaks across games.
+  - `id`: high-score key + recovery check.
+  - `order`: jukebox sort key, 0 reserved for Recovery.
+  - `ogg`: a `/songs/...` resource path, `file:` disk path for user songs, null = audio-less, or the
+    `SongLoader.MULTI_OGG`.
+  - `bpm`: grid hint, 0 = auto-detect.
+  - `detector`: `DetectorConfig` per-song auto-charter tuning.
+  - `leftPanel`/`special`: suppliers, null = blank left cell / no special.
+  - `difficulties`: `List<SongDifficulty>` never null.
+- **`SongDifficulty`** is a `record(name, token, order, sensDelta)` with ONE difficulty a song offers. Data-driven so
+  a song can declare any ordered named set (that way an osu!mania import keeps Beginner/Normal/Hyper/Another).
+  - `token`: the chart filename stem AND the score-key suffix (`songs/<id>/<token>.chart`, `rhythmHigh.<id>.<token>`).
+  - `sensDelta`: shifts auto-charter density only when GENERATING, a committed chart reads as-is.
+- **`Difficulty`** is a fixed enum for the DEFAULT set: `EASY`/`NORMAL`/`HARD`/`SPECIAL`. `scored()` is false
+  only for SPECIAL, which launches a `SpecialSession` instead of a chart, even though it can still use a chart.
+- **`Note`** is the shared note definition: uses unchangeable `lane`/`timeMs`/`holdMs` definitions but with changeable judgment
+  flags (`faded` = MISSED/DROPPED, renders greyed-out and lingers). Built by the `chart/` pipeline, changed via the
+  engine only.
+- **`SongRegistry`**, the static holder the provider iterates: `SONGS = SongLoader.discover()`, class-init runs
+  bundled discovery once.
+- **`SongLoader`**, discovery + the editor's disk engine. Enumeration is the hard part, everything else
+  defaults instead of throwing.
+  - `discover()`: enumerate every `/songs/<id>/song.json`, parse via the dependency-free `Json`, sort by
+    `order` then `id`, pin Recovery to index 0 (the `SONGS[0]` rule).
+  - `load(id)`: defaults every missing field (no `detector` -> `DetectorConfig.defaults()`), a bad descriptor
+    drops only that song.
+  - enumeration: a dev `file:` dir lists directly, but the packaged FML `union:` URL for `/songs` lists as
+    null, so we resolve the containing jar and scan its ZIP entries. Strip ONLY a trailing `%23NNN`/`#NNN`
+    union-index marker, and decode with our own RFC-3986 `decodePath`, `URLDecoder` maps `+` to space and
+    throws on a lone `%`.
+  - fallback: empty enumeration loads `FALLBACK_IDS` (`recovery`, `far`, `tetris`) by known path, so `SONGS` is
+    never empty.
+  - `BUILTINS`: literally just code that can't live in JSON, keyed by id (Recovery's `FaceFrameAnimation` from its frame
+    `.txt`, `far`'s `PlaceholderSpecial`).
+  - `loadDifficulties()`: declared `difficulties` array. What existing defaults chart + SPECIAL, behind
+    a `chartExists`. Hides in-jar vs on-disk.
+  - the classpath enumeration (`listResources`/`listResourcesDeep`) moved to `core/util/ResourceScan`, so the
+    outside callers stopped reaching in here. It got that util folder after all.
+  - disk: `discoverDisk()`/`loadDisk()` build `SongDef`s from `<gameDir>/BAMFOS/songs/` with
+    `file:` OGG refs. No usable OGG = listed audio-less, more than one = the `MULTI_OGG` sentinel so the editor
+    refuses, `INTRO_OGG` never counts.
+  - scaffolding: `ensureSongScaffold()` idempotently completes a folder (full `song.json`, a blank
+    `normal.chart`, an empty `panels/`), `ensureSongsRootReadme()` writes the one-time SIXX-HANDS readme (with
+    the editor key map), `copyBundledSong()` forks an in-jar song folder to disk. All disk writes are add-only,
+    never overwrite authored files, never throw.
 
 ## How it works
-The host (render thread) runs a frame loop: sample the current song time, call `engine.update(songMs)` to advance
-the world (auto-miss, held-through sustain completion, meter drain, react announcements), and drain its input
-queue. For each queued key event the host converts the captured `System.nanoTime()` back to song time via
-`RhythmClock.eventMs(...)` and calls `press(lane, t)` / `release(lane, t)`. Both `update`/`press`/`release` route
-every judgment through the held `ScoringEngine` (`scoring.apply(Grade, songMs)`), keeping the score/combo/health
-economy uniform; the renderer and results capture read it back through `scoring` as a `ScoreView`. A pressed note
-classifies into PERFECT/GOOD/OKAY/BAD; a press with nothing in range emits FAIL (free in no-fail). Holds are
-graded on the *release*: `release()` resolves a live sustain as a graded tail or a DROP, while a sustain held all
-the way past `endMs()+LATE_MS` is auto-completed in `update()` as PERFECT (still held) or GOOD. During the pre-roll
-`songMs` is negative and `countDigit` counts in (3/2/1/0) so notes scroll in from the top — the host uses
-`setLaneVisual()` (not `press`) so buttons respond without scoring — before the audio clock takes over at
-`songMs=0`; a natural finish fires at `finishMs()` (chart end + `tailMs`). The chart fed to the constructor is
-produced upstream by the `chart/` child (a `Charter`); `demoChart()` is the in-engine fallback pattern.
+Class-load of `SongRegistry` runs `discover()` once: collect ids, parse each descriptor, merge `BUILTINS`,
+sort, pin Recovery to 0, fall back to the hardcoded ids if nothing is found. From the `SONGS` array, declared songs take over. 
+The jukebox/provider in `bios/` picks a `SongDef` + difficulty. `chart/` turns the committed `<token>.chart` 
+(or at generation time the audio + `detector` shifted by `sensDelta`) into a `List<Note>`.
+`engine/` judges those notes, delegating every grade to the `score/`. `panel/` animates
+left cell activity. SPECIAL skips traditional charting entirely via `newSpecial()`. The editor does the
+work on the disk surface: `discoverDisk()` for user songs, edits through `editor/` + `chart/`.
 
-## Boundaries
-Depends only on its `score/` sibling (`Grade`, `ScoreRules`, `ScoringEngine`) and `java.util` — no `bios/`, no GL,
-no audio, no Minecraft. Invariant: **`core/` never imports `bios/`**; this engine is the headless half that
-`bios/.../RhythmScreen` (the host/VIEW side) drives and reads. Threading invariant: **render-thread only** — all
-mutable state here is touched on the single render thread, including the `react*` view signals and the visual
-`approachMs`/`faded`/`countDigit` fields, which is why nothing is synchronized. `Note` and `LANES` are public
-because the chart pipeline (the `chart/` child) constructs notes against them.
+## Dependencies
+- **Depends on:** The sibling categories `asset` (`Art`, `Json`) and `tools/audio`. `DetectorConfig` by the root. The
+analysis itself runs in `SongAnalysis`, consumed by `chart/`, plus its own members `panel/`, `special/`, and
+`chart/`. Also needs `Note`/`SongDef`, root to member acquaintance is expected INSIDE the category.
+- Nothing under `rhythm/` imports `bios/`. There is no GL, no audio playback, no Minecraft anywhere in the category's core. 
+- `bios/` provider, jukebox, and rhythm/editor screens, plus the known cross-cut: `core/secret` and
+`TetrisScreen` borrow the `listResources*` enumeration. 
+- `SONGS` are never empty, `SONGS[0]` is always the 'Recovery' song, discovery should never throw, `difficulties` never return or are null, 
+folder ends with a complete `song.json` and at least a Normal chart.
 
 ## Child layers
-- `score/` — the uniform scoring economy: `Grade` (enum: PERFECT/GOOD/OKAY/BAD/MISS/DROP/FAIL/SUSTAIN),
-  `ScoreRules` (economy knobs), `ScoreView` (read-only getters), `ScoringEngine`. `RhythmEngine` holds a
-  `ScoringEngine` and delegates all judgments to it through `apply()` (plus `tickDrain`/`clampAndLatch`); see its
-  README.
-- `chart/` — the chart model + the `Charter` generate seam (`Charter`, `Chart`, `ChartIO`, `ChartRequest`,
-  `ChartBootstrap`, and `impl/` charters incl. `DspCharter`/`FileCharter`/`ChartGenerator`) that produces the
-  `List<Note>` fed to `RhythmEngine`; see its README.
+- **`model/`**, the song catalog: `SongDef`, `SongDifficulty`, `Difficulty`, `Note`.
+- **`registry/`**, discovery + the editor's disk engine: `SongRegistry`, `SongLoader`.
+- **`engine/`**, the headless judging engine (`RhythmEngine`, `RhythmClock`, `JudgmentArt`).
+- **`chart/`**, the chart seam: `Charter`/`Chart`/`ChartIO`/`ChartRequest` + the `impl/` charters.
+- **`score/`**, the scoring/combo/multiplier/health economy the engine delegates every judgment to.
+- **`panel/`**, the reactive left-panel animation framework.
+- **`special/`**, the SPECIAL-mode seam, a song's bespoke side-game instead of a chart.
+- **`editor/`**, the chart editor's headless core.

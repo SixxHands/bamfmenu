@@ -5,7 +5,7 @@ package com.retro.bamfmenu.early.core.asset;
    of duplicating it. Pure char logic (no GL, no Minecraft); Math.random per call, so render-thread only. */
 public final class Glitch {
 
-    /* The glitch alphabet -- printable symbols only (no letters/digits), so it reads as "static". */
+    /* The glitch alphabet: printable symbols only (no letters/digits), so it reads as "static". */
     public static final String CHARS = "!@#$%^&*()_+-=[]{}<>/\\|?~:;";
 
     private Glitch() {

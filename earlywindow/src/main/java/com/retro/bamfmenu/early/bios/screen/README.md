@@ -1,18 +1,43 @@
-# early/bios/screen — the screen framework: the contracts screens/overlays implement and the host seam they call back through
-## Intent
-This package is the seam carved out of the old 3,409-line `TerminalWindowProvider` god class during the **.75** decomposition. The provider still owns GL, the render thread, the `renderFrame` shell, `onKey`/`onChar`, and the `state` field — but every reusable per-mode behavior was sliced into a `Screen`, and the two host-composited layers into an `Overlay`. The three interfaces here are *only* the contracts: `Screen` (one per `Mode`), `Overlay` (volume / pause layers), and `BiosContext` (the small host-callback surface so a screen never holds the provider type and so the provider stays the sole writer of `state`). The standing layout rule keeps the parent interfaces one level up from their `mode/` and `overlay/` impl families, so this folder is the framework and the subfolders are the implementations.
+# early/bios/screen, Screen/Overlay interfaces, BiosContext host
+## Features
+The provider is what keeps GL, the render thread, `renderFrame`,
+`onKey`/`onChar`, and `state`. Each per-mode behavior is a `Screen`, floating layers originally from `TerminalWindowProvider` are now in
+`Overlay`s. In this folder is just the three components that make up the screen, content in the mod and overlay do the actual visible work.
 
 ## Components
-- **`Screen`** (interface) — one BIOS screen / `Mode` (POST, SETUP, CUTSCENE, RHYTHM, TETRIS, RESULTS, SPECIAL). `mode()` keys the dispatch; `onEnter(ctx)`/`onExit(ctx)` replace the old per-mode start/exit; `step(BiosContext)` advances logic and drains the screen's own input queue and **takes no canvas by design** (a screen physically cannot issue GL off the render thread); `render(TerminalCanvas, BiosContext)` draws through the canvas facade only (no LWJGL); `controlHints(BiosContext)` returns this screen's row of the shared bottom bar (default `""`). All driven by the provider on the render thread.
-- **`Overlay`** (interface) — a floating, host-composited LAYER drawn OVER the active screen (the F2 `VolumeOverlay`, the in-game `PauseOverlay`), NOT a `Mode`. `active()` reports whether it is up (and thus freezing the base screen's `step` and capturing input); `step(BiosContext)` and `render(TerminalCanvas, BiosContext)` mirror `Screen` and also run on the render thread, composited after the active screen and before the control bar.
-- **`BiosContext`** (interface) — the cross-cutting host seam every screen/overlay calls back into; backed by a provider-side adapter so screens never reach the executor / renderLock / GL handles. Key groups: transitions (`enterMode`/`mode()` — the provider stays the **sole `state` writer**, screens only *request*); the single shared `AudioPlayer` (`audio`/`closeAudio`/`startSongAudio`/`playMusic`); the transitional lead-in + special-event lock (`armLeadIn`/`holdingLeadIn`/`clearLeadIn`/`inSpecialEvent`); overlay queries (`volumeMenuOpen`/`pauseMenuOpen`/`openPauseMenu`/`clearGameInputQueues`); persistence (`save`, `tetrisHighScore`/`setTetrisHighScore`, `laneKeys`, `safeForRetro`) through the obfuscated `BiosCache`; jukebox state (`currentSong`/`currentDifficulty`/`setCurrentSong`); the rhythm→results hand-off (`startRhythm`/`exitRhythm`/`bankRhythm`/`showResults`/`gradeLetter`); SETUP nav (`setNotice`/`exitToSetup`/`exitCurrentGame`); volume (`volume`/`setVolume`/`flashError`); the render-thread `frame()` counter; and the cutscene needs (`renderSetupUnder`, `recoveryFaceA`/`recoveryFaceB`, shared with the SETUP achievement panel).
+- **`Screen`** one per `Mode` (POST and SETUP are still apart of `TerminalWindowProvider`). `mode()` keys dispatch,
+  `onEnter`/`onExit` contain the lifecycle for keypresses. `step(ctx)` iis the logic that drains the screen's own input queue,
+  and takes no canvas on purpose, as the screen physically cannot draw off the render thread. `render(canvas, ctx)`
+  draws through the facade only. `controlHints(ctx)` is part of the screen's row/bottom bar.
+- **`Overlay`** is for layers composited OVER the active screen (volume, pause, whatever else will be over the main screen in the future), not `Mode`s. `active()` freezes the
+  base screen and captures input, `step`/`render` mirror `Screen`.
+- **`BiosContext`** is what screens call back into. The provider implements it, screens never hold the provider.
+  Groups:
+  - transitions: `enterMode`/`mode()`. The provider is the ONLY `state` writer; screens SHOULD ONLY EVER request `state`s.
+  - audio: core `audio`/`closeAudio`/`startSongAudio(SongDef)`/`playMusic` for the rhythm engine.
+  - lead-in + special-event lock: `armLeadIn`/`holdingLeadIn`/`clearLeadIn`/`inSpecialEvent`.
+  - overlays: `volumeMenuOpen`/`pauseMenuOpen`/`openPauseMenu`/`clearGameInputQueues`.
+  - persistent `BiosCache`: `save`, `tetrisHighScore`, `laneKeys`/`keyName`, `safeForRetro`.
+  - jukebox: `currentSong`/`currentDifficulty`/`setCurrentSong`; `bamfosDir()`.
+  - rhythm results/screen transitions: `startRhythm`/`exitRhythm`/`bankRhythm`/`showResults`/`gradeLetter`.
+  - SETUP nav + volume: `setNotice`/`exitToSetup`/`exitCurrentGame`; `volume`/`setVolume`/`flashError`; `frame()`.
+  - cutscene: `renderSetupUnder`, `recoveryFaceA`/`recoveryFaceB`. (this needs proper categorization and refactoring, its currently completely owned by the recovery cutscene)
+  - editor: chart I/O `loadChartText`/`saveChart`; mouse `editorLogicalX/Y` + `editorMouseWinX/Y`; test play
+    `startRhythmTest`/`consumeTestChart`/`testStartMs`/`testApproachMs`/`editorTestActive`/`returnToEditor`;
+    user songs `userSongs`/`forkSong`/`normalizeUserSong`/`createNewSong`.
 
 ## How it works
-The provider is the host: it owns GL + the render thread, holds an inner adapter that *implements* `BiosContext`, and drives the active `Screen` each render-thread frame. Per frame it calls `screen.step(ctx)` (the screen drains its own queue and mutates its own state — no canvas, so no GL leaks off-thread), then `screen.render(canvas, ctx)`, then composites any `active()` `Overlay` over it, then draws the bottom bar from `screen.controlHints(ctx)`. Input arrives on the **main thread** via `onKey`/`onChar`, which only enqueue to concurrent queues or set volatile flags — never touch GL or game state. When a screen wants to change modes it calls `ctx.enterMode(Mode)`; the provider writes the volatile `state` field last and exactly once, so the hand-off hold loop never observes a half-built mode. Audio, persistence, the lead-in, and overlay/jukebox state all resist single-screen ownership, so they stay provider-owned and reachable only through `BiosContext`.
+In order, each render-thread frame the provider runs is `screen.step(ctx)`, `screen.render(canvas, ctx)`, any `active()`
+overlay, then the bottom bar. Input lands on the main thread (`onKey`/`onChar`) and only enqueues or sets
+inputs. Mode changes go through `ctx.enterMode`, the provider writes `state` last and once, so the hand-off/hold 
+loop never is a half-built mode.
 
-## Boundaries
-This package depends only on sibling early-window classes: `early.bios.Mode`, `early.bios.gfx.TerminalCanvas` (the sole GL facade screens may touch), and `early.core.*` value types referenced by `BiosContext` signatures (`core.audio.AudioPlayer`, `core.song.SongDef`/`Difficulty`, `core.tuning.DetectorConfig`). It imports **no LWJGL and no Minecraft classes**, consistent with the self-contained service jar. Invariants enforced here: `step()` takes no canvas (a screen cannot draw off the render thread); `enterMode` is the only `state` writer and screens only request transitions; screens hold a `BiosContext`, never the `TerminalWindowProvider`. Depended on by the provider (which implements `BiosContext` and dispatches to `Screen`s) and by everything under `mode/` and `overlay/`, which implement these three interfaces. Note: POST and SETUP are intentionally NOT extracted — they stay woven in the provider as the BIOS shell, so no `PostScreen`/`SetupScreen` exists here.
+## Dependencies
+Depends on `Mode`, `TerminalCanvas`, and `core` value types in `BiosContext` (`AudioPlayer`,
+`SongDef`/`SongDifficulty`/`Note`). No LWJGL, no Minecraft whatsoever. Invariants: `step()` takes no canvas, `enterMode`
+is the only `state` writer, screens hold a `BiosContext` and never anything for provider. POST/SETUP are (currently) 
+intentionally not extracted, as they are the BIOS shell.
 
 ## Child layers
-- `mode/` — the per-`Mode` `Screen` implementations (`CutsceneScreen`, `RhythmScreen`, `ResultsScreen`, `SpecialScreen`, `TetrisScreen`, plus the `rhythm/` render helpers); see its README.
-- `overlay/` — the host-composited `Overlay` layers (`VolumeOverlay`, `PauseOverlay`); see its README.
+None anymore, this folder is just the interfaces. The implementations live beside it: `bios/modes/` (the
+screens) and `bios/overlay/` (the overlays).

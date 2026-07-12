@@ -5,13 +5,13 @@ import java.util.Random;
 /* Self-contained terminal Tetris for the BAMFOS "Enable Mechanics" option. Pure logic + state: no GL,
    no Minecraft, no threading primitives, so the early-window jar stays a plain service.
 
-   Threading contract: the provider owns one instance and touches it from exactly ONE thread -- the
+   Threading contract: the provider owns one instance and touches it from exactly ONE thread, the
    render thread. It drains queued GLFW key codes into handleKey(...), calls tick() once per frame, then
    reads the public fields to draw. Because every access is on that single thread, nothing here is
    synchronized; the only cross-thread channel is the provider's ConcurrentLinkedQueue feeding handleKey.
 
    Rotation uses explicit four-state offset tables (not SRS pivot math) plus a simple horizontal wall
-   kick: compact and hard to get wrong for a proof of concept. Gravity is tick-based -- the provider
+   kick: compact and hard to get wrong for a proof of concept. Gravity is tick-based: the provider
    ticks at ~20fps, so a "tick" is one frame and fall speed is expressed in frames-per-cell by level. */
 public final class TetrisGame {
 
@@ -86,7 +86,7 @@ public final class TetrisGame {
     private static final int[] LINE_SCORE = {0, 100, 300, 500, 800};
     private static final int MAX_LEVEL = 10;
 
-    /* ---- public state read by the renderer (single-threaded access, see class doc) ---- */
+    // public state read by the renderer (single-threaded access, see class doc)
     public final int[][] cells = new int[ROWS][COLS];
     public int score;
     public int level = 1;
@@ -165,7 +165,7 @@ public final class TetrisGame {
         return SIGNAL_NONE;
     }
 
-    /* ---- piece mechanics ---- */
+    // piece mechanics
 
     private void move(int dx) {
         if (!collides(id, rot, px + dx, py)) {
@@ -308,7 +308,7 @@ public final class TetrisGame {
         return false;
     }
 
-    /* ---- renderer helpers (read-only) ---- */
+    // renderer helpers (read-only)
 
     /* Board cells (row,col) currently covered by the active piece, for the falling-piece overlay. */
     public int[][] activeCells() {
