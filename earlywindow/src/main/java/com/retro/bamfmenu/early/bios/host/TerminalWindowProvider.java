@@ -197,6 +197,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private String osInfo = "";
     private String javaInfo = "";
     private String biosDate = "06/15/26";
+    private String modpackVersion = "null"; // pack version NUMBER (e.g. "0.2.2") read from config/bcc-common.toml at boot; "null" if unreadable
     private long memTotalKb = 65536L;
     private String gpuName;
 
@@ -594,6 +595,30 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             biosDate = String.format("%02d/%02d/%02d", d.getMonthValue(), d.getDayOfMonth(), d.getYear() % 100);
         } catch (Throwable ignored) {
         }
+        modpackVersion = readModpackVersion();
+    }
+
+    /* Read the real pack version off BCC's config so the BIOS version line tracks the actual modpack version
+       instead of a baked-in number. Grabs the quoted modpackVersion value from <gameDir>/config/bcc-common.toml.
+       Returns "null" (never a made-up value) if the file or key is missing, per design. */
+    private String readModpackVersion() {
+        try {
+            java.nio.file.Path p = java.nio.file.Paths.get(gameDir, "config", "bcc-common.toml");
+            if (!java.nio.file.Files.isRegularFile(p)) return "null";
+            for (String line : java.nio.file.Files.readAllLines(p, java.nio.charset.StandardCharsets.UTF_8)) {
+                String s = line.trim();
+                if (s.startsWith("modpackVersion")) {
+                    int a = s.indexOf('"'), b = s.lastIndexOf('"');
+                    if (a >= 0 && b > a) {
+                        // pull just the numeric version (e.g. "0.2.2") off the value, dropping any "v" prefix or name
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+(?:\\.\\d+)*").matcher(s.substring(a + 1, b));
+                        return m.find() ? m.group() : "null";
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "null";
     }
 
     /* Persist the BIOS's saved state across reboots. The early window runs before Minecraft, so we keep our
@@ -1098,7 +1123,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         boolean memDone = frame >= MEM_FRAMES;
         long shownKb = memDone ? memTotalKb : memTotalKb * Math.max(0, frame) / MEM_FRAMES;
         List<String> h = new ArrayList<>();
-        h.add("BAMF-BIOS v4.51PG    " + biosDate);
+        h.add("BAMF-BIOS " + (modpackVersion.equals("null") ? "null" : "v" + modpackVersion + "PG") + "    " + biosDate);
         h.add("Main Processor   : " + cpuInfo);
         h.add("Memory Testing   : " + shownKb + "K" + (memDone ? "  OK" : ""));
         h.add("Display Adapter  : " + (gpuName == null ? "Detecting ..." : gpuName));
