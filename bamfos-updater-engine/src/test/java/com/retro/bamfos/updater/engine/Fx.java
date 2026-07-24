@@ -76,6 +76,33 @@ public final class Fx {
         }
     }
 
+    /** Same uncompressed-NBT shape vanilla writes: root compound > list "servers" > {name, ip}. */
+    public static byte[] serversDat(String... ips) {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bos);
+            out.writeByte(0x0A);
+            out.writeUTF("");
+            out.writeByte(0x09);
+            out.writeUTF("servers");
+            out.writeByte(0x0A);
+            out.writeInt(ips.length);
+            for (String ip : ips) {
+                out.writeByte(0x08);
+                out.writeUTF("name");
+                out.writeUTF("BAMFOS");
+                out.writeByte(0x08);
+                out.writeUTF("ip");
+                out.writeUTF(ip);
+                out.writeByte(0x00);
+            }
+            out.writeByte(0x00);
+            return bos.toByteArray();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public static void write(Path dir, String rel, byte[] bytes) throws IOException {
         Path p = dir.resolve(rel);
         Files.createDirectories(p.getParent());

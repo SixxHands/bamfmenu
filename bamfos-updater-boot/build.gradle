@@ -21,6 +21,8 @@ tasks.withType(JavaCompile).configureEach {
 
 repositories {
     mavenCentral()
+    maven { url = 'https://maven.neoforged.net/releases' }
+    maven { url = 'https://libraries.minecraft.net' } // com.mojang:* transitives of FancyModLoader
 }
 
 // Bundled fallback engine extracted when .bamfos-updater/engine/ is missing or corrupt so the stub needs no networking.
@@ -33,6 +35,9 @@ configurations {
 
 dependencies {
     baselineEngine project(':bamfos-updater-engine')
+
+    // IModFileCandidateLocator lives inside FML's loader jar in 4.x; provided by NeoForge at runtime.
+    compileOnly 'net.neoforged.fancymodloader:loader:4.0.42'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'

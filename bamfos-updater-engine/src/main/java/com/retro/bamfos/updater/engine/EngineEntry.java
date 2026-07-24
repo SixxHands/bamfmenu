@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine;
 
+import com.retro.bamfos.updater.engine.door.ClientDoor;
 import com.retro.bamfos.updater.engine.door.ServerDoor;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 
@@ -23,12 +24,14 @@ public final class EngineEntry {
     public static int enter(String[] args) {
         System.out.println("[updater] engine " + version() + " up");
         boolean server = false;
+        boolean client = false;
         boolean repair = false;
         String tag = "";
         Path dir = Paths.get(".");
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--server" -> server = true;
+                case "--client" -> client = true;
                 case "--repair" -> repair = true;
                 case "--tag" -> tag = i + 1 < args.length ? args[++i] : "";
                 case "--dir" -> dir = i + 1 < args.length ? Paths.get(args[++i]) : dir;
@@ -39,7 +42,10 @@ public final class EngineEntry {
         if (server) {
             return new ServerDoor(GithubReleases.realApi()).run(dir, tag, repair);
         }
-        return 0; // the client door arrives with M5; nothing else runs the engine directly
+        if (client) {
+            return new ClientDoor(GithubReleases.realApi()).run(dir);
+        }
+        return 0;
     }
 
     private EngineEntry() {
