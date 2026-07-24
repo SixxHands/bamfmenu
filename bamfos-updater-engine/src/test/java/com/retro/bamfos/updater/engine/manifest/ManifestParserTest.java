@@ -85,11 +85,28 @@ class ManifestParserTest {
     }
 
     @Test
-    void caseInsensitiveDuplicatePathsAreRejected() throws IOException {
-        // second entry's path differs only by case -> on Windows they are one file
+    void caseInsensitiveDuplicatePathsAreRejectedWhenSidesIntersect() throws IOException {
+        // files[0] is side both; a case-variant of its path on side client intersects -> one Windows file
         String dup = example().replace("\"path\": \"mods/bamfmenu-1.0.3.jar\"", "\"path\": \"CONFIG/bcc-common.TOML\"");
         ManifestParser.ManifestError e = assertThrows(ManifestParser.ManifestError.class, () -> ManifestParser.parse(dup));
         assertTrue(e.getMessage().contains("collides case-insensitively"), e.getMessage());
+    }
+
+    @Test
+    void samePathOnDisjointSidesIsTheDesignedVariantMechanism() {
+        // the ModernFix case: one install path, two side-specific truths, MUST parse
+        String j = """
+                {"schema_version": 1,
+                 "pack": {"id":"bamfos","version":"v1","mc":"1.21.1","neoforge":"21.1.235","updater_abi":1},
+                 "requires_relaunch": false,
+                 "files": [
+                   {"path":"config/modernfix-mixins.properties","sha256":"%s","size":1,"side":"client","policy":"managed",
+                    "source":{"type":"release-zip","asset":"data-client.zip","inner":"config/modernfix-mixins.properties"}},
+                   {"path":"config/modernfix-mixins.properties","sha256":"%s","size":1,"side":"server","policy":"managed",
+                    "source":{"type":"release-zip","asset":"data-server.zip","inner":"config/modernfix-mixins.properties"}}
+                 ]}""".formatted("0".repeat(64), "1".repeat(63) + "a");
+        Manifest m = ManifestParser.parse(j);
+        assertEquals(2, m.files().size());
     }
 
     @Test

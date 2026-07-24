@@ -75,15 +75,26 @@ public final class ManifestParser {
             throw new ManifestError("files: expected an array");
         }
         List<FileEntry> files = new ArrayList<>(filesList.size());
-        // case-insensitive duplicate detection: on Windows two case-variant paths fight over one file
-        Map<String, Integer> seen = new HashMap<>();
+        /* Case-insensitive duplicate detection, but SIDE-AWARE: the same path on disjoint sides is
+           the DESIGNED variant mechanism (the ModernFix client/server config pair, server-linked
+           optionals), only entries whose side reach intersects fight over one Windows file. */
+        Map<String, List<int[]>> seen = new HashMap<>(); // caseKey -> [(index, reachBits)]
         for (int i = 0; i < filesList.size(); i++) {
             String at = "files[" + i + "]";
             FileEntry e = parseEntry(obj(filesList.get(i), at), at);
-            Integer prev = seen.put(PathGuard.caseKey(e.path()), i);
-            if (prev != null) {
-                throw new ManifestError(at + ".path: '" + e.path() + "' collides case-insensitively with files[" + prev + "]");
+            int reach = switch (e.side()) {
+                case BOTH -> 0b11;
+                case CLIENT -> 0b01;
+                case SERVER -> 0b10;
+            };
+            List<int[]> prior = seen.computeIfAbsent(PathGuard.caseKey(e.path()), k -> new ArrayList<>());
+            for (int[] p : prior) {
+                if ((p[1] & reach) != 0) {
+                    throw new ManifestError(at + ".path: '" + e.path() + "' collides case-insensitively on side '"
+                            + e.side() + "' with files[" + p[0] + "]");
+                }
             }
+            prior.add(new int[]{i, reach});
             files.add(e);
         }
 
