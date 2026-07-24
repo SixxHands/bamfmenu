@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "pack": {
+    "id": "bamfos",
+    "version": "v0.2.5",
+    "mc": "1.21.1",
+    "neoforge": "21.1.235",
+    "updater_abi": 1,
+    "engine_schema_support": [1]
+  },
+  "requires_relaunch": false,
+  "removed_modids": ["chipped", "envelope"],
+  "future_field_readers_must_ignore": {"nested": true},
+  "files": [
+    {
+      "path": "config/bcc-common.toml",
+      "sha256": "be69f4039811b60f0b3af544c79a4a47de53c8ff8c3f705c8c3ad8f21d5d9dfe",
+      "size": 1234,
+      "side": "both",
+      "policy": "managed",
+      "source": { "type": "release-zip", "asset": "data-common.zip", "inner": "config/bcc-common.toml" }
+    },
+    {
+      "path": "mods/bamfmenu-1.0.3.jar",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "size": 4523111,
+      "side": "client",
+      "policy": "managed",
+      "modids": ["bamfmenu"],
+      "source": { "type": "release-asset", "asset": "bamfmenu-1.0.3.jar" }
+    },
+    {
+      "path": "mods/cobblemon-neoforge-1.6.1.jar",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+      "size": 219000000,
+      "side": "both",
+      "policy": "managed",
+      "modids": ["cobblemon"],
+      "source": { "type": "release-asset", "asset": "cobblemon-neoforge-1.6.1.jar", "release": "v0.2.4" }
+    },
+    {
+      "path": "mods/journeymap-optional.jar",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+      "size": 100,
+      "side": "client",
+      "policy": "managed",
+      "modids": ["journeymap"],
+      "install_state": "disabled",
+      "category": "optional",
+      "on_remove": "orphan",
+      "source": { "type": "release-asset", "asset": "journeymap.jar" }
+    },
+    {
+      "path": "options.txt",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000004",
+      "size": 10,
+      "side": "client",
+      "policy": "seed-once",
+      "source": { "type": "release-zip", "asset": "data-client.zip", "inner": "seeds/client/options.txt" }
+    },
+    {
+      "path": "mods/legacy-url-example.jar",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000005",
+      "size": 5,
+      "side": "client",
+      "policy": "managed",
+      "class": "relaunch",
+      "source": { "type": "url", "url": "https://example.invalid/x.jar" }
+    }
+  ]
+}

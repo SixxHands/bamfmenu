@@ -3,3 +3,5 @@ plugins {
 }
 rootProject.name = 'bamfmenu'
 include 'earlywindow'
+include 'bamfos-updater-boot'
+include 'bamfos-updater-engine'

@@ -1,0 +1,40 @@
+// Plain Java updater engine (no Minecraft classpath, zero runtime dependencies) loaded by the core in an isolated classloader.
+plugins {
+    id 'java-library'
+}
+
+version = updater_version
+group = mod_group_id
+
+base {
+    archivesName = 'bamfos-updater-engine'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+/* The boot shim reflects into this exact class+method; a rename here silently breaks the handoff.
+   Record the ABI level in the manifest so the shim can sanity-log what it loaded. */
+tasks.named('jar') {
+    manifest {
+        attributes 'Updater-Abi': '1',
+                   'Implementation-Version': project.version
+    }
+}
