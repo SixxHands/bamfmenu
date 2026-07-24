@@ -74,23 +74,31 @@ public final class Journal {
      * Executes every op idempotently against instanceDir; a half-replayed journal replays clean.
      * moves verify the staged file's sha before placing (a stale helper/journal with wrong bytes
      * no-ops rather than corrupting, .3); deletes are unconditional (the path is superseded).
+     * A failing op (locked target, AV hold) is RETURNED, never thrown: one stuck file must not
+     * poison the whole replay, and the caller decides whether the journal survives.
      */
-    public void replay(Path instanceDir) throws IOException {
+    public List<Op> replay(Path instanceDir) {
+        List<Op> failed = new ArrayList<>();
         for (Op op : ops) {
-            Path to = instanceDir.resolve(op.to());
-            if (op.kind().equals("delete")) {
-                Files.deleteIfExists(to);
-            } else {
-                Path from = instanceDir.resolve(op.from());
-                if (!Files.isRegularFile(from)) {
-                    continue; // already moved by a previous partial replay
+            try {
+                Path to = instanceDir.resolve(op.to());
+                if (op.kind().equals("delete")) {
+                    Files.deleteIfExists(to);
+                } else {
+                    Path from = instanceDir.resolve(op.from());
+                    if (!Files.isRegularFile(from)) {
+                        continue; // already moved by a previous partial replay
+                    }
+                    if (!HashUtils.sha256(from).equals(op.sha256())) {
+                        continue; // stale staging (rollback race) -- never place unverified bytes
+                    }
+                    Files.createDirectories(to.getParent());
+                    Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
                 }
-                if (!HashUtils.sha256(from).equals(op.sha256())) {
-                    continue; // stale staging (rollback race) -- never place unverified bytes
-                }
-                Files.createDirectories(to.getParent());
-                Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                failed.add(op);
             }
         }
+        return failed;
     }
 }

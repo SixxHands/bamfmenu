@@ -49,6 +49,12 @@ public final class Reconciler {
     // ---------------------------------------------------------------- plan
 
     public SyncPlan plan(Manifest manifest, Ledger ledger) throws IOException {
+        return plan(manifest, ledger, false);
+    }
+
+    /** repair mode: ignore ledger shortcut and hash-verify EVERY managed file --
+     *  the mangled-install fix without reseeding. Pins, bits, seed-once, untracked all still honored. */
+    public SyncPlan plan(Manifest manifest, Ledger ledger, boolean repair) throws IOException {
         SyncPlan plan = new SyncPlan();
         Set<String> manifestPaths = new HashSet<>();
 
@@ -73,6 +79,10 @@ public final class Reconciler {
 
             if (led != null && led.sha256.equals(e.sha256())) {
                 if (disk.exists()) {
+                    if (repair && !HashUtils.sha256(disk.file()).equals(e.sha256())) {
+                        plan.actions.add(new Action(Kind.REPLACE_BAK, e.path(), e, disk.disabled));
+                        continue; // During repair, restore mismatched files and keep a .bak copy of the old one.
+                    }
                     if (disk.disabled != led.disabled) {
                         // User toggled enabled/disabled state; update the ledger via ADOPT without touching disk.
                         plan.actions.add(new Action(Kind.ADOPT, e.path(), e, disk.disabled));
@@ -247,7 +257,14 @@ public final class Reconciler {
             }
         }
         journal.save(Journal.pathIn(dir));
-        journal.replay(dir);
+        List<Journal.Op> stuck = journal.replay(dir);
+        if (!stuck.isEmpty()) {
+            // pending semantics: the ops survive as the journal for a later step 0;
+            // everything below still commits, because the placed files are real and A2 adopts the rest
+            journal.ops.clear();
+            journal.ops.addAll(stuck);
+            journal.save(Journal.pathIn(dir));
+        }
 
         for (Action a : plan.actions) {
             switch (a.kind()) {
@@ -273,7 +290,11 @@ public final class Reconciler {
         }
         ledger.installedVersion = manifest.pack().version();
         ledger.save(Ledger.pathIn(dir));
-        Files.deleteIfExists(Journal.pathIn(dir));
+        if (stuck.isEmpty()) {
+            // the IN-MEMORY stuck list decides, never a re-read: the saved journal always still
+            // lists the ops it was born with, so re-loading it would keep every journal forever
+            Files.deleteIfExists(Journal.pathIn(dir));
+        }
     }
 
     /** Two ENABLED jars sharing a modid (or two service jars sharing a provider) after this sync

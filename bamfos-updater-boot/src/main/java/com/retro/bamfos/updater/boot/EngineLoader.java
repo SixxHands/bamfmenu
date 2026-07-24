@@ -33,6 +33,14 @@ public final class EngineLoader {
      * baseline re-extract before giving up -- the baseline then self-updates via the normal sync.
      */
     public static Engine ensureAndLoad(Path enginePath, Supplier<InputStream> baseline) throws IOException {
+        // the engine cannot replace itself while loaded, so a sync stages engine.jar.new and WE
+        // swap it here, before anything has the file open -- same contract as the wrapper's shim
+        // swap line, one pattern all the way down
+        Path staged = enginePath.resolveSibling(enginePath.getFileName() + ".new");
+        if (Files.isRegularFile(staged)) {
+            Files.createDirectories(enginePath.getParent());
+            Files.move(staged, enginePath, StandardCopyOption.REPLACE_EXISTING);
+        }
         if (!Files.isRegularFile(enginePath)) {
             extract(enginePath, baseline);
         }
