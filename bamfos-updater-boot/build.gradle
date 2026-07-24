@@ -55,6 +55,14 @@ tasks.named('processResources') {
     dependsOn 'copyBaseline'
 }
 
+// Keep package README.md files out of the shipped jar.
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+}
+
 tasks.named('test') {
     useJUnitPlatform()
 }
