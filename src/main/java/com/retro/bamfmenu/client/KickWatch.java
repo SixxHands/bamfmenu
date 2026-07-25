@@ -36,6 +36,14 @@ public final class KickWatch {
     private static final Logger LOGGER = LogUtils.getLogger();
 
     private static volatile String lastHost = "";
+    private static boolean demoFired;
+
+    /* The offline demo hook: BAMFMENU_BSOD_DEMO=repairable|unrepairable swaps the FIRST title
+       screen for the blue screen with a realistic sample reason -- no server, no kick needed.
+       Fires ONCE per session (ESC returns to the title, which must not re-trigger the swap). */
+    private static final String DEMO_REASON = "Mod channels failed to negotiate with the server."
+            + "\nsupplementaries:main: This channel is missing on the server side, but required on the client!"
+            + "\nchipped:main: This channel is missing on the server side, but required on the client!";
 
     /** Stashed by ConnectScreenMixin: the config-phase kick has no other address source. */
     public static void connectingTo(String host, int port) {
@@ -45,6 +53,13 @@ public final class KickWatch {
     public static void onScreenOpening(ScreenEvent.Opening event) {
         try {
             Screen s = event.getNewScreen();
+            String demo = System.getenv("BAMFMENU_BSOD_DEMO");
+            if (demo != null && !demoFired && s instanceof net.minecraft.client.gui.screens.TitleScreen) {
+                demoFired = true;
+                LOGGER.info("[bamfmenu] blue screen DEMO up ({})", demo);
+                event.setNewScreen(new BsodScreen(DEMO_REASON, "unrepairable".equals(demo)));
+                return;
+            }
             String reason = null;
             boolean mismatch = false;
             if (s instanceof ModMismatchDisconnectedScreen mm) {
