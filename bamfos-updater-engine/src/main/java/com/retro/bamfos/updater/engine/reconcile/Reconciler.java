@@ -28,6 +28,15 @@ public final class Reconciler {
         void fetch(FileEntry entry, Path dest) throws IOException;
     }
 
+    /** Coarse progress callback for the apply phase; per-file events go through the Fetcher wrapper. */
+    @FunctionalInterface
+    public interface Pulse {
+        Pulse NONE = () -> {
+        };
+
+        void applying();
+    }
+
     public static final class DupeModidAbort extends RuntimeException {
         public DupeModidAbort(String msg) {
             super(msg);
@@ -69,6 +78,16 @@ public final class Reconciler {
             if (e.policy() == FileEntry.Policy.SEED_ONCE) {
                 if (led == null && !disk.exists()) {
                     plan.actions.add(new Action(Kind.SEED, e.path(), e, false));
+                } else if ("servers".equals(e.merge())) {
+                    // For merge-servers, leave the player's other entries alone and only insert or refresh
+                    // our entry when the seed changed, our entry is missing, or merge_name isn't recorded yet.
+                    boolean seedChanged = led == null || !led.sha256.equals(e.sha256());
+                    boolean entryGone = !seedChanged && led.mergeName != null
+                            && (!disk.exists() || com.retro.bamfos.updater.engine.ping.ServersDat
+                                    .entryIp(disk.file(), led.mergeName).isEmpty());
+                    if (seedChanged || entryGone || (!seedChanged && led.mergeName == null)) {
+                        plan.actions.add(new Action(Kind.MERGE_SERVERS, e.path(), e, false));
+                    }
                 }
                 continue; // Rule D handles seed-once files; rules A-C skip them.
             }
@@ -201,16 +220,24 @@ public final class Reconciler {
      * A crash anywhere leaves either untouched disk or a completable local journal.
      */
     public void apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher) throws IOException {
+        apply(plan, manifest, ledger, fetcher, Pulse.NONE, false);
+    }
+
+    /**
+     * In staged mode we stop after writing the journal (no replay or ledger); next boot's step 0 finishes
+     * from staged bytes. Skips MERGE_SERVERS because a running session rewrites servers.dat.
+     */
+    public void apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher, Pulse pulse, boolean staged) throws IOException {
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
-        Map<String, Path> staged = new HashMap<>();
+        Map<String, Path> stagedFiles = new HashMap<>();
         for (Action a : plan.downloads()) {
             Path part = staging.resolve(a.entry().sha256() + ".part");
             fetcher.fetch(a.entry(), part);
             if (!HashUtils.sha256(part).equals(a.entry().sha256())) {
                 throw new IOException("staged bytes for " + a.path() + " failed hash verification");
             }
-            staged.put(a.path(), part);
+            stagedFiles.put(a.path(), part);
         }
 
         dupeGuard(plan, manifest, ledger);
@@ -236,7 +263,7 @@ public final class Reconciler {
                     if (d.exists() && !d.file().equals(dir.resolve(target))) {
                         journal.ops.add(new Journal.Op("delete", "", rel(d.file()), "")); // bit flip / stale twin
                     }
-                    journal.ops.add(new Journal.Op("move", rel(staged.get(a.path())), target, a.entry().sha256()));
+                    journal.ops.add(new Journal.Op("move", rel(stagedFiles.get(a.path())), target, a.entry().sha256()));
                 }
                 case DELETE -> {
                     Disk d = disk(a.path());
@@ -245,6 +272,11 @@ public final class Reconciler {
                     }
                 }
                 case QUARANTINE -> {
+                    if (staged) {
+                        // Skip quarantine in staged mode (like MERGE_SERVERS): replaying without a ledger commit would
+                        // lose the fires-once flag, so let next boot's normal plan handle it.
+                        continue;
+                    }
                     // rename via the journal too: copy then delete-old keeps replay idempotent
                     Path jar = dir.resolve(a.path());
                     Path parked = staging.resolve("q-" + jar.getFileName());
@@ -252,11 +284,16 @@ public final class Reconciler {
                     journal.ops.add(new Journal.Op("move", rel(parked), a.path() + ".disabled", HashUtils.sha256(parked)));
                     journal.ops.add(new Journal.Op("delete", "", a.path(), ""));
                 }
-                case ADOPT, ORPHAN -> {
+                case ADOPT, ORPHAN, MERGE_SERVERS -> {
+                    // merge is a read-modify-write, not a replayable move; it runs below, atomically
                 }
             }
         }
         journal.save(Journal.pathIn(dir));
+        if (staged) {
+            return;
+        }
+        pulse.applying();
         List<Journal.Op> stuck = journal.replay(dir);
         if (!stuck.isEmpty()) {
             // pending semantics: the ops survive as the journal for a later step 0;
@@ -284,7 +321,22 @@ public final class Reconciler {
                     Ledger.Entry en = new Ledger.Entry("");
                     en.quarantined = true;
                     en.disabled = true;
+                    en.quarantineReason = "on the pack kill list (removed_modids)";
                     ledger.files.put(a.path(), en);
+                }
+                case MERGE_SERVERS -> {
+                    // Don't fail the ledger commit if servers.dat is locked or the seed is bad since the
+                    // other file moves already ran; just skip it and retry on the next sync.
+                    try {
+                        String name = com.retro.bamfos.updater.engine.ping.ServersDat
+                                .mergeFirstEntry(dir.resolve(a.path()), Files.readAllBytes(stagedFiles.get(a.path())));
+                        Ledger.Entry en = new Ledger.Entry(a.entry().sha256());
+                        en.seedOnce = true;
+                        en.mergeName = name;
+                        ledger.files.put(a.path(), en);
+                    } catch (IOException e) {
+                        System.out.println("[updater] servers.dat merge skipped: " + e.getMessage());
+                    }
                 }
             }
         }

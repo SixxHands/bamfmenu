@@ -15,10 +15,11 @@ public final class SyncPlan {
         REPLACE,      // B: disk matches ledger -> swap in new bytes
         REPLACE_BAK,  // C: user edited a file the pack also changed -> .bak first, pack wins
         RESTORE,      // A': user deleted a managed file -> put it back
-        SEED,         // D first install of a seed-once file
-        DELETE,       // E with on_remove=delete
-        ORPHAN,       // E with on_remove=orphan -> forget in ledger, leave the file
-        QUARANTINE    // join-guard Q1: untracked jar on the kill list -> rename .disabled
+        SEED,          // D first install of a seed-once file
+        DELETE,        // E with on_remove=delete
+        ORPHAN,        // E with on_remove=orphan -> forget in ledger, leave the file
+        QUARANTINE,    // join-guard Q1: untracked jar on the kill list -> rename .disabled
+        MERGE_SERVERS  // D with merge=servers: refresh only our entry, keep the player's others
     }
 
     /** entry is null for ledger-only actions (DELETE/ORPHAN/QUARANTINE); path is the manifest path. */
@@ -29,7 +30,7 @@ public final class SyncPlan {
 
     public List<Action> downloads() {
         return actions.stream().filter(a -> switch (a.kind()) {
-            case INSTALL, REPLACE, REPLACE_BAK, RESTORE, SEED -> true;
+            case INSTALL, REPLACE, REPLACE_BAK, RESTORE, SEED, MERGE_SERVERS -> true;
             default -> false;
         }).toList();
     }

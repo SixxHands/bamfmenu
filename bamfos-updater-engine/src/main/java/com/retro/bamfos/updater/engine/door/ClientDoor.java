@@ -1,11 +1,11 @@
 package com.retro.bamfos.updater.engine.door;
 
+import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
+import com.retro.bamfos.updater.engine.guard.DisconnectHistory;
+import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
-import com.retro.bamfos.updater.engine.ping.BetterStatus;
-import com.retro.bamfos.updater.engine.ping.ServersDat;
-import com.retro.bamfos.updater.engine.ping.Slp;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 
 import java.nio.charset.StandardCharsets;
@@ -18,6 +18,9 @@ import java.util.Optional;
  * jar in mods/ is opened. start to finish: converge to what the SERVER BROADCASTS, never to
  * "latest". No broadcast, no local version, no wifi = boot as-is in well under the ping budget.
  * A client-side tag= pin beats the broadcast; the UI owns the warning.
+ * Also Q2's boot half: consume the mod's kick breadcrumb FIRST (quarantine fires even on a
+ * version-current boot -- the classic kick has no version drift at all), record what the cycle
+ * changed so the next kick with the same fingerprint can escalate honestly.
  */
 public final class ClientDoor {
 
@@ -28,80 +31,90 @@ public final class ClientDoor {
     }
 
     public int run(Path dir) {
+        BootBus bus = BootBus.at(dir);
+        Optional<KickGuard.Outcome> kick = Optional.empty();
+        String versionBefore = localVersion(dir).orElse("");
+        int code = 0;
+        String end = "skip";
         try {
+            bus.line("com.bamf.updater kmod start");
+            bus.line("com.bamf.updater load succeeded");
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             Optional<InstanceLock> lock = InstanceLock.acquire(dir);
             if (lock.isEmpty()) {
-                System.out.println("[updater] another sync is running, skipping");
+                bus.line("updater: another sync is running, skipping");
                 return 0;
             }
             try (InstanceLock ignored = lock.get()) {
                 SyncCore.stepZero(dir);
+                kick = KickGuard.consume(dir, cfg.pins(), bus);
 
                 String tag;
                 if (!cfg.tagPin().isEmpty()) {
                     tag = cfg.tagPin(); // pinned version intentionally ignores the server broadcast
-                    System.out.println("[updater] version PINNED to " + tag);
+                    bus.line("updater: version PINNED to " + tag);
                 } else {
-                    Optional<String> broadcast = broadcast(dir, cfg);
+                    Optional<String> broadcast = Doors.broadcast(dir, cfg);
                     if (broadcast.isEmpty()) {
-                        System.out.println("[updater] no carrier, boot continues");
+                        bus.line("updater: no carrier, boot continues");
                         return 0;
                     }
+                    // fresh read, NOT versionBefore: step 0 may have just replayed a staged sync
+                    // that rewrote bcc, and comparing the broadcast against the pre-replay value
+                    // would re-sync a pack that is already current
                     String local = localVersion(dir).orElse("");
                     if (local.isEmpty()) {
-                        System.out.println("[updater] no local version (bcc-common.toml missing), sync skipped");
+                        bus.line("updater: no local version (bcc-common.toml missing), sync skipped");
                         return 0;
                     }
                     if (broadcast.get().equals(local)) {
-                        System.out.println("[updater] pack current (" + local + "), nothing to do");
-                        return 0;
+                        if (Files.isRegularFile(dir.resolve(".bamfos-updater").resolve("manifest-current.json"))) {
+                            bus.line("updater: pack current (" + local + "), nothing to do");
+                            return 0;
+                        }
+                        // current but never synced (fresh seed install): run the no-op sync once
+                        // anyway, because it backfills the manifest/notes caches the BIOS pages read
+                        bus.line("updater: pack current (" + local + "), caching release data");
                     }
                     tag = broadcast.get(); // upgrades and rollbacks use the same sync path
                 }
-                return SyncCore.sync(dir, cfg, tag, false, Reconciler.Side.CLIENT, apiBase);
+                code = SyncCore.sync(dir, cfg, tag, versionBefore, false, false,
+                        Reconciler.Side.CLIENT, apiBase, bus);
+                end = "ok";
+                return code;
             }
         } catch (HttpFetcher.TokenDead dead) {
             SyncCore.tokenDead(dir, dead);
+            bus.line("AuthEvent: GITHUB token FAILED (401) - updates disabled");
+            end = "fail";
             return 0;
         } catch (Exception e) {
+            bus.line("updater: sync failed, boot continues"); // the terminal deserves the why-line too
             System.out.println("[updater] sync skipped: " + e); // the game must still boot
+            end = "fail";
             return 0;
+        } finally {
+            bus.end(end);
+            kick.ifPresent(k -> recordCycle(dir, k, versionBefore));
         }
     }
 
-    /** The server's BCC broadcast: properties host first, else servers.dat's first entry. */
-    private Optional<String> broadcast(Path dir, UpdaterConfig cfg) {
-        String host = cfg.serverHost();
-        int port = cfg.serverPort();
-        if (host.isEmpty()) {
-            Optional<String> ip = ServersDat.firstIp(dir.resolve("servers.dat"));
-            if (ip.isEmpty()) {
-                return Optional.empty();
-            }
-            String raw = ip.get();
-            int colon = raw.lastIndexOf(':');
-            if (colon > 0 && raw.indexOf(':') == colon) { // host:port form, but never split an IPv6
-                host = raw.substring(0, colon);
-                try {
-                    port = Integer.parseInt(raw.substring(colon + 1));
-                } catch (NumberFormatException bad) {
-                    host = raw;
-                }
-            } else {
-                host = raw;
-            }
-        }
+    /** The history entry Q2's variant choice hangs on: did this cycle change ANYTHING -- a
+     *  quarantine or the pack version? Neither, and the same kick again = unrepairable screen. */
+    private void recordCycle(Path dir, KickGuard.Outcome kick, String versionBefore) {
         try {
-            return BetterStatus.parse(Slp.status(host, port)).map(BetterStatus::version);
-        } catch (Exception unreachable) {
-            return Optional.empty();
+            boolean versionChanged = !localVersion(dir).orElse("").equals(versionBefore);
+            DisconnectHistory h = DisconnectHistory.load(dir);
+            h.record(kick.fingerprint(), kick.action(), versionChanged, System.currentTimeMillis());
+            h.save(dir);
+        } catch (Exception ignored) {
+            // don't fail boot if we can't write kick history; worst case is one extra retry screen
         }
     }
 
     /** The local pack version off BCC's config, same read the BIOS uses -- but keeping the v-form
      *  intact: the broadcast and the tag are byte-for-byte this string. */
-    private static Optional<String> localVersion(Path dir) {
+    static Optional<String> localVersion(Path dir) {
         Path bcc = dir.resolve("config").resolve("bcc-common.toml");
         if (!Files.isRegularFile(bcc)) {
             return Optional.empty();

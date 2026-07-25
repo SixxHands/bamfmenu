@@ -43,6 +43,8 @@ public final class EngineEntry {
             return new ServerDoor(GithubReleases.realApi()).run(dir, tag, repair);
         }
         if (client) {
+            // bind ops before running the door so the BIOS menu still works if boot sync fails
+            com.retro.bamfos.updater.engine.ops.OpsGateway.bind(dir, GithubReleases.realApi());
             return new ClientDoor(GithubReleases.realApi()).run(dir);
         }
         return 0;

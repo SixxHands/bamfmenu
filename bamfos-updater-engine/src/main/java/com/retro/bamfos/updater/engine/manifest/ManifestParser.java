@@ -145,7 +145,10 @@ public final class ManifestParser {
             onRemove = enumOf(FileEntry.OnRemove.class, str(e.get("on_remove"), at + ".on_remove"), at + ".on_remove");
         }
 
-        return new FileEntry(path, sha, size, side, policy, clazz, source, List.copyOf(modids), installDisabled, category, onRemove);
+        // Ignore unknown merge values so older engines safely fall back to the base policy.
+        String merge = e.get("merge") instanceof String mg && mg.equals("servers") ? mg : null;
+
+        return new FileEntry(path, sha, size, side, policy, clazz, source, List.copyOf(modids), installDisabled, category, onRemove, merge);
     }
 
     private static FileEntry.Source parseSource(Map<String, Object> s, String at) {

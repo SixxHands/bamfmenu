@@ -32,7 +32,7 @@ public final class Fx {
         return new FileEntry(path, HashUtils.sha256(bytes), bytes.length, side, policy,
                 FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, path, null, null, null, null),
-                modids, installDisabled, category, onRemove);
+                modids, installDisabled, category, onRemove, null);
     }
 
     public static Manifest manifest(String version, List<String> removedModids, FileEntry... files) {
@@ -76,7 +76,8 @@ public final class Fx {
         }
     }
 
-    /** Same uncompressed-NBT shape vanilla writes: root compound > list "servers" > {name, ip}. */
+    /** Matches vanilla uncompressed NBT layout, including TAG_End for empty lists:
+     *  root compound > list "servers" > {name, ip}. */
     public static byte[] serversDat(String... ips) {
         try {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -85,7 +86,7 @@ public final class Fx {
             out.writeUTF("");
             out.writeByte(0x09);
             out.writeUTF("servers");
-            out.writeByte(0x0A);
+            out.writeByte(ips.length == 0 ? 0x00 : 0x0A); // vanilla uses TAG_End as the element type for empty lists
             out.writeInt(ips.length);
             for (String ip : ips) {
                 out.writeByte(0x08);

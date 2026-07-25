@@ -2,12 +2,14 @@ package com.retro.bamfmenu;
 
 import com.mojang.logging.LogUtils;
 import com.retro.bamfmenu.client.EarlyWindowKeying;
+import com.retro.bamfmenu.client.KickWatch;
 import com.retro.bamfmenu.client.WindowIconHandler;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.common.NeoForge;
 import org.slf4j.Logger;
 
 /* BAMF: Menu is a client-only cosmetic mod that dresses up the game window and boot experience:
@@ -28,6 +30,8 @@ public final class BamfMenu {
 
     public BamfMenu(IEventBus modBus, ModContainer container) {
         modBus.addListener(this::onClientSetup);
+        // join-guard Q2 (the XP blue screen): screen-open interception is a GAME-bus event
+        NeoForge.EVENT_BUS.addListener(KickWatch::onScreenOpening);
         LOGGER.info("[bamfmenu] client cosmetic mod loaded");
     }
 

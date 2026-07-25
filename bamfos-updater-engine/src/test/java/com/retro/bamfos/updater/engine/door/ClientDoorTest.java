@@ -120,8 +120,19 @@ class ClientDoorTest {
     @Test
     void broadcastMatchesLocal_noop() throws IOException {
         bcc("vNEW");
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8)); // steady state
         assertEquals(0, new ClientDoor(base).run(dir));
         assertFalse(Files.exists(dir.resolve("mods")));
+    }
+
+    @Test
+    void firstCurrentBoot_runsOnceToBackfillCaches() throws IOException {
+        bcc("vNEW"); // current but never synced: the BIOS caches don't exist yet
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertTrue(Files.exists(dir.resolve(".bamfos-updater/manifest-current.json")));
+        Files.deleteIfExists(dir.resolve("mods/cm.jar"));
+        assertEquals(0, new ClientDoor(base).run(dir)); // steady state now: a true noop
+        assertFalse(Files.exists(dir.resolve("mods/cm.jar")));
     }
 
     @Test
@@ -180,6 +191,22 @@ class ClientDoorTest {
         bcc("vOLD");
         assertEquals(0, new ClientDoor(base).run(dir));
         assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+    }
+
+    @Test
+    void kickBreadcrumb_quarantinesCulprit_andWritesHistory() throws IOException {
+        bcc("vNEW"); // Keep pack up to date so we verify Q2 still runs when no sync is needed.
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/chipped-x.jar"), Fx.jar("chippedx"));
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("last-disconnect.json"),
+                "{\"server\":\"127.0.0.1\",\"reason\":\"Channel chippedx:main is missing on the server side\",\"fingerprint\":\"fp77\",\"at\":1}");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertTrue(Files.exists(dir.resolve("mods/chipped-x.jar.disabled")));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater/last-disconnect.json")));
+        String hist = Files.readString(dir.resolve(".bamfos-updater").resolve("disconnect-history.json"));
+        assertTrue(hist.contains("fp77"));
+        assertTrue(hist.contains("quarantined mods/chipped-x.jar"));
     }
 
     @Test

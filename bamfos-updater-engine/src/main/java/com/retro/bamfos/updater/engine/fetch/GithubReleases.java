@@ -25,6 +25,7 @@ public final class GithubReleases implements Reconciler.Fetcher {
     private final Path cacheDir;
     private final Map<String, Map<String, Long>> assetIds = new HashMap<>(); // tag -> name -> id
     private final Map<String, Path> zipCache = new HashMap<>();
+    private Map<?, ?> targetRelease; // the release JSON of THE tag: notes body etc, free
 
     public GithubReleases(String baseUrl, String repo, String token, String tag, Path cacheDir) {
         this.baseUrl = baseUrl;
@@ -59,8 +60,16 @@ public final class GithubReleases implements Reconciler.Fetcher {
             if (m.get("tag_name") instanceof String tn && !tn.equals(tag) && !"latest".equals(tag)) {
                 throw new IOException("asked for tag " + tag + ", got " + tn);
             }
+            if (tag.equals(this.tag)) {
+                targetRelease = m;
+            }
             return m;
         }
+    }
+
+    /** Returns a string field from the release JSON (e.g. "body" for release notes), or null if absent. */
+    public String targetReleaseField(String key) {
+        return targetRelease != null && targetRelease.get(key) instanceof String s ? s : null;
     }
 
     public String manifestJson() throws IOException, InterruptedException {

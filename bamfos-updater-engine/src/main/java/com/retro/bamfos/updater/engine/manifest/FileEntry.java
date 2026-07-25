@@ -14,7 +14,10 @@ public record FileEntry(
         List<String> modids,
         boolean installDisabled,
         String category,
-        OnRemove onRemove) {
+        OnRemove onRemove,
+        // merge="servers" on a seed-once entry merges servers.dat (updates our entry, keeps the player's
+        // others). Additive field so older engines safely fall back to plain seed-once without bumping schema_version.
+        String merge) {
 
     public enum Side { BOTH, CLIENT, SERVER }
 

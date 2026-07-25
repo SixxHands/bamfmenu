@@ -53,6 +53,102 @@ public final class ServersDat {
         }
     }
 
+    /** Looks up the ip for the entry named `name`, returning empty if missing or malformed. */
+    public static Optional<String> entryIp(Path serversDat, String name) {
+        if (!Files.isRegularFile(serversDat)) {
+            return Optional.empty();
+        }
+        try (var in = Files.newInputStream(serversDat)) {
+            var entry = findEntry(Nbt.read(in), name);
+            if (entry != null && entry.get("ip") instanceof Nbt.Val ip && ip.v() instanceof String s) {
+                return Optional.of(s);
+            }
+        } catch (IOException | RuntimeException e) {
+            // Fall through if unreadable.
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Merges the seed's first entry into servers.dat while keeping the player's other servers and NBT
+     * fields intact. Places the full seed if missing; returns the entry name for merge_name. Atomic write.
+     */
+    public static String mergeFirstEntry(Path local, byte[] seedBytes) throws IOException {
+        Nbt.Root seed = Nbt.read(new java.io.ByteArrayInputStream(seedBytes));
+        var seedEntry = firstEntry(seed);
+        if (seedEntry == null) {
+            throw new IOException("seed servers.dat has no server entries");
+        }
+        String seedName = seedEntry.get("name") instanceof Nbt.Val n && n.v() instanceof String s ? s : "";
+        String seedIp = seedEntry.get("ip") instanceof Nbt.Val i && i.v() instanceof String s ? s : "";
+
+        Nbt.Root localTree = null;
+        if (Files.isRegularFile(local)) {
+            try (var in = Files.newInputStream(local)) {
+                localTree = Nbt.read(in);
+            } catch (IOException | RuntimeException unreadable) {
+                localTree = null; // their file is broken; the seed becomes the file, .bak nothing (it was garbage)
+            }
+        }
+        byte[] out;
+        if (localTree == null || serversList(localTree) == null) {
+            out = seedBytes;
+        } else {
+            Nbt.ListVal servers = serversList(localTree);
+            var ours = findEntry(localTree, seedName);
+            if (ours != null) {
+                if (ours.get("ip") instanceof Nbt.Val ip && seedIp.equals(ip.v())) {
+                    return seedName; // Already up to date; skip rewriting to preserve mtime.
+                }
+                ours.put("ip", new Nbt.Val(0x08, seedIp));
+            } else {
+                if (servers.elemType() != 0x0A) {
+                    // vanilla writes elemType 0 (TAG_End) for an EMPTY list; inserting into that
+                    // shape would emit a list claiming TAG_End elements with compound bytes after,
+                    // which nothing can read back, rebuild the list as a compound list first
+                    servers = new Nbt.ListVal(0x0A, new java.util.ArrayList<>());
+                    localTree.compound().put("servers", new Nbt.Val(0x09, servers));
+                }
+                servers.items().add(0, new Nbt.Val(0x0A, seedEntry)); // ours goes first, theirs keep their order
+            }
+            out = Nbt.write(localTree);
+        }
+        Files.createDirectories(local.toAbsolutePath().getParent());
+        Path tmp = local.resolveSibling(local.getFileName() + ".tmp");
+        Files.write(tmp, out);
+        Files.move(tmp, local, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        return seedName;
+    }
+
+    private static Nbt.ListVal serversList(Nbt.Root root) {
+        return root.compound().get("servers") instanceof Nbt.Val v && v.v() instanceof Nbt.ListVal l ? l : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.LinkedHashMap<String, Nbt.Val> firstEntry(Nbt.Root root) {
+        Nbt.ListVal l = serversList(root);
+        if (l == null || l.items().isEmpty()) {
+            return null;
+        }
+        return l.items().get(0).v() instanceof java.util.LinkedHashMap<?, ?> m
+                ? (java.util.LinkedHashMap<String, Nbt.Val>) m : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.LinkedHashMap<String, Nbt.Val> findEntry(Nbt.Root root, String name) {
+        Nbt.ListVal l = serversList(root);
+        if (l == null) {
+            return null;
+        }
+        for (Nbt.Val item : l.items()) {
+            if (item.v() instanceof java.util.LinkedHashMap<?, ?> m
+                    && m.get("name") instanceof Nbt.Val n && name.equals(n.v())) {
+                return (java.util.LinkedHashMap<String, Nbt.Val>) m;
+            }
+        }
+        return null;
+    }
+
     private static String readString(DataInputStream in) throws IOException {
         byte[] b = new byte[in.readUnsignedShort()];
         in.readFully(b);

@@ -29,6 +29,17 @@ public final class HttpFetcher {
         }
     }
 
+    /** A definite HTTP status failure, typed so download() can tell "this resume offset is bad"
+     *  (416 and friends) apart from a wire hiccup worth resuming from. */
+    public static final class HttpStatusError extends IOException {
+        public final int code;
+
+        public HttpStatusError(int code, String url) {
+            super("HTTP " + code + " from " + url);
+            this.code = code;
+        }
+    }
+
     private final HttpClient client = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NEVER)
             .connectTimeout(Duration.ofSeconds(15))
@@ -39,7 +50,7 @@ public final class HttpFetcher {
         IOException last = null;
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
-                return follow(url, bearer, accept);
+                return follow(url, bearer, accept, 0);
             } catch (TokenDead dead) {
                 throw dead; // never retried: the token will not get better
             } catch (IOException e) {
@@ -50,7 +61,7 @@ public final class HttpFetcher {
         throw last;
     }
 
-    private HttpResponse<InputStream> follow(String url, String bearer, String accept) throws IOException, InterruptedException {
+    private HttpResponse<InputStream> follow(String url, String bearer, String accept, long rangeStart) throws IOException, InterruptedException {
         String current = url;
         boolean auth = true;
         for (int hop = 0; hop < 5; hop++) {
@@ -58,6 +69,10 @@ public final class HttpFetcher {
                     .timeout(Duration.ofMinutes(5))
                     .header("Accept", accept)
                     .header("X-GitHub-Api-Version", "2022-11-28");
+            if (rangeStart > 0) {
+                // resume: the API host ignores this and 302s; S3 answers 206
+                rq.header("Range", "bytes=" + rangeStart + "-");
+            }
             if (auth && bearer != null && !bearer.isEmpty()) {
                 rq.header("Authorization", "Bearer " + bearer);
             }
@@ -76,21 +91,48 @@ public final class HttpFetcher {
             }
             if (code >= 400) {
                 resp.body().close();
-                throw new IOException("HTTP " + code + " from " + current);
+                throw new HttpStatusError(code, current);
             }
             return resp;
         }
         throw new IOException("too many redirects from " + url);
     }
 
-    /** Streams a GET to dest via a .part sibling + atomic move; caller verifies the hash. */
+    /** Streams a GET to dest via a .dl sibling and atomic move (caller verifies hash). Retries mid-body
+     *  drops using HTTP Range (206 appends, 200 restarts from byte 0). */
     public void download(String url, String bearer, String accept, Path dest) throws IOException, InterruptedException {
         Files.createDirectories(dest.getParent());
         Path part = dest.resolveSibling(dest.getFileName() + ".dl");
-        HttpResponse<InputStream> resp = get(url, bearer, accept);
-        try (InputStream in = resp.body()) {
-            Files.copy(in, part, StandardCopyOption.REPLACE_EXISTING);
+        IOException last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                long have = Files.isRegularFile(part) ? Files.size(part) : 0;
+                HttpResponse<InputStream> resp = follow(url, bearer, accept, have);
+                boolean append = resp.statusCode() == 206 && have > 0;
+                try (InputStream in = resp.body();
+                     java.io.OutputStream out = Files.newOutputStream(part,
+                             java.nio.file.StandardOpenOption.CREATE,
+                             java.nio.file.StandardOpenOption.WRITE,
+                             append ? java.nio.file.StandardOpenOption.APPEND
+                                    : java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
+                    in.transferTo(out);
+                }
+                Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (TokenDead dead) {
+                throw dead;
+            } catch (IOException e) {
+                last = e;
+                if (e instanceof HttpStatusError h && h.code >= 400 && h.code < 500
+                        && Files.isRegularFile(part) && Files.size(part) > 0) {
+                    // the resume offset itself is what the host rejects (the classic: a COMPLETE
+                    // .dl orphaned by a kill between transferTo and move asks for bytes=<len>- and
+                    // gets 416 forever) -- a poisoned partial must never outlive the attempt
+                    Files.deleteIfExists(part);
+                }
+                Thread.sleep(1000L << attempt);
+            }
         }
-        Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
+        throw last;
     }
 }

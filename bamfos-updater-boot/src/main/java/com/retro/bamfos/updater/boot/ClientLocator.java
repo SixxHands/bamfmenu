@@ -36,8 +36,27 @@ public final class ClientLocator implements IModFileCandidateLocator {
             Path engineJar = gameDir.resolve(".bamfos-updater").resolve("engine").resolve("bamfos-updater-engine.jar");
             EngineLoader.Engine engine = EngineLoader.ensureAndLoad(engineJar, EngineLoader.embeddedBaseline());
             engine.enter(new String[]{"--client", "--dir", gameDir.toString()});
+            bindOps(engine);
         } catch (Throwable t) {
             System.out.println("[updater] sync skipped: " + t); // Never block the game from booting.
+        }
+    }
+
+    /** Hangs the engine's ops doorway on UpdaterBridge for the BIOS. Absence-tolerant:
+     *  an engine from before the ops surface simply leaves the bridge unbound, nothing breaks. */
+    private static void bindOps(EngineLoader.Engine engine) {
+        try {
+            Class<?> gateway = Class.forName(UpdaterAbi.OPS_GATEWAY_CLASS, false, engine.loader());
+            java.lang.reflect.Method invoke = gateway.getMethod(UpdaterAbi.OPS_INVOKE_METHOD, String.class, Object[].class);
+            UpdaterBridge.bindOps((op, args) -> {
+                try {
+                    return invoke.invoke(null, op, args);
+                } catch (ReflectiveOperationException e) {
+                    return "error: " + e;
+                }
+            });
+        } catch (ReflectiveOperationException oldEngine) {
+            // pre-ops engine: BIOS renders its not-available state, everything else works
         }
     }
 

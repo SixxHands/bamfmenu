@@ -113,7 +113,7 @@ class FixtureServerTest {
                 ? new FileEntry.Source(FileEntry.Source.Type.RELEASE_ZIP, asset, inner, release, null, null)
                 : new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, asset, null, release, null, null);
         return new FileEntry(path, "0".repeat(64), 1, FileEntry.Side.BOTH, FileEntry.Policy.MANAGED,
-                FileEntry.Clazz.HOT, src, List.of(), false, null, FileEntry.OnRemove.DELETE);
+                FileEntry.Clazz.HOT, src, List.of(), false, null, FileEntry.OnRemove.DELETE, null);
     }
 
     private static void json(com.sun.net.httpserver.HttpExchange ex, String body) throws IOException {

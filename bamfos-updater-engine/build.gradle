@@ -43,6 +43,8 @@ tasks.named('test') {
 tasks.named('jar') {
     manifest {
         attributes 'Updater-Abi': '1',
-                   'Implementation-Version': project.version
+                   'Implementation-Version': project.version,
+                   // Stable module name for the watchdog's jar-in-jar embed.
+                   'Automatic-Module-Name': 'bamfos.updater.engine'
     }
 }

@@ -242,6 +242,14 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private String lastSeen = "";
     private int frame;
 
+    /* The updater display: the feed tails .bamfos-updater/bus.log on the render thread;
+       updaterSyncActive mirrors its state as a volatile because the DEL gate reads it on the MAIN thread.
+       A DEL press mid-sync prints NOTHING, the warning footer answers with a slow red blink, the
+       press timestamp is the only thing that crosses back. */
+    private com.retro.bamfmenu.early.core.updater.UpdaterFeed updaterFeed;
+    private volatile boolean updaterSyncActive;
+    private volatile long updaterDelDeniedNanos;
+
     /* BIOS SETUP state. Written from the GLFW key callback (main thread, during glfwPollEvents) and read
        by the render thread, hence volatile. optionOn holds the cosmetic per-option toggle states. */
     private GLFWKeyCallback keyCallback;
@@ -543,6 +551,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         parseArgs(arguments);
         loadBiosConfig();
         cacheSystemInfo();
+        // before locators run, so its construction-time truncate beats the engine's first bus write
+        updaterFeed = new com.retro.bamfmenu.early.core.updater.UpdaterFeed(gameDir);
         bamfosArt = Art.loadArt("/ui/bamfos.txt");
         sixxArt = Art.loadArt("/ui/sixxhands.txt");
         // faceA/faceB are shared: the cutscene reveal (ctx.recoveryFaceA/B) + the SETUP achievement panel
@@ -1082,6 +1092,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         int maxChars = Math.max(16, logicalW / charWidth - 1);
 
         pumpLog(maxChars);
+        pumpUpdater(maxChars);
 
         canvas.beginFrameShader(logicalW, logicalH);
 
@@ -1099,7 +1110,23 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             drawText(MARGIN, headTop + i * lineSpacing, head.get(i), colour);
         }
 
-        int logTop = headTop + (head.size() + 1) * lineSpacing;
+        /* The updater POST block sits under the hardware block, in the same Award
+           register. Data-driven reveal: rows appear as the engine's bus events land, nothing on the
+           header's frame ramp. The log area below simply starts lower while the block is up. */
+        int updRows = 0;
+        if (updaterFeed != null) {
+            var upd = updaterFeed.postBlock(frame);
+            if (!upd.isEmpty()) {
+                int updTop = headTop + (head.size() + 1) * lineSpacing;
+                for (int i = 0; i < upd.size(); i++) {
+                    drawText(MARGIN, updTop + i * lineSpacing, clip(upd.get(i).text(), maxChars),
+                            upd.get(i).bright() ? cBright() : cFg());
+                }
+                updRows = upd.size() + 1;
+            }
+        }
+
+        int logTop = headTop + (head.size() + 1 + updRows) * lineSpacing;
         int logBottom = logicalH - lineSpacing * 3;
         int logLines = Math.max(1, (logBottom - logTop) / lineSpacing);
         List<String> recent = recentLog(logLines);
@@ -1109,7 +1136,16 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
 
         /* Boot progress (spinner + ASCII bar) and the classic SETUP-prompt footer. */
         drawText(MARGIN, logicalH - lineSpacing * 2, statusLine(maxChars), cBright());
-        drawText(MARGIN, logicalH - lineSpacing, footerLine(maxChars), cDim());
+        drawText(MARGIN, logicalH - lineSpacing, footerLine(maxChars), footerColour());
+    }
+
+    /* Slow red blink after a swallowed DEL. ~1Hz at
+       POST's 20fps, for a few seconds, then back to steady dim. ABGR: red is 0xFF0000FF here. */
+    private int footerColour() {
+        if (updaterSyncActive && System.nanoTime() - updaterDelDeniedNanos < 3_000_000_000L) {
+            return (frame / 10) % 2 == 0 ? 0xFF0000FF : cDim();
+        }
+        return cDim();
     }
 
     /* Text rendering lives in TerminalCanvas; this forwards so the provider's many call sites are unchanged. */
@@ -1301,6 +1337,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
         if (state != Mode.SETUP) {
             if (key == GLFW_KEY_DELETE && !biosUsed) { // BIOS is one-way: no re-entry once you've left it
+                if (updaterSyncActive) {
+                    // BIOS pages touch files and a sync IS files: the press prints
+                    // nothing, the warning footer answers with its slow red blink
+                    updaterDelDeniedNanos = System.nanoTime();
+                    return;
+                }
                 setupSel = 0;
                 setupNotice = "";
                 confirmFor = -1;
@@ -2663,6 +2705,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     }
 
     private String footerLine(int maxChars) {
+        if (updaterSyncActive) {
+            // mid-flash warning, exactly what real boards show; reverts the moment the sync ends
+            return clip("WARNING: Do not turn off power or reset the system during update!", maxChars);
+        }
         String serial = biosDate.replace("/", "") + "-BAMFOS-440BX-6A69VPADC";
         // The DEL prompt shows only on the FIRST POST; once BIOS has been used it's a one-way door, so the
         // post-exit POST just shows the serial (no misleading "Press DEL" hint).
@@ -2685,6 +2731,27 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             log.addLast(clip("> " + text, maxChars));
             while (log.size() > MAX_LOG) {
                 log.removeFirst();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /* The updater's dmesg lines join the same log deque as the FML meters, in arrival order, so the
+       kernel-log register reads as ONE boot. Also mirrors the feed's sync flag into the
+       volatile the main-thread DEL gate reads. Render thread only, like pumpLog. */
+    private void pumpUpdater(int maxChars) {
+        if (updaterFeed == null) {
+            return;
+        }
+        try {
+            updaterFeed.poll();
+            updaterSyncActive = updaterFeed.syncActive();
+            String line;
+            while ((line = updaterFeed.nextLogLine()) != null) {
+                log.addLast(clip("> " + line, maxChars));
+                while (log.size() > MAX_LOG) {
+                    log.removeFirst();
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -2727,6 +2794,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
 
     private String statusLine(int maxChars) {
         char spin = SPINNER[(frame / 3) % SPINNER.length];
+        if (updaterSyncActive && updaterFeed != null && !updaterFeed.note().isEmpty()) {
+            // the notes ARE the notification: headline rides the status line mid-sync
+            return clip("[" + spin + "] " + updaterFeed.note(), maxChars);
+        }
         String step = "loading";
         int pct = -1;
         try {
