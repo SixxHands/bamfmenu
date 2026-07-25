@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="bamfoswatchdog"
+version="${updater_version}"
+displayName="BAMFOS Watchdog"
+authors="Retro"
+description='''Watches the pack repo for new releases; announces, saves, and restarts the server so the wrapper re-syncs. Author updates the server by doing nothing but publishing.'''
+
+[[dependencies.bamfoswatchdog]]
+modId="neoforge"
+type="required"
+versionRange="[21.1,)"
+ordering="NONE"
+side="SERVER"
+
+[[dependencies.bamfoswatchdog]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="SERVER"

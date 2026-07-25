@@ -1,0 +1,72 @@
+// Server-only NeoForge mod that polls for new releases, warns players, and stops the server so the wrapper can sync and restart. Bundles the engine jar-in-jar for HTTP/JSON/config.
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' // version inherited from root (1.0.11) - do NOT repeat it here
+}
+
+version = updater_version
+group = mod_group_id
+
+base {
+    archivesName = 'bamfos-updater-watchdog'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+repositories {
+    mavenCentral() // MDG adds the NeoForged + Mojang repos itself
+}
+
+neoForge {
+    version = project.neo_version
+
+    runs {
+        server {
+            server()
+            programArgument 'nogui' // headless: the dev-server run must never pop a window
+        }
+    }
+
+    mods {
+        'bamfoswatchdog' {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    implementation project(':bamfos-updater-engine')
+    jarJar project(':bamfos-updater-engine')
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Keep package README.md files out of the shipped jar.
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var replaceProperties = [
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            loader_version_range   : loader_version_range,
+            mod_license            : mod_license,
+            updater_version        : updater_version
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/neoforge.mods.toml') { expand replaceProperties }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
