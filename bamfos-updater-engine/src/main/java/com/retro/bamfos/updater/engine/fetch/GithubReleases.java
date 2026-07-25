@@ -53,6 +53,12 @@ public final class GithubReleases implements Reconciler.Fetcher {
                 for (Object a : assets) {
                     if (a instanceof Map<?, ?> am && am.get("name") instanceof String n && am.get("id") instanceof Long id) {
                         ids.put(n, id);
+                        // GITHUB SANITIZES asset filenames on upload (spaces become dots, parens
+                        // vanish): the manifest says "ATi Structures (1.21+).jar", the release says
+                        // "ATi.Structures.1.21+.jar", and an exact-match lookup strands every such
+                        // mod. Key a normalized form too; a wrong pick can't slip through because the
+                        // hash check downstream rejects it loudly.
+                        ids.putIfAbsent(norm(n), id);
                     }
                 }
             }
@@ -102,12 +108,20 @@ public final class GithubReleases implements Reconciler.Fetcher {
             ids = assetIds.get(fromTag);
         }
         Long id = ids == null ? null : ids.get(name);
+        if (id == null && ids != null) {
+            id = ids.get(norm(name)); // the sanitized-name fallback, see release()
+        }
         if (id == null) {
             throw new IOException("asset '" + name + "' not on release " + fromTag + " (load-bearing release deleted?)");
         }
         // this endpoint redirects (302) to S3; HttpFetcher strips the auth header on redirect
         http.download(baseUrl + "/repos/" + repo + "/releases/assets/" + id,
                 token, "application/octet-stream", dest);
+    }
+
+    /** Normalizes a name to lowercase alphanumerics so matching survives filename sanitization. */
+    private static String norm(String name) {
+        return name.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
     }
 
     private void extractInner(String fromTag, String zipAsset, String inner, Path dest) throws IOException, InterruptedException {
