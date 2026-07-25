@@ -41,6 +41,8 @@ neoForge {
 dependencies {
     implementation project(':bamfos-updater-engine')
     jarJar project(':bamfos-updater-engine')
+    // Dev runs don't unpack jar-in-jar, so add the engine directly to runServer's classpath.
+    additionalRuntimeClasspath project(':bamfos-updater-engine')
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
