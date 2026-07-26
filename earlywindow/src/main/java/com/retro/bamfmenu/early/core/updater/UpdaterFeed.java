@@ -12,14 +12,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 
-/**
- * Tails the updater engine's bus file (.bamfos-updater/bus.log) and turns its events into the POST
- * display model. The filesystem IS the bus on purpose: we never touch updater classes, so any
- * combination of absent/old/broken updater leaves the terminal fully functional. We truncate the
- * file at construction -- the window starts BEFORE the locator phase, so everything read afterwards
- * is THIS boot's; stale last-boot content can never render.
- * Single-consumer by design: poll() and every getter run on the render thread only.
- */
+// Tails .bamfos-updater/bus.log and turns updater events into the POST screen status lines (file-based so a missing or broken updater never breaks earlywindow).
 public final class UpdaterFeed {
 
     /** One rendered row of the updater POST block; bright marks the pack's CAPS finale lines. */
@@ -27,8 +20,11 @@ public final class UpdaterFeed {
     }
 
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
-    /* the block must NOT keep growing downward -- it
-       holds a fixed footprint and SCROLLS ITSELF, each line past the max shifting everything up
+    /** The hardware block's own word for a device that has not answered yet, reused so the updater rows sit
+     *  in the same register as the Display Adapter row above them. */
+    private static final String DETECTING = "Detecting ...";
+    /* Keep the status block at a fixed height and scroll it instead of growing downward, it
+       keeps a fixed footprint and SCROLLS ITSELF, each line past the max shifting everything up
        one, like a real terminal region. The layout below stays where it was. */
     private static final int MAX_ROWS = 8;
     private static final int DONE_KEPT = 12; // memory cap only; the visible window is MAX_ROWS
@@ -52,6 +48,12 @@ public final class UpdaterFeed {
     private String syncedFrom;
     private String syncedTo;
     private boolean pendingSwaps;
+    private String closingRow; // Final status line when END isn't ok (null while still running).
+    private final boolean shimPresent;
+    private boolean identified; // the door answered IDENT, so the hardware rows carry real values
+    private String identChannel = "";
+    private String identEngine = "";
+    private String identLock = "";
 
     public UpdaterFeed(String gameDir) {
         busFile = Paths.get(gameDir, ".bamfos-updater", "bus.log");
@@ -62,8 +64,10 @@ public final class UpdaterFeed {
             }
         } catch (IOException ignored) {
         }
-        if (!Files.isRegularFile(Paths.get(gameDir, "mods", "bamfos-updater-boot.jar"))) {
-            pendingLog.add("updater: not present, sync skipped"); // earlymenu owns this line
+        shimPresent = Files.isRegularFile(Paths.get(gameDir, "mods", "bamfos-updater-boot.jar"));
+        if (!shimPresent) {
+            // Use the same kmod prefix as the updater when the boot shim isn't installed.
+            pendingLog.add("com.bamf.updater: kmod not found, package manager offline");
         }
     }
 
@@ -101,10 +105,16 @@ public final class UpdaterFeed {
         String[] f = line.split("\t", -1);
         switch (f[0]) {
             case "LOG" -> pendingLog.add(f.length > 1 ? f[1] : "");
+            case "IDENT" -> {
+                identified = true;
+                identChannel = channelName(f.length > 1 ? f[1] : "");
+                identEngine = f.length > 2 ? f[2] : "";
+                identLock = f.length > 3 ? f[3] : "";
+            }
             case "SYNC" -> {
                 sawSync = true;
                 syncActive = true;
-                repo = f.length > 1 ? f[1] : "";
+                repo = channelName(f.length > 1 ? f[1] : "");
                 from = f.length > 2 ? f[2] : "";
                 to = f.length > 3 ? f[3] : "";
             }
@@ -129,8 +139,22 @@ public final class UpdaterFeed {
             case "END" -> {
                 syncActive = false;
                 ended = true;
-                if (sawSync && f.length > 1 && !"ok".equals(f[1])) {
-                    pendingLog.add("updater: sync did not finish, boot continues"); // the block freezing needs a why
+                // the block has to TERMINATE, not just stop being fed. postBlock() rebuilds from sawSync
+                // every frame for the rest of the boot, so a spinner row left standing spins forever and a
+                // screen of "file ... ok" rows reads as a finished update, either one contradicting the
+                // honest skip line the engine printed underneath (BootBus.end: ok | skip | limited | fail)
+                String state = f.length > 1 ? f[1] : "";
+                currentFile = "";
+                if (sawSync && !"ok".equals(state)) {
+                    closingRow = "limited".equals(state)
+                            ? "Update paused ........ RATE LIMITED"
+                            : "Update stopped ....... FAILED";
+                }
+                // only a real "fail" earns the why-line. A rate-limited END already printed its own honest
+                // line, and stacking "sync aborted" under it renders two rows that contradict each other
+                if (sawSync && "fail".equals(state)) {
+                    // Tell the user boot continues: updater failures never block game launch.
+                    pendingLog.add("updater: sync aborted, boot continues");
                 }
             }
             default -> {
@@ -152,6 +176,40 @@ public final class UpdaterFeed {
     /** The release-notes headline for the status line, "" until the engine sends one. */
     public String note() {
         return note;
+    }
+
+    /**
+     * The updater's three rows for the detected-hardware block:
+     * the channel a sync would pull from, the engine build that would run it, and the release lock. All three
+     * report state the engine actually read, never a default this side guessed at, so each one reads
+     * "Detecting ..." until the door sends IDENT during the locator phase, exactly how the Display Adapter
+     * row above them behaves. Empty when the shim jar is not in mods/: there is no channel, no build and no
+     * lock to report, and the log already said the kmod is missing, so three NOT INSTALLED rows would only
+     * say it three more times.
+     */
+    public List<String> hardwareRows() {
+        if (!shimPresent) {
+            return List.of();
+        }
+        String lock = identLock.isEmpty() ? "none" : identLock + "  PINNED";
+        return List.of(
+                "Update Channel   : " + answered(identChannel, "  OK"),
+                "Updater Module   : " + answered(identEngine, "  OK"),
+                // an empty pin is the answer "not pinned", so this row has no blank case to guard
+                "Release Lock     : " + (identified ? lock : DETECTING));
+    }
+
+    /** A row's value once the door has answered, else the word for a device that has not. A BLANK field
+     *  counts as no answer, because `Update Channel   :   OK` reports a device with no name, which is the one
+     *  thing these rows exist not to do (a hand-edited `repo=` with nothing after it lands here). */
+    private String answered(String field, String trailer) {
+        return identified && !field.isEmpty() ? field + trailer : DETECTING;
+    }
+
+    /** Returns just the repo name without `owner/` so screen recordings don't expose a GitHub username. */
+    private static String channelName(String repo) {
+        int slash = repo.lastIndexOf('/');
+        return slash >= 0 && slash + 1 < repo.length() ? repo.substring(slash + 1) : repo;
     }
 
     /** The Award-style updater POST block, rebuilt per frame like every other terminal string. */
@@ -183,6 +241,9 @@ public final class UpdaterFeed {
         }
         if (pendingSwaps) {
             out.add(new Line("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", true));
+        }
+        if (closingRow != null) {
+            out.add(new Line(closingRow, true)); // Highlight in bright text to match the final status lines.
         }
         // Keep the newest rows visible by trimming from the top.
         return out.size() <= MAX_ROWS ? out : out.subList(out.size() - MAX_ROWS, out.size());

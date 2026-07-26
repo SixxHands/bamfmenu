@@ -1,32 +1,39 @@
 package com.retro.bamfos.updater.watchdog;
 
-/**
- * The watchdog's whole decision table, MC-free so it tests in milliseconds. One rule matters more
- * than the rest: the RESTART-STORM GUARD. The wrapper's sync and this poll MUST agree on the target
- * (both resolve /releases/latest), but if a restart ever fails to converge the versions -- door
- * offline, token dead on the box, disk full -- a naive watchdog would bounce the server forever.
- * A target we already restarted for inside the cooldown window is HELD, loudly, until the tag
- * changes or the cooldown lapses.
- */
+/* Pure decision table for the watchdog (MC-free for fast unit tests). Includes the restart-storm guard:
+ * after MAX_RESTART_ATTEMPTS fail to converge on the same tag, stop restarting until a new tag ships. */
 final class WatchdogBrain {
 
+    /** One restart, one retry after the cooldown lapses, then stop retrying this tag. */
+    static final int MAX_RESTART_ATTEMPTS = 2;
+
+    /** Keep temporary cooldown hold and terminal max-attempts hold separate so log messages match actual state. */
     enum Decision {
         NOTHING,       // no tag, or already on it
         RESTART,       // announce + countdown + halt; the wrapper does the rest
         ANNOUNCE_ONLY, // auto_restart=false: just notify, let the operator restart manually
-        HOLD_STORM     // this exact target already got its restart and nothing converged
+        HOLD_COOLDOWN, // already restarted for this tag recently; wait for cooldown
+        HOLD_GIVEUP    // max restart attempts reached for this tag; wait for a newer release
     }
 
     static Decision decide(String latestTag, String localVersion, boolean autoRestart,
-                           String lastRestartTarget, long lastRestartAt, long now, long cooldownMs) {
+                           String lastRestartTarget, long lastRestartAt,
+                           int attempts, int maxAttempts, long now, long cooldownMs) {
         if (latestTag == null || latestTag.isEmpty() || latestTag.equals(localVersion)) {
             return Decision.NOTHING;
         }
         if (!autoRestart) {
             return Decision.ANNOUNCE_ONLY;
         }
-        if (latestTag.equals(lastRestartTarget) && now - lastRestartAt < cooldownMs) {
-            return Decision.HOLD_STORM;
+        if (latestTag.equals(lastRestartTarget)) {
+            // the count is asked FIRST, because a spent count is terminal whether or not the cooldown is still
+            // running, and answering COOLDOWN there would promise a retry that never comes
+            if (attempts >= maxAttempts) {
+                return Decision.HOLD_GIVEUP;
+            }
+            if (now - lastRestartAt < cooldownMs) {
+                return Decision.HOLD_COOLDOWN;
+            }
         }
         return Decision.RESTART;
     }

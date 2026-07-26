@@ -1,7 +1,12 @@
 package com.retro.bamfos.updater.engine.door;
 
+import com.retro.bamfos.updater.engine.EngineEntry;
 import com.retro.bamfos.updater.engine.Fx;
+import com.retro.bamfos.updater.engine.journal.InstanceLock;
+import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
+import com.retro.bamfos.updater.engine.ledger.Ledger;
+import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.util.HashUtils;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -26,8 +31,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** M5 end-to-end: the client door converges to what the SERVER BROADCASTS -- an in-test SLP server
- *  speaks the real varint wire so the whole ping path runs, no mocks between us and the socket. */
+/** End-to-end client door test: converges to what the server broadcasts using an in-test SLP server
+ * over a live socket (no mocked ping path). */
 class ClientDoorTest {
 
     @TempDir
@@ -84,8 +89,9 @@ class ClientDoorTest {
                 entry(SyncCore.ENGINE_PATH, ENGINE_NEW, "both", "engine.jar", null));
         http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         base = "http://127.0.0.1:" + http.getAddress().getPort();
+        // Include a release notes body so the PACK UPDATE headline formatting path actually gets tested.
         http.createContext("/repos/o/r/releases/tags/vNEW", ex -> json(ex,
-                "{\"tag_name\":\"vNEW\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1},{\"name\":\"bcc.toml\",\"id\":2},{\"name\":\"cm.jar\",\"id\":3},{\"name\":\"srv.jar\",\"id\":4},{\"name\":\"shim.jar\",\"id\":5},{\"name\":\"engine.jar\",\"id\":6}]}"));
+                "{\"tag_name\":\"vNEW\",\"body\":\"Cobblemon 1.6.1 and a nether fix\\n\\nthe rest of the notes\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1},{\"name\":\"bcc.toml\",\"id\":2},{\"name\":\"cm.jar\",\"id\":3},{\"name\":\"srv.jar\",\"id\":4},{\"name\":\"shim.jar\",\"id\":5},{\"name\":\"engine.jar\",\"id\":6}]}"));
         http.createContext("/repos/o/r/releases/assets/", ex -> {
             String id = ex.getRequestURI().getPath().substring("/repos/o/r/releases/assets/".length());
             ex.getResponseHeaders().add("Location", base + "/s3/" + id);
@@ -106,6 +112,11 @@ class ClientDoorTest {
                 out.write(body);
             }
         });
+        // Simulated GitHub rate limit: 403 response with rate-limit headers.
+        http.createContext("/limited/repos/o/r/releases/tags/vNEW", ex -> {
+            ex.getResponseHeaders().add("x-ratelimit-remaining", "0");
+            ex.sendResponseHeaders(403, -1);
+        });
         http.start();
 
         props("server_host=127.0.0.1\nserver_port=" + slpPort + "\n");
@@ -120,9 +131,169 @@ class ClientDoorTest {
     @Test
     void broadcastMatchesLocal_noop() throws IOException {
         bcc("vNEW");
-        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8)); // steady state
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8)); // Steady state: write both bcc and the ledger at the same version so the fast path triggers
+        // (bcc alone could have been written by a partial sync).
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.save(Ledger.pathIn(dir));
         assertEquals(0, new ClientDoor(base).run(dir));
         assertFalse(Files.exists(dir.resolve("mods")));
+        // Pin the quiet-state bus lines in order, including IDENT (values are checked in UpdaterFeedTest).
+        assertEquals(List.of(
+                "LOG\tcom.bamf.updater: kmod start",
+                "LOG\tcom.bamf.updater: module initialized",
+                "IDENT\to/r\t" + EngineEntry.version() + "\t", // the fixture's repo, straight off the config
+                "LOG\tupdater: packages current (vNEW), nothing to do",
+                "END\tskip"),
+                Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")));
+    }
+
+    /**
+     * The double-launch boot, which is the ONE boot where IDENT's position is load-bearing: the door returns at
+     * the lock-held line, so if IDENT were sent inside the lock the three hardware rows would sit on
+     * `Detecting ...` for the entire session, which is the exact thing UpdaterFeed's rows exist not to do. A
+     * live foreign PID in the lock file is the only way to make acquire() refuse (our own PID reclaims it), and
+     * the parent-or-any-live-process pick is the same one ServerDoorTest uses.
+     */
+    @Test
+    void secondInstance_identsBeforeTheLockLine() throws IOException {
+        bcc("vNEW");
+        Files.createDirectories(InstanceLock.pathIn(dir).getParent());
+        long other = ProcessHandle.allProcesses()
+                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive())
+                .findFirst().orElseThrow().pid();
+        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other));
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        int ident = indexOfPrefix(bus, "IDENT\t");
+        int held = bus.indexOf("LOG\tupdater: instance lock held, sync skipped");
+        assertTrue(held >= 0, String.valueOf(bus));
+        assertTrue(ident >= 0 && ident < held, String.valueOf(bus));
+        assertFalse(Files.exists(dir.resolve("mods")));
+    }
+
+    private static int indexOfPrefix(List<String> lines, String prefix) {
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).startsWith(prefix)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Do not take the packages-current shortcut when installed_version lags behind bcc-common.toml;
+     * a deferred row writes no journal, so the ledger version is the only signal that a retry is needed. */
+    @Test
+    void aPartiallyAppliedSync_isRePlannedOnTheNextBoot() throws IOException {
+        bcc("vOLD");
+        byte[] theirBuild = "the player's own build of cm".getBytes(StandardCharsets.UTF_8);
+        Fx.write(dir, "mods/cm.jar", theirBuild); // edited AND the pack moved it: this rule, so a .bak is owed
+        Ledger led = new Ledger();
+        led.installedVersion = "vOLD";
+        led.files.put("mods/cm.jar", new Ledger.Entry("the-sha-we-placed-back-then"));
+        led.save(Ledger.pathIn(dir));
+        // Use a non-empty directory at the .bak path to simulate a file locked by antivirus.
+        Files.createDirectories(dir.resolve("mods/cm.jar.bak-vOLD/wedge"));
+        // Keep shim and engine up to date so pendingSelf doesn't mask the result below.
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW);
+        Fx.write(dir, SyncCore.ENGINE_PATH, ENGINE_NEW);
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(BCC_NEW, Files.readAllBytes(dir.resolve("config/bcc-common.toml")));
+        // sync() used to infer pending status from the journal alone, so an all-deferred run wrote
+        // "updated vOLD -> vNEW" to last-sync.json even though installed_version stayed at vOLD.
+        assertTrue(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
+                        .contains("some apply on next boot"));
+        assertArrayEquals(theirBuild, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertEquals("vOLD", Ledger.load(Ledger.pathIn(dir)).installedVersion);
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater/journal.json")));
+
+        // Remove the blocker directory. The stale ledger should force this boot to re-plan.
+        Files.delete(dir.resolve("mods/cm.jar.bak-vOLD/wedge"));
+        Files.delete(dir.resolve("mods/cm.jar.bak-vOLD"));
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertArrayEquals(theirBuild, Files.readAllBytes(dir.resolve("mods/cm.jar.bak-vOLD")));
+        assertEquals("vNEW", Ledger.load(Ledger.pathIn(dir)).installedVersion);
+        assertTrue(Files.readString(dir.resolve(".bamfos-updater").resolve("bus.log"))
+                        .contains("last sync left rows unapplied"));
+        assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
+                        .contains("some apply on next boot"));
+    }
+
+    /** Log the failing path for both stuck and abandoned ops so unrecoverable targets can be diagnosed
+     * instead of showing only a bare count. */
+    @Test
+    void stepZero_namesThePathsItCouldNotFinish() throws IOException {
+        Fx.write(dir, ".bamfos-updater/staging/there.part", CM);
+        Files.createDirectories(dir.resolve("mods/locked.jar/wedge")); // portable stand-in for an AV hold
+        Files.write(dir.resolve("mods/locked.jar/wedge/f"), CM);
+        Journal j = new Journal();
+        j.targetVersion = "vNEW";
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/gone.part", "mods/vanished.jar",
+                HashUtils.sha256(CM)));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/there.part", "mods/locked.jar",
+                HashUtils.sha256(CM)));
+        j.save(Journal.pathIn(dir));
+
+        String out = captureOut(() -> SyncCore.stepZero(dir));
+
+        assertTrue(out.contains("could not be re-verified"), String.valueOf(out));
+        assertTrue(out.contains("mods/vanished.jar"), String.valueOf(out));
+        assertTrue(out.contains("mods/locked.jar"), String.valueOf(out));
+    }
+
+    private interface Body {
+        void run() throws IOException;
+    }
+
+    private static String captureOut(Body body) throws IOException {
+        java.io.PrintStream real = System.out;
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        System.setOut(new java.io.PrintStream(buf, true, StandardCharsets.UTF_8));
+        try {
+            body.run();
+        } finally {
+            System.setOut(real);
+        }
+        return buf.toString(StandardCharsets.UTF_8);
+    }
+
+    /** Corrupt journal or ledger files must recover instead of throwing on every boot and wedging updates
+     * until deleted by hand. */
+    @Test
+    void unreadableStateFiles_neverBrickTheDoor() throws IOException {
+        bcc("vOLD");
+        Path bam = dir.resolve(".bamfos-updater");
+        Files.createDirectories(bam);
+        Files.writeString(bam.resolve("journal.json"), "{\"target_version\":\"vNEW\",\"ops\":[{\"kind\":\"mov");
+        Files.writeString(bam.resolve("ledger.json"), "{\"installed_version\":");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertEquals("vNEW", Ledger.load(Ledger.pathIn(dir)).installedVersion);
+        assertFalse(Files.exists(bam.resolve("journal.json")));
+    }
+
+    /** Verify staging gets pruned. Manifest JSONs and release zips are cached per tag, so old copies
+     * would pile up across releases if we didn't clean them out. */
+    @Test
+    void staleReleaseCaches_areSwept_soStagingCannotGrowForever() throws IOException {
+        bcc("vOLD");
+        Path staging = dir.resolve(".bamfos-updater").resolve("staging");
+        Files.createDirectories(staging);
+        Files.write(staging.resolve("zip-vOLD-data-common.zip"), new byte[4096]); // Stale zip from the previous release.
+        Files.writeString(staging.resolve("manifest-vOLD.json"), "{}");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertFalse(Files.exists(staging.resolve("zip-vOLD-data-common.zip")));
+        assertFalse(Files.exists(staging.resolve("manifest-vOLD.json")));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
     }
 
     @Test
@@ -130,9 +301,11 @@ class ClientDoorTest {
         bcc("vNEW"); // current but never synced: the BIOS caches don't exist yet
         assertEquals(0, new ClientDoor(base).run(dir));
         assertTrue(Files.exists(dir.resolve(".bamfos-updater/manifest-current.json")));
+        // Deleting a managed mod while on the current version must trigger a restore, not a no-op
+        // (otherwise an antivirus deleting one jar leaves the client broken even though the version matches).
         Files.deleteIfExists(dir.resolve("mods/cm.jar"));
-        assertEquals(0, new ClientDoor(base).run(dir)); // steady state now: a true noop
-        assertFalse(Files.exists(dir.resolve("mods/cm.jar")));
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
     }
 
     @Test
@@ -147,11 +320,82 @@ class ClientDoorTest {
         assertArrayEquals(SHIM_NEW, Files.readAllBytes(dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new")));
         assertEquals("old shim on disk", Files.readString(dir.resolve(SyncCore.SHIM_CLIENT_PATH)));
         assertArrayEquals(ENGINE_NEW, Files.readAllBytes(dir.resolve(SyncCore.ENGINE_PATH + ".new")));
+        // the success state, pinned on the WRITER side too. UpdaterFeed matches these four strings by literal
+        // across a filesystem bus, so renaming one compiles fine and just renders a row contradicting the
+        // other: a sync that fully worked would close the POST block on "Update stopped ....... FAILED" with
+        // "updater: sync aborted, boot continues" under it, and nothing anywhere would be red
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertEquals("END\tok", bus.get(bus.size() - 1));
+        // the headline the status line carries mid-sync: first line of the notes only, and a COMMA, because the
+        // house rule bans a dash as punctuation and dash form was corrected to match
+        assertTrue(bus.contains("NOTE\tPACK UPDATE vNEW, Cobblemon 1.6.1 and a nether fix"), bus.toString());
 
-        // the loop closes: bcc now says vNEW, so the same broadcast is a noop
+        // bcc now matches vNEW so the same broadcast is a no-op, unless a managed mod is missing
+        // (which still gets restored).
         Files.delete(dir.resolve("mods/cm.jar"));
         assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+    }
+
+    /** The anti-loop guard escalates to the blue screen after no-op cycles. A boot with no carrier never
+     * ran a sync, so it shouldn't count toward that limit and break the next retry. */
+    @Test
+    void skippedSync_recordsNoCycle() throws IOException {
+        props("server_host=127.0.0.1\nserver_port=1\n"); // closed port: no carrier, sync never runs
+        bcc("vOLD");
+        Path crumb = com.retro.bamfos.updater.engine.guard.Breadcrumb.pathIn(dir);
+        Files.createDirectories(crumb.getParent());
+        Files.writeString(crumb, "{\"server\":\"1.2.3.4\",\"reason\":\"nothing we can name\","
+                + "\"fingerprint\":\"ffff0000\",\"at\":1}");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        var hist = com.retro.bamfos.updater.engine.guard.DisconnectHistory.load(dir);
+        assertNull(hist.entries.get("ffff0000"));
+    }
+
+    @Test
+    void currentVersion_missingManagedMod_isRestored() throws IOException {
+        bcc("vNEW");
+        assertEquals(0, new ClientDoor(base).run(dir)); // backfills the caches
+        Files.delete(dir.resolve("mods/cm.jar"));       // antivirus / user deletion, version unchanged
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+    }
+
+    /** Pinned paths must be excluded from firstMissingManaged so deleting a pinned file does not break the
+     * fast path and force a network sync on every boot. */
+    @Test
+    void firstMissingManaged_skipsPinnedPaths() throws IOException {
+        Ledger led = new Ledger();
+        led.files.put("mods/cm.jar", new Ledger.Entry("some-sha")); // placed by us, then deleted by them
+        led.save(Ledger.pathIn(dir));
+
+        assertTrue(SyncCore.firstMissingManaged(dir, List.of("mods/cm.jar")).isEmpty());
+        assertEquals("mods/cm.jar", SyncCore.firstMissingManaged(dir, List.of()).orElseThrow());
+    }
+
+    @Test
+    void pinnedMissingFile_isNotRestored() throws IOException {
+        bcc("vNEW");
+        assertEquals(0, new ClientDoor(base).run(dir)); // unpinned first, so cm.jar really gets installed
+        assertTrue(Files.isRegularFile(dir.resolve("mods/cm.jar")));
+        props("server_host=127.0.0.1\nserver_port=" + slpPort + "\npin=mods/cm.jar\n"); // now they pin it
+        Files.delete(dir.resolve("mods/cm.jar"));                                       // and delete it
+        assertEquals(0, new ClientDoor(base).run(dir));
         assertFalse(Files.exists(dir.resolve("mods/cm.jar")));
+    }
+
+    /** Rate-limit 403s must not write the token-dead marker, which would falsely flag a working token as revoked. */
+    @Test
+    void rateLimitedBoot_neverWritesTheTokenDeadMarker() throws IOException {
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base + "/limited").run(dir));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve("token-dead")));
+        // Needs a separate END state: rate limits usually hit mid-download, and a FAILED end prints
+        // "sync aborted" right below the rate-limited line, which contradicts it.
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertEquals("END\tlimited", bus.get(bus.size() - 1));
     }
 
     @Test
@@ -269,6 +513,29 @@ class ClientDoorTest {
         try (OutputStream out = ex.getResponseBody()) {
             out.write(b);
         }
+    }
+
+    /** Abort messages give actionable text for known faults and stay neutral for unknown errors rather
+     * than falsely blaming the network. */
+    @Test
+    void abortLine_namesOnlyTheCausesItCanProve() {
+        assertEquals("integrity: two enabled jars claim one modid, sync aborted",
+                ClientDoor.abortLine(new Reconciler.DupeModidAbort("cm.jar vs cm-2.jar")));
+        assertEquals("updater: repository unreachable, boot continues",
+                ClientDoor.abortLine(new java.net.UnknownHostException("api.github.com")));
+        assertEquals("updater: repository unreachable, boot continues",
+                ClientDoor.abortLine(new IOException("wrapped", new java.net.ConnectException("refused"))));
+        assertEquals("updater: sync aborted, boot continues",
+                ClientDoor.abortLine(new IOException("There is not enough space on the disk")));
+        assertEquals("updater: sync aborted, boot continues",
+                ClientDoor.abortLine(new IllegalStateException("something new")));
+        // A bad repo= value (like one with a space) throws IllegalArgumentException wrapping URISyntaxException.
+        // Don't misclassify that as "unreachable" when the config file itself is broken.
+        assertEquals("updater: sync aborted, boot continues",
+                ClientDoor.abortLine(new IllegalArgumentException("bad repo",
+                        new java.net.URISyntaxException("SixxHands/bamfos pack", "Illegal character in path"))));
+        assertEquals("updater: sync aborted, boot continues",
+                ClientDoor.abortLine(new java.net.MalformedURLException("no protocol: bamfos-pack")));
     }
 
     private static void skipFrame(DataInputStream in) throws IOException {

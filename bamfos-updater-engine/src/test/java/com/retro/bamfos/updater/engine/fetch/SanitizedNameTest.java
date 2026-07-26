@@ -69,6 +69,29 @@ class SanitizedNameTest {
     }
 
     @Test
+    void latestAlias_resolvesAssets() throws Exception {
+        // ServerDoor defaults to the "latest" alias, so asset cache names must accept it too.
+        server.createContext("/repos/o/r/releases/latest", ex -> {
+            byte[] b = ("{\"tag_name\":\"vT\",\"assets\":[{\"name\":\"ATi.Structures.Vanilla.V1.4.4.1.21+.jar\",\"id\":9}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write(b);
+            }
+        });
+        GithubReleases gh = new GithubReleases(base, "o/r", "tok", "latest", dir);
+        FileEntry e = new FileEntry("mods/ATi Structures Vanilla V1.4.4 (1.21+).jar", "0".repeat(64), 1,
+                FileEntry.Side.SERVER, FileEntry.Policy.MANAGED, FileEntry.Clazz.HOT,
+                new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET,
+                        "ATi Structures Vanilla V1.4.4 (1.21+).jar", null, null, null, null),
+                List.of(), false, null, FileEntry.OnRemove.DELETE, null);
+        gh.release("latest"); // Caller resolves "latest" before fetching (manifestJson handles this).
+        Path dest = dir.resolve("latest.jar");
+        gh.fetch(e, dest);
+        assertArrayEquals(BYTES, Files.readAllBytes(dest));
+    }
+
+    @Test
     void trulyAbsentAsset_stillFailsLoudly() {
         GithubReleases gh = new GithubReleases(base, "o/r", "tok", "vT", dir);
         FileEntry e = new FileEntry("mods/ghost.jar", "0".repeat(64), 1,

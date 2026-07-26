@@ -16,7 +16,8 @@ import java.util.function.Supplier;
  * never link against it at compile time -- the only compile-time coupling allowed is the reflective
  * ABI in UpdaterAbi. The guard. Parent is the PLATFORM classloader: the engine sees the JDK
  * and nothing else -- not the shim's classes, not FML, not any mod. A broken on-disk engine falls
- * back to the embedded baseline once, then loads that.
+ * back to the embedded baseline once, then loads that, and a staged engine.jar.new that
+ * cannot be swapped in never costs the engine already on disk.
  */
 public final class EngineLoader {
 
@@ -33,16 +34,9 @@ public final class EngineLoader {
      * baseline re-extract before giving up -- the baseline then self-updates via the normal sync.
      */
     public static Engine ensureAndLoad(Path enginePath, Supplier<InputStream> baseline) throws IOException {
-        // the engine cannot replace itself while loaded, so a sync stages engine.jar.new and WE
-        // swap it here, before anything has the file open -- same contract as the wrapper's shim
-        // swap line, one pattern all the way down
-        Path staged = enginePath.resolveSibling(enginePath.getFileName() + ".new");
-        if (Files.isRegularFile(staged)) {
-            Files.createDirectories(enginePath.getParent());
-            Files.move(staged, enginePath, StandardCopyOption.REPLACE_EXISTING);
-        }
+        promoteStaged(enginePath);
         if (!Files.isRegularFile(enginePath)) {
-            extract(enginePath, baseline);
+            extract(enginePath, baseline); // no engine at all IS fatal, there is nothing to fall back to
         }
         try {
             return load(enginePath);
@@ -51,9 +45,32 @@ public final class EngineLoader {
             extract(enginePath, baseline);
             try {
                 return load(enginePath);
-            } catch (ReflectiveOperationException | LinkageError second) {
+            } catch (ReflectiveOperationException | IOException | LinkageError second) {
                 throw new IOException("baseline engine failed to load", second);
             }
+        }
+    }
+
+    /**
+     * Swaps in a sync-staged engine.jar.new, because the engine cannot replace itself while loaded, same
+     * contract as the wrapper's shim swap line. A failed swap is logged and SURVIVED, never
+     * thrown: a second instance of the same profile holds engine.jar open for its whole session (load()
+     * deliberately never closes that loader) and Windows refuses to replace an open file, as does an AV
+     * scanning the fresh download. Letting that escape costs the engine already on disk, which was fine
+     * the whole time, so the session gets no sync, no ops binding and a BIOS reading NOT INSTALLED. The
+     * next boot retries the same swap for free.
+     */
+    private static void promoteStaged(Path enginePath) {
+        Path staged = enginePath.resolveSibling(enginePath.getFileName() + ".new");
+        if (!Files.isRegularFile(staged)) {
+            return;
+        }
+        try {
+            Files.createDirectories(enginePath.getParent());
+            Files.move(staged, enginePath, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException held) {
+            System.out.println("[updater] staged engine could not be swapped in, "
+                    + "running the one on disk: " + held);
         }
     }
 
@@ -65,9 +82,16 @@ public final class EngineLoader {
             Class<?> entry = Class.forName(UpdaterAbi.ENGINE_ENTRY_CLASS, false, loader);
             Method enter = entry.getMethod(UpdaterAbi.ENGINE_ENTRY_METHOD, String[].class);
             return new Engine(loader, enter);
-        } catch (ReflectiveOperationException e) {
-            loader.close();
-            throw e;
+        } catch (Throwable t) {
+            // catch THROWABLE, not just ReflectiveOperationException: a wrong-Java or truncated
+            // engine jar throws a LinkageError (UnsupportedClassVersionError / ClassFormatError),
+            // and if the loader isn't closed Windows locks the jar so the baseline re-extract retry
+            // in ensureAndLoad can't replace it -- the one case the retry exists for
+            try {
+                loader.close();
+            } catch (IOException ignored) {
+            }
+            throw t;
         }
     }
 

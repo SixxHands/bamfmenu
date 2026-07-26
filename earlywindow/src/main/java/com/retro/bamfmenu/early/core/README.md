@@ -2,10 +2,10 @@
 ## Features
 `core/` is the half of the early window that is pure logic: the rhythm game and its song/chart machinery,
 audio playback, terminal Tetris, the data-driven secrets, the shared asset loaders, and the creation/analysis
-tools. Everything here can run without a window, so the chart bootstrap charts songs headless and the editor's
-test/import paths reuse the exact classes the live boot screen does. The layout is the secrets model: `core/`
-is seven category folders, each root holds its definitions + machinery, and data-driven members live as
-subfolders. `AudioPlayer` is pure playback, the analysis half lives in `tools/audio/SongAnalysis`, so plain
+tools. Everything here can run without a window, so the chart bootstrap charts songs headless, the editor's
+test/import paths reuse the exact classes the live boot screen does, and the repair window rasterises offline.
+The layout is the secrets model: `core/` is nine category folders, each root holds its definitions + machinery,
+and data-driven members live as subfolders. `AudioPlayer` is pure playback, the analysis half lives in `tools/audio/SongAnalysis`, so plain
 playback carries no detector machinery. The load-bearing rule: `core/` never imports `bios/`. All OpenGL lives
 in the presentation half, `core/` only ever returns data (lines to draw, notes, colors, pixels) for `bios/` to
 render.
@@ -54,10 +54,14 @@ The control flow that threads through `core/` at boot:
 - `audio/` is pure OGG decode + OpenAL playback. Analysis lives in `tools/audio`.
 - `rhythm/` is the BAMF! category: definitions + discovery at the root, songs as the data-driven members,
   with `engine/`, `score/`, `chart/`, `panel/`, `special/`, and `editor/` underneath.
+- `repair/` is the data-driven UPDATE AND REPAIR window, the secrets model applied to a menu:
+  machinery at the root + one folder per row, its `session/` holding every string the screen draws.
 - `secret/` is the data-driven secrets: machinery at the root + one folder per secret; the hidden games live
   here.
 - `tetris/` is `TetrisGame`, self-contained terminal Tetris logic.
 - `tools/` is the tools container (creation/analysis, not gameplay): `audio/`, `convert/` (osu import),
   `gen/` (`ChartBootstrap` + the song spike), `probe/` (the five dev probes).
+- `updater/` is the two one-way doors onto the BAMFOS updater: `UpdaterFeed` (tails the engine's bus file for
+  the POST display) and `OpsBridge` (the reflective handle the repair window calls ops through).
 - `util/` is the shared utility functions: `ResourceScan` (the classpath enumeration both discoveries ride)
   and `Figlet` (the FIGlet text renderer). Grows slowly as util stuff gets moved in.

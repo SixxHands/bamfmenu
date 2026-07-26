@@ -8,11 +8,7 @@ import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import java.nio.file.Path;
 import java.util.Optional;
 
-/**
- * The server door. No ping, no gate: the server defines truth, so default is the LATEST
- * release (--tag pins/rolls back). rules every exit: 0 no matter what after one log line --
- * the wrapper must always proceed to launch the server.
- */
+// Server pre-JVM sync. Syncs to the latest release (or --tag if pinned) and always exits 0 so the wrapper always reaches the server launch line.
 public final class ServerDoor {
 
     public static final String SHIM_PATH = SyncCore.SHIM_SERVER_PATH;
@@ -40,6 +36,12 @@ public final class ServerDoor {
                         : "latest";
                 return SyncCore.sync(dir, cfg, tag, repair, Reconciler.Side.SERVER, apiBase);
             }
+        } catch (HttpFetcher.RateLimited limited) {
+            // Catch RateLimited before TokenDead and never write the token-dead marker. Log loudly so
+            // server-sync.log closes cleanly after "updating server X -> Y" instead of looking hung.
+            SyncCore.loud(dir, "github rate limited (" + limited.code
+                    + "), launching on the current version, the next cycle retries");
+            return 0;
         } catch (HttpFetcher.TokenDead dead) {
             SyncCore.tokenDead(dir, dead);
             return 0;

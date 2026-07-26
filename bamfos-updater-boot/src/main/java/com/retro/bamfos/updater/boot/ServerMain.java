@@ -6,8 +6,9 @@ import java.nio.file.Paths;
 /**
  * The server door: java -jar bamfos-updater-boot.jar --server --dir . [--tag v] [--repair]
  * Runs before the server JVM, so nothing is locked and no locator is involved. rules the exit
- * code: 0 on ANY failure after logging one line -- the wrapper must always proceed to launch the
- * server; non-zero is reserved for corrupted-local-state cases a human must see (engine decides).
+ * code: it is ALWAYS 0, the wrapper does not branch on it and must always reach the launch line.
+ * Do not invent a non-zero return here, teaching the wrapper to read one is how the updater becomes
+ * the reason a server does not boot.
  */
 public final class ServerMain {
 

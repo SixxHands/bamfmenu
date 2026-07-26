@@ -2,6 +2,7 @@ package com.retro.bamfos.updater.watchdog;
 
 import com.mojang.logging.LogUtils;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
+import com.retro.bamfos.updater.engine.door.Doors;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.neoforged.api.distmarker.Dist;
@@ -14,10 +15,6 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
 
-import java.io.IOException;
-import java.io.StringReader;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
 import java.util.concurrent.Executors;
@@ -29,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * publishing. Poll thread notices a new latest tag -> hop to the server thread -> announce a
  * countdown in chat -> halt(false). The wrapper loop's next cycle syncs and relaunches; no save
  * call needed here, stopServer() saves players + chunks itself on the way down.
- * halt(true) would join the server thread against itself and hang forever -- always halt(false)
+ * halt(true) would join the server thread against itself and hang forever, always halt(false)
  * from mod code. Operator sovereignty: auto_restart=false in bamfos-updater.properties means we
  * only ever announce; the player running the box keeps the veto.
  */
@@ -38,6 +35,7 @@ public final class BamfosWatchdog {
 
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final long COOLDOWN_MS = 6L * 60 * 60 * 1000; // storm guard: one restart per target per 6h
+    private static final int TICK_SAMPLE_SECONDS = 15; // only caps how late a hang gets detected
 
     private volatile MinecraftServer server;
     private ScheduledExecutorService poller;
@@ -46,13 +44,16 @@ public final class BamfosWatchdog {
     private boolean autoRestart = true;
     private int countdownSeconds = 60;
 
-    // server-thread state (tick handler + act() write there); restartAtTick is ALSO read by the
-    // poll thread as its don't-re-decide guard, so it needs the volatile happens-before edge
-    private long tick;
+    // Written on the server thread; restartAtTick and tick are volatile because the poll thread reads them
+    // (and volatile prevents 64-bit long tearing). Plain tick++ is safe since only the server thread writes it.
+    private volatile long tick;
     private volatile long restartAtTick = -1;
     private long warnAtTick = -1;
     private String pendingTarget = "";
     private String announcedTag = "";
+    private boolean tokenDeadLogged; // poll thread only: the token-dead WARN fires once per transition
+    private boolean rateLimitedLogged;
+    private final ZombieWatch zombieWatch = new ZombieWatch(ZombieWatch.STALL_MS); // poll thread only, same rule
 
     public BamfosWatchdog(IEventBus modBus, ModContainer container) {
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
@@ -60,19 +61,37 @@ public final class BamfosWatchdog {
         NeoForge.EVENT_BUS.addListener(this::onTickPost);
     }
 
+    /**
+     * Listener boundary: never let a watchdog failure block server startup.
+     * Catches Throwable (not just Exception) because a failed jar-in-jar extraction for MiniJson raises
+     * NoClassDefFoundError or ExceptionInInitializerError, which NeoForge would turn into a crash report.
+     */
     private void onServerStarted(ServerStartedEvent event) {
-        server = event.getServer();
+        try {
+            start(event.getServer());
+        } catch (Throwable t) {
+            LOGGER.warn("[watchdog] did not start, the server runs with no update polling: {}", t.toString());
+        }
+    }
+
+    private void start(MinecraftServer started) {
+        server = started;
         dir = server.getServerDirectory();
+        echoPreBootSync(dir); // surface what the pre-JVM shim did into logs/latest.log, first thing
         int pollSeconds = 300;
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             poll = new ReleasePoll(cfg.repo(), cfg.githubToken());
             autoRestart = cfg.autoRestart();
-            Properties extra = extraProps(dir);
-            pollSeconds = intProp(extra, "watchdog_poll_seconds", 300);
-            countdownSeconds = intProp(extra, "watchdog_countdown_seconds", 60);
-        } catch (IOException e) {
-            LOGGER.warn("[watchdog] properties unreadable, using defaults: {}", e.toString());
+            Properties extra = UpdaterConfig.rawProps(dir);
+            // Keep clamping inside WatchdogState so it is unit-tested; a period <= 0 would throw in scheduleAtFixedRate
+            // outside this catch and disable polling for the rest of the session.
+            pollSeconds = WatchdogState.pollSeconds(extra);
+            countdownSeconds = WatchdogState.countdownSeconds(extra);
+        } catch (Exception e) {
+            // Catch all Exceptions so config load never blocks boot; warn clearly since an empty token 404s on private repos.
+            LOGGER.warn("[watchdog] properties unreadable, polling anonymously on the default repo, "
+                    + "so a private repo will not answer: {}", e.toString());
             poll = new ReleasePoll("SixxHands/bamfos-pack", "");
         }
         poller = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -81,6 +100,9 @@ public final class BamfosWatchdog {
             return t;
         });
         poller.scheduleAtFixedRate(this::checkOnce, pollSeconds, pollSeconds, TimeUnit.SECONDS);
+        // Runs on the poll thread since sampling is cheap and ZombieWatch measures elapsed time,
+        // so a slow GitHub request only delays detection slightly and avoids a second thread to clean up.
+        poller.scheduleWithFixedDelay(this::sampleTicks, TICK_SAMPLE_SECONDS, TICK_SAMPLE_SECONDS, TimeUnit.SECONDS);
         LOGGER.info("[watchdog] up, polling every {}s (auto_restart={})", pollSeconds, autoRestart);
     }
 
@@ -99,31 +121,75 @@ public final class BamfosWatchdog {
             }
             String latest = poll.latestTag().orElse("");
             if (poll.tokenDead) {
-                LOGGER.warn("[watchdog] github token FAILED (401/403) - update polling is dead until it is replaced");
+                if (!tokenDeadLogged) { // Warn once per state change and log the actual HTTP status (401 vs 403), matching the client updater.
+                    LOGGER.warn("[watchdog] github token FAILED ({}), update polling is dead until it is replaced",
+                            poll.deadCode);
+                    tokenDeadLogged = true;
+                }
                 return;
             }
-            String local = localVersion(dir);
-            Properties state = loadState(dir);
+            tokenDeadLogged = false;
+            if (poll.rateLimited) {
+                if (!rateLimitedLogged) {
+                    LOGGER.info("[watchdog] github is rate limiting this server, update polling pauses until it lifts");
+                    rateLimitedLogged = true;
+                }
+                return;
+            }
+            rateLimitedLogged = false;
+            String local = Doors.localVersion(dir).orElse("");
+            Properties state = WatchdogState.load(dir);
+            String lastTarget = state.getProperty("last_target", "");
+            int attempts = WatchdogState.attemptsFor(state, latest); // the tag-reset rule lives with its test
             WatchdogBrain.Decision decision = WatchdogBrain.decide(latest, local, autoRestart,
-                    state.getProperty("last_target", ""), longProp(state, "last_restart_at"),
+                    lastTarget, WatchdogState.longProp(state, "last_restart_at"),
+                    attempts, WatchdogBrain.MAX_RESTART_ATTEMPTS,
                     System.currentTimeMillis(), COOLDOWN_MS);
             if (decision != WatchdogBrain.Decision.NOTHING) {
-                s.executeIfPossible(() -> act(decision, latest, local));
+                s.executeIfPossible(() -> act(decision, latest, local, attempts));
             }
         } catch (Throwable t) {
             LOGGER.warn("[watchdog] poll cycle skipped: {}", t.toString()); // never kill the schedule
         }
     }
 
+    /**
+     * Poll thread: check the tick counter for a hung server thread and log if stalled.
+     * Log-only because a wedged server thread cannot deliver chat until the hang is already over.
+     */
+    private void sampleTicks() {
+        try {
+            MinecraftServer s = server;
+            if (s == null) {
+                return;
+            }
+            // nanoTime, NOT currentTimeMillis, so an NTP clock jump doesn't fake a two-minute freeze.
+            long now = System.nanoTime() / 1_000_000L;
+            boolean watchable = ZombieWatch.watchable(s.isRunning(), s.isStopped(), s.isCurrentlySaving());
+            switch (zombieWatch.sample(tick, watchable, now)) {
+                case WENT_ZOMBIE -> LOGGER.warn("[watchdog] \"brainzzzzz...\" server seems to have gone zombie, "
+                        + "no tick in {}s. Restart to bring it back from the dead!", zombieWatch.stalledMs() / 1000);
+                case RECOVERED -> LOGGER.info("[watchdog] ticks are moving again after {}s parked, "
+                        + "so it was only playing dead", zombieWatch.stalledMs() / 1000);
+                case NOTHING -> {
+                }
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[watchdog] tick sample skipped: {}", t.toString()); // a throw here cancels the schedule
+        }
+    }
+
     /** Server thread: chat + countdown arming. */
-    private void act(WatchdogBrain.Decision decision, String target, String local) {
+    private void act(WatchdogBrain.Decision decision, String target, String local, int attempts) {
         switch (decision) {
             case RESTART -> {
                 if (restartAtTick >= 0) {
                     return;
                 }
                 pendingTarget = target;
-                saveState(dir, target); // recorded BEFORE the halt so a non-converging box can't storm
+                // BEFORE the halt so a non-converging box can't storm; the +1 lives in recordRestart, where
+                // a test can hold it, because the cooldown alone only spaces the bounces out
+                WatchdogState.recordRestart(dir, target, System.currentTimeMillis(), attempts);
                 broadcast("Pack update " + target + " - restarting in " + countdownSeconds + "s");
                 LOGGER.info("[watchdog] new release {} (server on {}), restarting in {}s", target, local, countdownSeconds);
                 restartAtTick = tick + countdownSeconds * 20L;
@@ -136,12 +202,26 @@ public final class BamfosWatchdog {
                     LOGGER.info("[watchdog] release {} available; auto_restart=false, operator restarts", target);
                 }
             }
-            case HOLD_STORM -> {
+            case HOLD_COOLDOWN -> {
                 if (!announcedTag.equals(target)) {
                     announcedTag = target;
-                    broadcast("Pack update " + target + " is pending but the last restart did not apply it - check the server logs");
-                    LOGGER.warn("[watchdog] HOLDING: already restarted for {} and the version never converged - "
-                            + "sync is failing on this box (token? disk? offline?), fix that first", target);
+                    broadcast("Pack update " + target + " is pending but the last restart did not apply it, "
+                            + "the next attempt waits out the cooldown");
+                    LOGGER.warn("[watchdog] pausing after {} restart attempt(s) for {}: the version never "
+                            + "converged, so sync is failing on this server (token? disk? offline?). One "
+                            + "more attempt follows after the cooldown", attempts, target);
+                }
+            }
+            case HOLD_GIVEUP -> {
+                if (!announcedTag.equals(target)) {
+                    announcedTag = target;
+                    broadcast("Pack update " + target + " is pending but the last restart did not apply it, "
+                            + "check the server logs");
+                    // Name the state file so operators know how to clear the hold if the same tag is republished with fixed assets.
+                    LOGGER.warn("[watchdog] PAUSING after {} restart attempt(s) for {}: the version never "
+                            + "converged, so sync is failing on this server (token? disk? offline?). Skipping "
+                            + "further restarts for this tag; publish a new tag or delete "
+                            + ".bamfos-updater/watchdog-state.properties to reset", attempts, target);
                 }
             }
             case NOTHING -> {
@@ -172,71 +252,13 @@ public final class BamfosWatchdog {
         }
     }
 
-    // ---- small file plumbing ----
-
-    /** The server's own version, read the same way BCC broadcasts it. */
-    private static String localVersion(Path dir) {
-        try {
-            Path bcc = dir.resolve("config").resolve("bcc-common.toml");
-            for (String line : Files.readAllLines(bcc, StandardCharsets.UTF_8)) {
-                String s = line.trim();
-                if (s.startsWith("modpackVersion")) {
-                    int a = s.indexOf('"');
-                    int b = s.lastIndexOf('"');
-                    if (a >= 0 && b > a) {
-                        return s.substring(a + 1, b);
-                    }
-                }
-            }
-        } catch (IOException ignored) {
-        }
-        return "";
+    /**
+     * Echoes the pre-JVM shim's one-line sync summary into logs/latest.log if it is from this boot.
+     * The freshness window filters out stale summaries from boots where the shim was skipped.
+     */
+    private void echoPreBootSync(Path dir) {
+        WatchdogState.preBootSummary(dir, System.currentTimeMillis(), 60L * 60 * 1000)
+                .ifPresent(s -> LOGGER.info("[watchdog] pre-boot updater sync: {}", s));
     }
 
-    private static Properties extraProps(Path dir) throws IOException {
-        Properties p = new Properties();
-        Path f = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
-        if (Files.isRegularFile(f)) {
-            p.load(new StringReader(Files.readString(f, StandardCharsets.UTF_8)));
-        }
-        return p;
-    }
-
-    private static Properties loadState(Path dir) {
-        Properties p = new Properties();
-        try {
-            Path f = dir.resolve(".bamfos-updater").resolve("watchdog-state.properties");
-            if (Files.isRegularFile(f)) {
-                p.load(new StringReader(Files.readString(f, StandardCharsets.UTF_8)));
-            }
-        } catch (IOException ignored) {
-        }
-        return p;
-    }
-
-    private static void saveState(Path dir, String target) {
-        try {
-            Path f = dir.resolve(".bamfos-updater").resolve("watchdog-state.properties");
-            Files.createDirectories(f.getParent());
-            Files.writeString(f, "last_target=" + target + "\nlast_restart_at=" + System.currentTimeMillis() + "\n");
-        } catch (IOException e) {
-            LOGGER.warn("[watchdog] could not record the restart attempt: {}", e.toString());
-        }
-    }
-
-    private static int intProp(Properties p, String key, int dflt) {
-        try {
-            return Integer.parseInt(p.getProperty(key, Integer.toString(dflt)).trim());
-        } catch (NumberFormatException e) {
-            return dflt;
-        }
-    }
-
-    private static long longProp(Properties p, String key) {
-        try {
-            return Long.parseLong(p.getProperty(key, "0").trim());
-        } catch (NumberFormatException e) {
-            return 0L;
-        }
-    }
 }

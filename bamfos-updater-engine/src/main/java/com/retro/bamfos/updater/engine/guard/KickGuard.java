@@ -18,14 +18,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Q2's engine half: consume the mod's kick breadcrumb and quarantine EXACTLY the
- * untracked enabled jars the kick reason names, disable-only, never delete. The evidence test is an
- * intersection, not a parse: harvest every modid-shaped token from the reason text (channel ids like
- * ns:path split into tokens at the colon for free) and match against what untracked jars actually
- * declare -- so ANY reason format works, and a reason that names nothing on disk quarantines
- * nothing. Managed jars are never targets; the reconciler already converges those.
- */
+// Consumes the kick breadcrumb on next boot and disables (never deletes) untracked mods named in the kick reason.
 public final class KickGuard {
 
     /** Result of handling a kick breadcrumb, used for history and updater logs. */
@@ -36,6 +29,12 @@ public final class KickGuard {
     }
 
     private static final Pattern TOKEN = Pattern.compile("[a-zA-Z][a-zA-Z0-9_]{1,63}");
+    private static final Pattern CHANNEL = Pattern.compile("([a-z][a-z0-9_]{1,63}):([a-z0-9_./-]+)");
+    /** URLs look like mod channels (scheme:path), and plain-text proxy kicks often include links. */
+    private static final Set<String> URL_SCHEMES = Set.of("http", "https", "ftp");
+    /** Also matches host:port (with the last hostname label as namespace, e.g. play.example.net:25565
+     *  gives `net`); real channel paths are resource paths and are never all digits. */
+    private static final Pattern PORT_PATH = Pattern.compile("[0-9]+");
 
     /** Reads + deletes the breadcrumb; quarantines culprits; saves the ledger. Empty = no crumb. */
     public static java.util.Optional<Outcome> consume(Path dir, List<String> pinGlobs, BootBus bus) throws IOException {
@@ -45,6 +44,7 @@ public final class KickGuard {
         }
         Set<String> tokens = tokens(crumb.get().reason());
         List<String> hit = new ArrayList<>();
+        int matched = 0; // Jars matched by the kick reason, whether or not we could move them.
         Ledger ledger = Ledger.load(Ledger.pathIn(dir));
         PinMatcher pins = new PinMatcher(pinGlobs);
         Path mods = dir.resolve("mods");
@@ -64,17 +64,18 @@ public final class KickGuard {
                     if (named.isEmpty()) {
                         continue;
                     }
+                    matched++;
                     Path disabled = jar.resolveSibling(jar.getFileName() + ".disabled");
                     if (Files.exists(disabled)) {
                         // Don't overwrite an existing .disabled file; let the duplicate guard flag it instead.
-                        bus.line("updater: cannot quarantine " + path + " (a .disabled twin exists)");
+                        bus.line("integrity: cannot quarantine " + path + ", a .disabled twin exists");
                         continue;
                     }
                     try {
                         Files.move(jar, disabled);
                     } catch (IOException locked) {
                         // Don't abort the loop if one jar is locked by AV, or earlier renames won't be recorded in the ledger.
-                        bus.line("updater: cannot quarantine " + path + " (file locked), next kick retries");
+                        bus.line("integrity: cannot quarantine " + path + ", file locked, next kick retries");
                         continue;
                     }
                     Ledger.Entry en = new Ledger.Entry("");
@@ -83,23 +84,43 @@ public final class KickGuard {
                     en.quarantineReason = "named in a server kick (" + String.join(", ", named) + ")";
                     ledger.files.put(path, en);
                     hit.add(path);
-                    bus.line("updater: quarantined " + path + " (named in the server kick)");
+                    bus.line("integrity: quarantined " + path);
                 }
             }
         }
         if (!hit.isEmpty()) {
             ledger.save(Ledger.pathIn(dir));
-        } else {
-            bus.line("updater: kick breadcrumb named no untracked mods, nothing quarantined");
+            // Print the kick reason once for the whole batch instead of repeating it under every jar.
+            bus.line("reason: server integrity policy");
+        } else if (matched == 0) {
+            // Only show this when no jar matched at all; if we matched a jar but couldn't move it, we already
+            // printed a separate error for it above.
+            bus.line("integrity: kick reason named no untracked modules, nothing quarantined");
         }
         return java.util.Optional.of(new Outcome(crumb.get().fingerprint(), Collections.unmodifiableList(hit)));
     }
 
+    /**
+     * Extracts culprit candidates from kick text; channel namespaces win over the whole-word fallback.
+     * Strip URL and host:port false namespaces first so they don't shadow a modid named in plain prose.
+     */
     static Set<String> tokens(String reason) {
+        String lower = reason.toLowerCase(Locale.ROOT);
+        Set<String> channels = new HashSet<>();
+        Matcher c = CHANNEL.matcher(lower);
+        while (c.find()) {
+            String ns = c.group(1);
+            if (!URL_SCHEMES.contains(ns) && !PORT_PATH.matcher(c.group(2)).matches()) {
+                channels.add(ns);
+            }
+        }
+        if (!channels.isEmpty()) {
+            return channels;
+        }
         Set<String> out = new HashSet<>();
-        Matcher m = TOKEN.matcher(reason);
+        Matcher m = TOKEN.matcher(lower);
         while (m.find()) {
-            out.add(m.group().toLowerCase(Locale.ROOT));
+            out.add(m.group());
         }
         return out;
     }

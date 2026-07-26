@@ -21,6 +21,8 @@ import com.retro.bamfmenu.early.bios.modes.minigame.TetrisScreen;
 import com.retro.bamfmenu.early.bios.modes.minigame.SnakeScreen;
 import com.retro.bamfmenu.early.bios.modes.minigame.GalagaScreen;
 import com.retro.bamfmenu.early.bios.modes.minigame.DoomScreen;
+import com.retro.bamfmenu.early.bios.modes.repair.RepairEntry;
+import com.retro.bamfmenu.early.bios.modes.repair.RepairScreen;
 import com.retro.bamfmenu.early.bios.overlay.PauseOverlay;
 import com.retro.bamfmenu.early.bios.overlay.VolumeOverlay;
 import com.retro.bamfmenu.early.core.rhythm.registry.SongLoader;
@@ -150,12 +152,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private static final float[] BG_BLACK = { 0.0F, 0.0F, 0.0F };
     private static final float[] BG_BLUE = { 0.0F, 0.0F, 0.66F };
 
-    /* The BAMFOS BIOS SETUP menu (press DEL during boot). Mostly cosmetic in-joke toggles; a few do
-       something: "You're Blue Now" recolors the boot screen, "Unlock 'Bios Screen' Achievement" pops a
-       joke, "Exit Bios" leaves. Edit these strings (and SETUP_HELP, one entry per option) freely. */
+    /* The BAMFOS BIOS SETUP menu (press DEL during boot). I sure hope this doesn't become an issue in the
+     * future. Edit these strings freely EXCEPT row 0 (RepairEntry.ROW_KEY), since opt.equals matches on it
+     * to open Update and Repair. */
     private static final String SETUP_TITLE = "Welcome to the BAMFOS Bios Screen, please select an option.";
     private static final String[] SETUP_OPTIONS = {
-            "Roll it back to BAMFOS v1",
+            RepairEntry.ROW_KEY,
             "Reset Cache",
             "Safe For Retro Mode",
             "Enable Mechanics",
@@ -217,6 +219,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private ScheduledFuture<?> initFuture;
     private final Semaphore renderLock = new Semaphore(1);
     private volatile boolean handedOff;
+    /** Set the moment FML asks for the window, which is a real phase and NOT the same instant as handedOff:
+     *  that one flips at the end of setupMinecraftWindow, after the BIOS hold and the POST exit grace, by
+     *  which point no frame is drawn to show it. */
+    private volatile boolean handingOff;
     private volatile boolean initFailed;
 
     private ElementShader shader;
@@ -418,6 +424,13 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private final java.util.Queue<int[]> doomInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final DoomScreen doomScreen = new DoomScreen(doomInput);
     private volatile boolean doomStartRequested;
+    /* The UPDATE AND REPAIR window (Mode.REPAIR), opened from SETUP row 0 once the updater binds. Same
+       host pattern as the games: onKey enqueues, the render thread drains + steps + draws. It is built
+       with SETUP_OPTIONS.length so its box reserves the SAME vertical budget this menu does, and
+       crossing between the two screens cannot resize the text. */
+    private final java.util.Queue<Integer> repairInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final RepairScreen repairScreen = new RepairScreen(repairInput, SETUP_OPTIONS.length);
+    private volatile boolean repairStartRequested;
 
     /* Our own pre-Minecraft OpenAL audio (the rhythm/Tetris music + the volume menu); torn down at hand-off
        so MC's sound init is unaffected. */
@@ -881,6 +894,13 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             }
             ensureOffscreen(fbWidth, fbHeight);
             canvas.setFrame(fbWidth, fbHeight, blueTheme);
+            /* The updater feed is pumped for EVERY screen, not just POST. It used to be pumped inside
+               drawTerminal, which left updaterSyncActive frozen at its last POST value the whole time any
+               other screen was up, and that flag is what the DEL gate and the UPDATE AND REPAIR window's
+               single-writer refusal read. A stale false there means a page offers a file action while the
+               engine is mid-write. No log lines are lost by moving it: nextLogLine() consumes, so the POST
+               kernel log still gets every one, just polled a little earlier. */
+            pumpUpdater(Math.max(16, LOGICAL_W / charWidth - 1));
 
             /* Render into the offscreen framebuffer... */
             glBindFramebuffer(GL_FRAMEBUFFER, offscreenFbo);
@@ -959,6 +979,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 doomStartRequested = false;
                 doomScreen.onEnter(biosCtx);
             }
+            if (repairStartRequested) {
+                repairStartRequested = false;
+                repairScreen.onEnter(biosCtx);
+            }
             switch (state) {
                 case CUTSCENE -> {
                     if (!volumeOverlay.active()) {
@@ -1032,6 +1056,14 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                         doomScreen.render(canvas, biosCtx); // skip if step just exited to SETUP this frame
                     }
                 }
+                case REPAIR -> {
+                    if (!volumeOverlay.active()) {
+                        repairScreen.step(biosCtx); // frozen while the volume menu is up
+                    }
+                    if (state == Mode.REPAIR) {
+                        repairScreen.render(canvas, biosCtx); // skip if step just exited to SETUP this frame
+                    }
+                }
                 case SETUP -> drawSetup();
                 default -> drawTerminal(); // POST
             }
@@ -1091,8 +1123,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         int logicalH = Math.max(1, LOGICAL_W * fbHeight / Math.max(1, fbWidth));
         int maxChars = Math.max(16, logicalW / charWidth - 1);
 
-        pumpLog(maxChars);
-        pumpUpdater(maxChars);
+        pumpLog(maxChars); // the updater feed is pumped for every screen, up in renderFrame
 
         canvas.beginFrameShader(logicalW, logicalH);
 
@@ -1113,25 +1144,37 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         /* The updater POST block sits under the hardware block, in the same Award
            register. Data-driven reveal: rows appear as the engine's bus events land, nothing on the
            header's frame ramp. The log area below simply starts lower while the block is up. */
+        int updTop = headTop + (head.size() + 1) * lineSpacing;
+        int logBottom = logicalH - lineSpacing * 3;
+        /* Everything from the POST block down shares the rows between the hardware block and the status
+           line, so the cap has to be measured HERE. UpdaterFeed's own row cap is a fixed count and cannot
+           know the window is short: logicalH scales with the window's ASPECT (1400 * fbH/fbW), so a 2:1 or
+           21:9 window leaves far fewer rows than a 16:9 one. Budget it, or the block (and the log row under
+           it) gets drawn straight over the status + footer rows, off the bottom on the worst aspects. */
+        int rowBudget = Math.max(0, (logBottom - updTop) / lineSpacing);
         int updRows = 0;
-        if (updaterFeed != null) {
+        if (updaterFeed != null && rowBudget > 0) {
             var upd = updaterFeed.postBlock(frame);
             if (!upd.isEmpty()) {
-                int updTop = headTop + (head.size() + 1) * lineSpacing;
-                for (int i = 0; i < upd.size(); i++) {
-                    drawText(MARGIN, updTop + i * lineSpacing, clip(upd.get(i).text(), maxChars),
-                            upd.get(i).bright() ? cBright() : cFg());
+                int shown = Math.min(upd.size(), rowBudget);
+                for (int i = 0; i < shown; i++) {
+                    // newest rows win when the budget can't hold the block, same scroll rule as the feed's cap
+                    var line = upd.get(upd.size() - shown + i);
+                    drawText(MARGIN, updTop + i * lineSpacing, clip(line.text(), maxChars),
+                            line.bright() ? cBright() : cFg());
                 }
-                updRows = upd.size() + 1;
+                updRows = shown + 1;
             }
         }
 
         int logTop = headTop + (head.size() + 1 + updRows) * lineSpacing;
-        int logBottom = logicalH - lineSpacing * 3;
-        int logLines = Math.max(1, (logBottom - logTop) / lineSpacing);
-        List<String> recent = recentLog(logLines);
-        for (int i = 0; i < recent.size(); i++) {
-            drawText(MARGIN, logTop + i * lineSpacing, recent.get(i), i == recent.size() - 1 ? cBright() : cFg());
+        int logLines = Math.max(0, (logBottom - logTop) / lineSpacing); // 0, NEVER a forced row with no room
+        if (logLines > 0) {
+            List<String> recent = recentLog(logLines);
+            for (int i = 0; i < recent.size(); i++) {
+                drawText(MARGIN, logTop + i * lineSpacing, recent.get(i),
+                        i == recent.size() - 1 ? cBright() : cFg());
+            }
         }
 
         /* Boot progress (spinner + ASCII bar) and the classic SETUP-prompt footer. */
@@ -1164,6 +1207,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         h.add("Memory Testing   : " + shownKb + "K" + (memDone ? "  OK" : ""));
         h.add("Display Adapter  : " + (gpuName == null ? "Detecting ..." : gpuName));
         h.add("System           : " + osInfo + "   Java " + javaInfo);
+        if (updaterFeed != null) {
+            // the updater's own devices, same Award register: channel, engine build, release lock. Empty
+            // until the shim is installed, because UpdaterFeed refuses to print a value it has not been told
+            h.addAll(updaterFeed.hardwareRows());
+        }
         List<String> out = new ArrayList<>(h.size());
         for (String s : h) {
             out.add(clip(s, maxChars));
@@ -1217,6 +1265,32 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             bottomLogo = Math.max(bottomLogo, y + sixxArt.length * lineSpacing);
         }
         return (int) (bottomLogo * bodyW / bw);
+    }
+
+    /* The logical canvas width for a header + option box + bottom legend of `rows` rows. Locked to LOGICAL_W
+       like every other screen, except at a wide/short window (maximized) where the shorter logical height
+       crowds the box into the legend: there we widen the canvas a little (-> a slightly smaller font) just
+       enough to restore a one-row gap. A window that already fits keeps the unified width, so the layout
+       stays locked.
+       ONE owner on purpose. drawSetup and the UPDATE AND REPAIR window both size off this, and the two
+       screens hand off to each other, so a second copy of the formula means walking into the window and
+       back visibly changes the font size the first time somebody tunes one of the fudge terms. */
+    private int setupBodyWidth(int rows) {
+        if (fbWidth <= 0 || fbHeight <= 0) {
+            return LOGICAL_W;
+        }
+        int defH = LOGICAL_W * fbHeight / fbWidth;
+        int boxBottom = headerBottomBodyY(LOGICAL_W) + (rows + 3) * lineSpacing;
+        if (boxBottom <= defH - 2 * lineSpacing) {
+            return LOGICAL_W;
+        }
+        double a = (double) fbHeight / fbWidth;
+        double c = (double) headerBottomBodyY(LOGICAL_W) / LOGICAL_W; // header fraction of body width
+        if (a <= c) {
+            return LOGICAL_W;
+        }
+        double wNeed = (rows + 5) * (double) lineSpacing / (a - c);
+        return (int) Math.max(LOGICAL_W, Math.ceil(wNeed));
     }
 
     /* A full-width terminal rule drawn under the header (a real box-drawing horizontal; every bundled face
@@ -1333,6 +1407,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
         if (state == Mode.SNAKE) {
             snakeInput.offer(key); // the render thread drains + interprets
+            return;
+        }
+        if (state == Mode.REPAIR) {
+            repairInput.offer(key); // the render thread drains + interprets (RepairKeys)
             return;
         }
         if (state != Mode.SETUP) {
@@ -1472,8 +1550,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        cosmetic Enabled/Disabled toggles, and "Exit Bios" leaves SETUP (releasing the held hand-off). */
     private void activateSetup(int i) {
         String opt = SETUP_OPTIONS[i];
-        if (opt.equals("Roll it back to BAMFOS v1")) {
-            /* Info-only: the "first version, silly" line is its help text; selecting it does nothing. */
+        if (RepairEntry.owns(opt)) {
+            /* With no updater this row is info-only, its help text IS the joke. With one bound it opens
+               the UPDATE AND REPAIR window (the render thread builds the screen next frame). */
+            repairStartRequested = RepairEntry.armed();
         } else if (opt.equals("Reset Cache")) {
             confirmFor = i; // pop the are-you-sure prompt; the real reset runs in confirmAction
         } else if (opt.equals("Safe For Retro Mode")) {
@@ -1689,6 +1769,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 return galagaScreen.controlHints(biosCtx);
             case DOOM:
                 return doomScreen.controlHints(biosCtx);
+            case REPAIR:
+                return repairScreen.controlHints(biosCtx);
             default:
                 return "";
         }
@@ -1985,6 +2067,21 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         } // the cutscene's opening wipe draws SETUP underneath
 
         @Override
+        public int drawBiosHeader(int logicalW, int logicalH) {
+            return drawHeader(logicalW, logicalH);
+        }
+
+        @Override
+        public int biosBodyWidth(int rows) {
+            return setupBodyWidth(rows);
+        }
+
+        @Override
+        public boolean updaterSyncActive() {
+            return updaterSyncActive;
+        }
+
+        @Override
         public String[] recoveryFaceA() {
             return faceA;
         }
@@ -2263,8 +2360,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        row): enabled/disabled for the toggles, or the action for the special rows. */
     private String optionState(int i) {
         String opt = SETUP_OPTIONS[i];
-        if (opt.equals("Roll it back to BAMFOS v1")) {
-            return ""; // info-only row: no state line
+        if (RepairEntry.owns(opt)) {
+            return RepairEntry.state(opt, ""); // info-only with no updater, "Press ENTER to open." with one
         }
         if (opt.equals("Exit Bios")) {
             return "Press ENTER to exit.";
@@ -2358,25 +2455,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        legend along the bottom. Colours follow the active theme so "You're Blue Now" turns it AMI-blue.
        Sized for ~16:9; very short windows may clip the lower rows. */
     private void drawSetup() {
-        /* Locked logical canvas STRETCHED to the window (same as every screen). The header + 12-option box +
-           bottom legend is the densest screen; at a wide/short window (maximized) the shorter logical height
-           can crowd the box into the legend, so when the box would not clear the legend at the unified width
-           we widen the canvas a little (-> a slightly smaller SETUP font) just enough to restore a one-row
-           gap. A window that already fits keeps the unified width unchanged, so the layout stays locked. */
-        int logicalW = LOGICAL_W;
-        if (fbWidth > 0 && fbHeight > 0) {
-            int optRows = SETUP_OPTIONS.length;
-            int defH = LOGICAL_W * fbHeight / fbWidth;
-            int boxBottom = headerBottomBodyY(LOGICAL_W) + (optRows + 3) * lineSpacing;
-            if (boxBottom > defH - 2 * lineSpacing) { // the box would overlap / crowd the legend
-                double a = (double) fbHeight / fbWidth;
-                double c = (double) headerBottomBodyY(LOGICAL_W) / LOGICAL_W; // header fraction of body width
-                if (a > c) {
-                    double wNeed = (optRows + 5) * (double) lineSpacing / (a - c);
-                    logicalW = (int) Math.max(LOGICAL_W, Math.ceil(wNeed));
-                }
-            }
-        }
+        int logicalW = setupBodyWidth(SETUP_OPTIONS.length);
         int logicalH = Math.max(1, logicalW * fbHeight / Math.max(1, fbWidth));
         int maxChars = Math.max(40, logicalW / charWidth - 1);
 
@@ -2534,7 +2613,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 rc[2] = cDim();
             }
         } else {
-            List<String> help = wrap(SETUP_HELP[setupSel], rightInner);
+            List<String> help = wrap(RepairEntry.help(selOpt, SETUP_HELP[setupSel]), rightInner);
             dividerRow = help.size();
             int stateRow = dividerRow + 1;
             int noticeRow = dividerRow + 2;
@@ -2574,7 +2653,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             drawText(leftX, ry, "│", border);
             if (r < rows) {
                 boolean sel = r == setupSel;
-                drawText(leftCellX, ry, clip((sel ? "> " : "  ") + SETUP_OPTIONS[r], leftInner),
+                // row 0's DRAWN label follows the updater's presence; every other row draws its own literal
+                drawText(leftCellX, ry, clip((sel ? "> " : "  ") + RepairEntry.label(SETUP_OPTIONS[r]), leftInner),
                         sel ? cBright() : cFg());
             }
             if (r == dividerRow) {
@@ -2716,14 +2796,15 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         return clip(prompt + serial, maxChars);
     }
 
-    /* Accumulate the actual mod-setup progress into a rolling log (newest last): NeoForge updates the active
-       progress meter's LABEL per step ("Constructing <mod>", "Setting up <mod>", "EveryCompat: ..."), so we
-       track that label and append each new distinct one, deduping against the most recent so a repeated
-       status does not spam the log. This is the real setup activity, not the generic FancyModLoader message
-       feed. */
+    /* Accumulate the real boot phase into a rolling log (newest last): FML updates the EARLY bar's LABEL as
+       it goes ("Discovering mod files", "Scanning mod candidates", ...), so we track that label, translate it
+       to the OS register, and append each new distinct one, deduping against the most recent so a repeated
+       status does not spam the log. This terminal never sees a mod-CONSTRUCTION label: the hold loop lives
+       inside setupMinecraftWindow, which FML calls from VirtualScreen.newWindow inside Minecraft's
+       constructor, so blocking there blocks the constructor and ClientModLoader.begin cannot run either. */
     private void pumpLog(int maxChars) {
         try {
-            String text = stepText(activeMeter(StartupNotificationManager.getCurrentProgress()));
+            String text = phaseText();
             if (text.isEmpty() || text.equals(lastSeen)) {
                 return;
             }
@@ -2773,6 +2854,14 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         return chosen;
     }
 
+    /* The boot phase both the log and the status row draw, so they can never speak two languages about the
+       same moment. BootPhase owns the wording; the only thing this adds is the hand-off, which is a phase FML
+       pushes no label for. */
+    private String phaseText() {
+        return BootPhase.phase(handingOff,
+                stepText(activeMeter(StartupNotificationManager.getCurrentProgress())));
+    }
+
     private static String stepText(ProgressMeter pm) {
         if (pm == null) {
             return "";
@@ -2798,18 +2887,19 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             // the notes ARE the notification: headline rides the status line mid-sync
             return clip("[" + spin + "] " + updaterFeed.note(), maxChars);
         }
-        String step = "loading";
+        String step = "loading"; // the no-label fallback, drawn for approximately zero frames
         int pct = -1;
         try {
+            // ONE read of the meter list for both halves of the row: two reads can pair a phase that just
+            // finished with the NEXT bar's 0%. And no bar measures the hand-off, so past it the percentage is
+            // dropped rather than left sitting on whatever meter is still standing
             ProgressMeter pm = activeMeter(StartupNotificationManager.getCurrentProgress());
-            if (pm != null) {
-                String s = stepText(pm);
-                if (!s.isEmpty()) {
-                    step = s;
-                }
-                if (pm.steps() > 0) {
-                    pct = (int) (pm.progress() * 100.0F);
-                }
+            String s = BootPhase.phase(handingOff, stepText(pm));
+            if (!s.isEmpty()) {
+                step = s;
+            }
+            if (!handingOff && pm != null && pm.steps() > 0) {
+                pct = (int) (pm.progress() * 100.0F);
             }
         } catch (Throwable ignored) {
         }
@@ -2840,6 +2930,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     @Override
     public long setupMinecraftWindow(IntSupplier width, IntSupplier height, Supplier<String> title,
             LongSupplier monitorSupplier) {
+        handingOff = true; // FML wants the window: this call IS the boot's last phase
         try {
             if (initFuture != null) {
                 initFuture.get(30, TimeUnit.SECONDS);

@@ -1,13 +1,18 @@
 package com.retro.bamfos.updater.boot;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,5 +61,70 @@ class EngineLoaderTest {
         IOException e = assertThrows(IOException.class,
                 () -> EngineLoader.ensureAndLoad(enginePath(), () -> null));
         assertTrue(e.getMessage().contains("baseline"), e.getMessage());
+    }
+
+    /**
+     * The promotion itself, and it is the ONE hinge of the whole hot-updatable-engine design: SyncCore stages
+     * bamfos-updater-engine.jar.new and nothing else on the client ever swaps it in. Deleting that call left
+     * every other test in here green, because four of them never stage a .new at all and the locked-swap one
+     * asserts the staged file SURVIVES, which is also exactly what "never attempted" looks like. Shipped that
+     * way the engine is frozen on whatever jar is on disk forever while every sync re-stages the same .new,
+     * pendingSelf stays true, and the POST block ends on "BIOS UPDATE COMPLETE. REBOOT TO APPLY." with
+     * from == to for as long as the player keeps rebooting.
+     * The baseline supplier is the witness that tells a real promotion from the corrupt-jar re-extract: junk
+     * sits in the engine slot, so only the swap can produce a loadable engine, and asking for the baseline
+     * proves the fallback ran instead.
+     */
+    @Test
+    void stagedNew_isPromotedIntoTheEngineSlot_withoutFallingBackToTheBaseline() throws Exception {
+        Files.createDirectories(enginePath().getParent());
+        Files.write(enginePath(), new byte[]{0x00, 0x01, 0x02, 0x03}); // not a jar: only the swap saves this
+        Path staged = enginePath().resolveSibling(enginePath().getFileName() + ".new");
+        try (InputStream real = EngineLoader.embeddedBaseline().get()) {
+            Files.copy(real, staged);
+        }
+        AtomicBoolean askedForBaseline = new AtomicBoolean();
+
+        EngineLoader.Engine engine = EngineLoader.ensureAndLoad(enginePath(), () -> {
+            askedForBaseline.set(true);
+            return EngineLoader.embeddedBaseline().get();
+        });
+        try {
+            assertFalse(Files.exists(staged));
+            assertEquals(0, engine.enter(new String[]{}));
+            assertFalse(askedForBaseline.get());
+        } finally {
+            engine.loader().close();
+        }
+    }
+
+    /**
+     * The second-window case, and the reason the swap is not allowed to throw: instance A holds engine.jar
+     * open through the URLClassLoader load() deliberately never closes, so instance B's swap of a staged
+     * engine.jar.new hits a Windows sharing violation. That has to cost the SWAP and nothing else, because the
+     * jar on disk was fine the whole time and letting it escape means no sync, no ops binding and a BIOS
+     * reading NOT INSTALLED for the whole session.
+     * WINDOWS-ONLY as a declared fact, NOT an assumeTrue on the file's survival: POSIX renames over an open
+     * file happily, so there is no refusal to survive there, and reading the staged file's absence as "the
+     * platform took it" would swallow a real regression, a promoteStaged that LOSES that file on its failure
+     * path aborts the run and JUnit reports the whole thing green.
+     */
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void lockedStagedNew_stillLoadsTheEngineOnDisk() throws Exception {
+        EngineLoader.Engine held = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
+        Path staged = enginePath().resolveSibling(enginePath().getFileName() + ".new");
+        Files.writeString(staged, "a real file, so the isRegularFile guard lets this reach the move");
+        EngineLoader.Engine engine = null;
+        try {
+            engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
+            assertTrue(Files.isRegularFile(staged));
+            assertEquals(0, engine.enter(new String[]{}));
+        } finally {
+            if (engine != null) {
+                engine.loader().close();
+            }
+            held.loader().close();
+        }
     }
 }

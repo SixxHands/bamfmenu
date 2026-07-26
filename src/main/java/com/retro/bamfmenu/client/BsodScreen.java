@@ -2,101 +2,143 @@ package com.retro.bamfmenu.client;
 
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import org.lwjgl.glfw.GLFW;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
- * The XP blue screen: full-screen override of a pack-server mismatch kick. Renders
- * theater and takes exactly two keys -- ESC back to the title screen (singleplayer stays available),
- * ENTER closes the game cleanly, exit 0 (Minecraft.stop() is the title-screen Quit path; the fix
- * waits for the next boot either way). Never auto-reopens: launcher-supervised processes clean up
- * LWJGL natives when their child exits, a self-respawn can find them deleted.
- * All wording owner-tunable.
+ * The blue screen: full-screen override of a pack-server mismatch kick, framed like a
+ * classic Win9x BSOD over an NT bugcheck body. A dead end on purpose, every key and click is swallowed
+ * and the only way out is ESC, which hands back the exact vanilla/NeoForge disconnect screen this
+ * replaced, the one still carrying the channel table and its own log and mods-folder buttons.
+ * Never auto-reopens: a launcher cleans up LWJGL natives when its child exits, so a self-respawn can
+ * find them gone and hard-crash. All wording lives in {@link Bugcheck}.
  */
 public final class BsodScreen extends Screen {
 
-    private static final int XP_BLUE = 0xFF0000AA;
+    private static final int BSOD_BLUE = 0xFF0000AA;
+    private static final int BODY = 0xFFFFFFFF;
+    private static final int BOX_FACE = 0xFFC0C0C0; // 9x silver
+    private static final int BOX_EDGE = 0xFF808080;
+    private static final int BOX_TEXT = 0xFF000000;
 
-    private final String reason;
-    private final boolean unrepairable;
+    private final Bugcheck check;
+    /** The screen this one displaced, handed back on ESC. Never init()ed and never removed(), because
+     *  setScreen posts Opening BEFORE it touches either, so re-showing it runs the normal first-show
+     *  path and ModMismatchDisconnectedScreen's ctor does not fire twice. */
+    private final Screen back;
 
-    public BsodScreen(String reason, boolean unrepairable) {
+    public BsodScreen(Bugcheck check, Screen back) {
         super(Component.literal("BAMFOS"));
-        this.reason = reason;
-        this.unrepairable = unrepairable;
+        this.check = check;
+        this.back = back;
     }
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        g.fill(0, 0, this.width, this.height, XP_BLUE);
-        int x = Math.max(16, this.width / 10);
-        int wrap = this.width - x * 2;
-        int y = Math.max(24, this.height / 8);
+        g.fill(0, 0, this.width, this.height, BSOD_BLUE);
         int lh = this.font.lineHeight + 2;
 
-        List<String> head = new ArrayList<>();
-        if (unrepairable) {
-            head.add("YOUR DEVICE RAN INTO A PROBLEM IT CANNOT REPAIR.");
-        } else {
-            head.add("A problem has been detected and BAMFOS has been shut down to prevent damage");
-            head.add("to your computer.");
-        }
-        for (String s : head) {
-            g.drawString(this.font, s, x, y, 0xFFFFFFFF, false);
-            y += lh;
-        }
-        y += lh;
+        // the centered gray BAMFOS box, the way 9x framed "Windows"
+        String tag = "BAMFOS";
+        int boxW = this.font.width(tag) + 12;
+        int boxH = this.font.lineHeight + 6;
+        int boxX = (this.width - boxW) / 2;
+        int boxY = Math.max(lh * 2, this.height / 6);
+        g.fill(boxX - 1, boxY - 1, boxX + boxW + 1, boxY + boxH + 1, BOX_EDGE);
+        g.fill(boxX, boxY, boxX + boxW, boxY + boxH, BOX_FACE);
+        g.drawString(this.font, tag, boxX + 6, boxY + 3, BOX_TEXT, false);
 
-        // the reason block is capped so the ESC/ENTER footer can NEVER be pushed off screen --
-        // a mismatch naming 30 channels matters less than the player knowing how to leave
-        List<FormattedCharSequence> lines = this.font.split(Component.literal(reason), wrap);
-        int maxReasonRows = Math.max(3, (this.height - y - lh * 8) / lh);
-        for (int i = 0; i < Math.min(lines.size(), maxReasonRows); i++) {
-            g.drawString(this.font, lines.get(i), x, y, 0xFFFFFFFF, false);
-            y += lh;
-        }
-        if (lines.size() > maxReasonRows) {
-            g.drawString(this.font, "... (" + (lines.size() - maxReasonRows) + " more, see the log)", x, y, 0xFFFFFFFF, false);
-            y += lh;
-        }
-        y += lh;
-
-        if (unrepairable) {
-            g.drawString(this.font, "Contact the pack owner, or check SETUP > OPTIONAL MODS.", x, y, 0xFFFFFFFF, false);
-            y += lh * 2;
-        } else {
-            g.drawString(this.font, "RESTART YOUR GAME SO THESE CHANGES CAN BE APPLIED.", x, y, 0xFFFFFFFF, false);
-            y += lh * 2;
-            g.drawString(this.font, "Technical information:", x, y, 0xFFFFFFFF, false);
-            y += lh * 2;
-            g.drawString(this.font, "*** STOP: BAMF_SYNC_REQUIRED", x, y, 0xFFFFFFFF, false);
-            y += lh * 2;
+        // body: a centered column, text left-aligned, every paragraph wrapped so it can't run off
+        int colW = Math.min(this.width - 40, 460);
+        int left = (this.width - colW) / 2;
+        int top = boxY + boxH + lh * 2;
+        // the two exit keys are bottom-pinned and are the last thing allowed to fall off the screen, so
+        // the body gets whatever is left above them and Bugcheck.fit sheds the rest
+        int exitsY = Math.max(top + lh * 2, this.height - lh * 3);
+        int y = top;
+        for (Bugcheck.Block block : Bugcheck.fit(check.body(), b -> wrap(b, colW), (exitsY - top) / lh)) {
+            y = para(g, block.text(), left + block.indent(), y, colW - block.indent(), lh);
         }
 
-        g.drawString(this.font, "Press ESC to return to the menu.  Press ENTER to close the game.",
-                x, Math.max(y, this.height - lh * 3), 0xFFFFFFFF, false);
+        g.drawString(this.font, Bugcheck.EXIT_ESC, left, exitsY, BODY, false);
+        g.drawString(this.font, Bugcheck.EXIT_ENTER, left, exitsY + lh, BODY, false);
     }
 
+    /** Physical lines one block costs at this column, which is what the fit ladder budgets against. */
+    private int wrap(Bugcheck.Block block, int colW) {
+        return block.text().isEmpty() ? 1
+                : this.font.split(Component.literal(block.text()), colW - block.indent()).size();
+    }
+
+    /** One left-aligned paragraph wrapped to the column; returns the y just past it. */
+    private int para(GuiGraphics g, String text, int left, int y, int colW, int lh) {
+        if (text.isEmpty()) {
+            return y + lh;
+        }
+        for (FormattedCharSequence line : this.font.split(Component.literal(text), colW)) {
+            g.drawString(this.font, line, left, y, BODY, false);
+            y += lh;
+        }
+        return y;
+    }
+
+    /* Every input override returns true, handled, including the ones we ignore. NeoForge lets any mod push
+       a widget into any screen's children list through ScreenEvent.Init, and the Screen defaults would
+       happily click, focus and type into it. render() never walks renderables, so an injected widget is
+       invisible here, and an invisible button that still takes clicks is exactly the "it opened some other
+       screen while I was clicking around" bug. Swallow it all, exit on two keys. */
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
-            this.minecraft.setScreen(new TitleScreen()); // NEVER setScreen(null) on a disconnect path
-            return true;
-        }
-        if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+            KickWatch.restore(this.back);
+        } else if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             this.minecraft.stop(); // the title-screen Quit path: loop exits, normal teardown, exit 0
-            return true;
         }
-        return super.keyPressed(keyCode, scanCode, modifiers);
+        return true;
+    }
+
+    @Override
+    public boolean keyReleased(int keyCode, int scanCode, int modifiers) {
+        return true; // setScreen calls KeyMapping.releaseAll on the way in and out, so nothing sticks
+    }
+
+    @Override
+    public boolean charTyped(char codePoint, int modifiers) {
+        return true;
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        return true;
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        return true;
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        return true;
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        return true;
     }
 
     @Override
     public boolean shouldCloseOnEsc() {
-        return false; // ESC is OURS (menu), the default would pop to a null screen mid-disconnect
+        // keyPressed never reaches super, so nothing consults this today; it stays flipped so an edit that
+        // DOES call super cannot hand ESC back to the default popGuiLayer path
+        return false;
+    }
+
+    @Override
+    public void onClose() {
+        // the Screen default is popGuiLayer, which on an empty layer stack is setScreen(null), and that
+        // throws IllegalStateException while a level is tearing down
+        KickWatch.restore(this.back);
     }
 }

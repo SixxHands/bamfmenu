@@ -70,12 +70,30 @@ class ServersMergeTest {
         assertEquals(before, Files.getLastModifiedTime(local));
     }
 
+    /** Back up unparseable servers.dat bytes (e.g. gzipped NBT) before seeding so the player's list isn't lost. */
     @Test
-    void garbageLocal_becomesTheSeed() throws IOException {
+    void garbageLocal_becomesTheSeed_butTheOldBytesAreKept() throws IOException {
         Path local = dir.resolve("servers.dat");
-        Files.write(local, new byte[]{1, 2, 3, 4});
+        byte[] theirs = {1, 2, 3, 4};
+        Files.write(local, theirs);
         ServersDat.mergeFirstEntry(local, SEED);
         assertArrayEquals(SEED, Files.readAllBytes(local));
+        assertArrayEquals(theirs, Files.readAllBytes(dir.resolve("servers.dat.bak-unreadable")));
+    }
+
+    /**
+     * An unreadable servers.dat (e.g. antivirus lock, simulated via a directory) must fail safely instead of
+     * being treated as corrupt and overwritten with the pack seed.
+     */
+    @Test
+    void unreadableLocal_throws_andNeverStagesAReplacement() {
+        Path local = dir.resolve("servers.dat");
+        assertThrows(IOException.class, () -> {
+            Files.createDirectories(local.resolve("wedge"));
+            ServersDat.mergeFirstEntry(local, SEED);
+        });
+        assertTrue(Files.isDirectory(local));
+        assertFalse(Files.exists(dir.resolve("servers.dat.tmp")));
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.reconcile;
 
 import com.retro.bamfos.updater.engine.Fx;
+import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
@@ -34,6 +35,238 @@ class ReconcilerTableTest {
         var acts = p.actions.stream().filter(a -> a.path().equals(path)).toList();
         assertEquals(1, acts.size(), String.valueOf(path) + " / " + String.valueOf(acts));
         return acts.get(0).kind();
+    }
+
+    /**
+     * Never record the target sha in the ledger when a move fails (simulated with a non-empty directory), or
+     * the rule stops hashing the path and leaves the old file stuck forever.
+     */
+    @Test
+    void lockedTarget_ledgerNeverClaimsTheNewBytes() throws IOException {
+        FileEntry e = Fx.entry("mods/x.jar", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        Files.createDirectories(dir.resolve("mods/x.jar/wedge"));
+        Files.write(dir.resolve("mods/x.jar/wedge/f"), V1);
+
+        Manifest m = Fx.manifest("v2", List.of(), e);
+        SyncPlan p = rec().plan(m, led);
+        rec().apply(p, m, led, Fx.fetcher());
+
+        assertNull(led.files.get("mods/x.jar"));
+        assertEquals("v1", led.installedVersion);
+        assertTrue(Files.exists(Journal.pathIn(dir)));
+
+        // Unblock the file: the saved journal applies the staged bytes offline with no network calls.
+        Files.delete(dir.resolve("mods/x.jar/wedge/f"));
+        Files.delete(dir.resolve("mods/x.jar/wedge"));
+        Files.delete(dir.resolve("mods/x.jar"));
+        assertTrue(Journal.load(Journal.pathIn(dir)).replay(dir).allLanded());
+        assertArrayEquals(V2, Files.readAllBytes(dir.resolve("mods/x.jar")));
+    }
+
+    /**
+     * If a staged .part vanishes between journal.save and replay, replay marks it abandoned and blocks the
+     * ledger update. Globs the staged file via the Pulse seam so staging filename changes don't break this.
+     */
+    @Test
+    void stagedSourceEatenBeforeReplay_ledgerNeverClaimsTheNewBytes() throws IOException {
+        FileEntry e = Fx.entry("mods/x.jar", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        Manifest m = Fx.manifest("v2", List.of(), e);
+        SyncPlan p = rec().plan(m, led);
+
+        rec().apply(p, m, led, Fx.fetcher(), eatStaging(), false);
+
+        assertFalse(Files.isRegularFile(dir.resolve("mods/x.jar")));
+        assertNull(led.files.get("mods/x.jar"));
+        assertEquals("v1", led.installedVersion);
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+    }
+
+    /**
+     * For REPLACE, an existence check passes even when the move fails, so replay's report must gate the ledger
+     * for every op kind (not just DELETE). Uses a missing staged source as a portable failure trigger.
+     */
+    @Test
+    void replaceOverAnExistingName_ledgerNeverClaimsBytesThatDidNotLand() throws IOException {
+        FileEntry old = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        FileEntry neu = Fx.entry("config/a.toml", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        led.files.put("config/a.toml", new Ledger.Entry(old.sha256()));
+        Fx.write(dir, "config/a.toml", V1); // disk matches the ledger, so the pack's new bytes are this rule
+        Manifest m = Fx.manifest("v2", List.of(), neu);
+
+        SyncPlan p = rec().plan(m, led);
+        assertEquals(Kind.REPLACE, only(p, "config/a.toml"));
+        rec().apply(p, m, led, Fx.fetcher(), eatStaging(), false);
+
+        assertArrayEquals(V1, Files.readAllBytes(dir.resolve("config/a.toml")));
+        assertEquals(old.sha256(), led.files.get("config/a.toml").sha256);
+        assertEquals("v1", led.installedVersion);
+    }
+
+    /** Deletes all staged .part files between journal.save and replay to simulate antivirus removing
+     *  a download. Uses a glob so renaming staging files later won't break these tests. */
+    private Reconciler.Pulse eatStaging() {
+        return () -> {
+            try (var ds = Files.newDirectoryStream(dir.resolve(".bamfos-updater/staging"), "*.part")) {
+                for (Path part : ds) {
+                    Files.delete(part);
+                }
+            } catch (IOException gone) {
+                throw new AssertionError("nothing staged to eat, the test would prove nothing", gone);
+            }
+        };
+    }
+
+    /**
+     * Carry forward stuck ops left by step 0 instead of overwriting the journal, so cleanup ops (like a stale
+     * .disabled twin) aren't lost forever.
+     */
+    @Test
+    void aKeptJournalsOpsSurviveTheNextApply_insteadOfBeingOverwritten() throws IOException {
+        Fx.write(dir, "mods/leftover.jar.disabled", V1); // the debris a stuck delete op was meant to clear
+        Journal kept = new Journal();
+        kept.targetVersion = "v2";
+        kept.ops.add(new Journal.Op("delete", "", "mods/leftover.jar.disabled", ""));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry e = Fx.entry("config/a.toml", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v2", List.of(), e); // Same target version, so carrying over staged files isn't a rollback.
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertFalse(Files.exists(dir.resolve("mods/leftover.jar.disabled")));
+        assertArrayEquals(V2, Files.readAllBytes(dir.resolve("config/a.toml")));
+    }
+
+    /**
+     * On rollback, drop leftover ops from the newer version so they can't overwrite files that already match
+     * the rolled-back manifest.
+     */
+    @Test
+    void aLeftoverOpFromAnotherTargetVersion_isNotCarriedIntoARollback() throws IOException {
+        Fx.write(dir, ".bamfos-updater/staging/newer.part", V2);
+        Journal kept = new Journal();
+        kept.targetVersion = "v3"; // the release that was partway through installing before the rollback
+        kept.ops.add(new Journal.Op("move", ".bamfos-updater/staging/newer.part", "config/a.toml",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V2)));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry e = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.files.put("config/a.toml", new Ledger.Entry(e.sha256())); // this rule: already what v2 wants
+        Fx.write(dir, "config/a.toml", V1);
+        Manifest rolledBack = Fx.manifest("v2", List.of(), e);
+        rec().apply(rec().plan(rolledBack, led), rolledBack, led, Fx.fetcher());
+
+        assertArrayEquals(V1, Files.readAllBytes(dir.resolve("config/a.toml")));
+    }
+
+    /** Drop carried ops for paths this plan leaves alone, so a stale op can't overwrite a player-edited config. */
+    @Test
+    void aLeftoverOpForAPathThisRunDeferred_isNotCarried() throws IOException {
+        Fx.write(dir, ".bamfos-updater/staging/left.part", V2);
+        Journal kept = new Journal();
+        kept.targetVersion = "v2"; // same target, so nothing else drops this op
+        kept.ops.add(new Journal.Op("move", ".bamfos-updater/staging/left.part", "config/a.toml",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V2)));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry old = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        FileEntry neu = Fx.entry("config/a.toml", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        led.files.put("config/a.toml", new Ledger.Entry(old.sha256()));
+        Fx.write(dir, "config/a.toml", EDIT);                                // edited AND the pack moved: this rule
+        Files.createDirectories(dir.resolve("config/a.toml.bak-v1/wedge")); // AV mid-scan on the old .bak
+        Manifest m = Fx.manifest("v2", List.of(), neu);
+        assertEquals(Kind.REPLACE_BAK, only(rec().plan(m, led), "config/a.toml"));
+
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertArrayEquals(EDIT, Files.readAllBytes(dir.resolve("config/a.toml")));
+        assertEquals(old.sha256(), led.files.get("config/a.toml").sha256);
+    }
+
+    /**
+     * Prepend carried ops (addAll(0, ...)) so a carried delete runs before a fresh placement for the same path;
+     * appending it would delete the file we just placed.
+     */
+    @Test
+    void aCarriedOpRunsBEFOREThisPlansOpForTheSameName() throws IOException {
+        Fx.write(dir, "mods/p.jar", V1);
+        Journal kept = new Journal();
+        kept.targetVersion = "v2";
+        kept.ops.add(new Journal.Op("delete", "", "mods/p.jar", "")); // leftover companion file that a stuck op never cleaned up
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry old = Fx.entry("mods/p.jar", V1, FileEntry.Side.CLIENT);
+        FileEntry neu = Fx.entry("mods/p.jar", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        led.files.put("mods/p.jar", new Ledger.Entry(old.sha256()));
+        Manifest m = Fx.manifest("v2", List.of(), neu);
+        assertEquals(Kind.REPLACE, only(rec().plan(m, led), "mods/p.jar"));
+
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertArrayEquals(V2, Files.readAllBytes(dir.resolve("mods/p.jar")));
+        assertEquals(neu.sha256(), led.files.get("mods/p.jar").sha256);
+        assertEquals("v2", led.installedVersion);
+    }
+
+    /**
+     * Deduplicate carried ops across .jar and .jar.disabled names when a player toggles a mod mid-carry, or
+     * replay would write both twins to disk.
+     */
+    @Test
+    void aKeptOpForTheOtherEnableName_isRecognisedAsThisPlansRow() throws IOException {
+        Fx.write(dir, ".bamfos-updater/staging/left.part", V2);
+        Journal kept = new Journal();
+        kept.targetVersion = "v2";
+        kept.ops.add(new Journal.Op("move", ".bamfos-updater/staging/left.part", "mods/p.jar.disabled",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V2)));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry old = Fx.entry("mods/p.jar", V1, FileEntry.Side.CLIENT);
+        FileEntry neu = Fx.entry("mods/p.jar", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        led.files.put("mods/p.jar", new Ledger.Entry(old.sha256()));
+        Fx.write(dir, "mods/p.jar", V1); // User re-enabled it, so this plan targets the enabled filename.
+        Manifest m = Fx.manifest("v2", List.of(), neu);
+
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertArrayEquals(V2, Files.readAllBytes(dir.resolve("mods/p.jar")));
+        assertFalse(Files.exists(dir.resolve("mods/p.jar.disabled")));
+    }
+
+    /**
+     * Sweep leftover staged .part files only after confirming no journal remains, so pending ops keep their bytes.
+     */
+    @Test
+    void aDeferredRowsDeadDownload_doesNotSitInStagingForever() throws IOException {
+        FileEntry old = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        FileEntry neu = Fx.entry("config/a.toml", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        led.files.put("config/a.toml", new Ledger.Entry(old.sha256()));
+        Fx.write(dir, "config/a.toml", EDIT);                               // this rule, and the .bak is wedged,
+        Files.createDirectories(dir.resolve("config/a.toml.bak-v1/wedge")); // so the download fails right away
+        Manifest m = Fx.manifest("v2", List.of(), neu);
+
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+        try (var ds = Files.newDirectoryStream(dir.resolve(".bamfos-updater/staging"), "*.part")) {
+            assertFalse(ds.iterator().hasNext());
+        }
+        assertArrayEquals(EDIT, Files.readAllBytes(dir.resolve("config/a.toml")));
     }
 
     @Test

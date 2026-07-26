@@ -80,5 +80,9 @@ EDITOR<->RHYTHM (Test Play) hand-offs all flow through `ctx`, the screens never 
 ## Child layers
 - `rhythm/`, the RHYTHM cluster: `RhythmScreen` (the host: lifecycle + input + chart ingestion) plus its view
   `RhythmRenderer` and the optional `SongHeaderHud`.
+- `repair/`, the UPDATE AND REPAIR window: `RepairScreen` (host + worker + draw) and
+  `RepairEntry` (the conditional SETUP row that opens it). Its rows, copy and layout are data-driven and live in
+  `core/repair`, so this screen only draws a finished frame. The one screen a player can only reach when the
+  updater actually bound, because a menu of updater actions with no updater behind it is the thing we refuse to draw.
 - `editor/`, the chart editor: one `Screen` (`EditorScreen`, `Mode.EDITOR`), three views (song browser ->
   difficulty browser -> horizontal timeline, the timeline its own `TimelineEditorView`).

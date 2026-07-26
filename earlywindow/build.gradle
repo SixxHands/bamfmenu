@@ -36,6 +36,11 @@ repositories {
     maven { url = 'https://libraries.minecraft.net' } // com.mojang:* transitives of FancyModLoader
 }
 
+// Unit tests for GL-free / FML-free classes (UpdaterFeed, repair state, etc.).
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
 configurations {
     /* DEV-ONLY: a runtime classpath (with Windows natives) for the headless chart generator. The main deps
        are compileOnly (NeoForge provides LWJGL at game runtime), so the genCharts JavaExec below needs its own
@@ -62,6 +67,10 @@ dependencies {
     chartgen 'org.lwjgl:lwjgl-openal:3.3.3'
     chartgen 'org.lwjgl:lwjgl:3.3.3:natives-windows'
     chartgen 'org.lwjgl:lwjgl-stb:3.3.3:natives-windows'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 // Dev: regenerate committed song charts headlessly via DspCharter (-PoutDir=/abs/path to override).

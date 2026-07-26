@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -32,6 +33,8 @@ class FixtureServerTest {
     private static final byte[] ASSET = "jar bytes".getBytes(StandardCharsets.UTF_8);
     private static final byte[] INNER = "config bytes".getBytes(StandardCharsets.UTF_8);
     private volatile boolean s3SawAuth;
+    private volatile int briefLimitHits;
+    private final java.util.concurrent.CountDownLatch stallRelease = new java.util.concurrent.CountDownLatch(1);
 
     @BeforeEach
     void start() throws IOException {
@@ -66,11 +69,80 @@ class FixtureServerTest {
             }
         });
         server.createContext("/dead/repos/o/r/releases/tags/v2", ex -> ex.sendResponseHeaders(401, -1));
+        // GitHub rate limit: 403 with rate-limit headers (not a bad token).
+        server.createContext("/limited/repos/o/r/releases/tags/v2", ex -> {
+            ex.getResponseHeaders().add("x-ratelimit-remaining", "0");
+            ex.getResponseHeaders().add("retry-after", "60");
+            ex.sendResponseHeaders(403, -1);
+        });
+        // Plain 403 with no rate-limit headers or body should be treated as an auth failure.
+        server.createContext("/scope/repos/o/r/releases/tags/v2", ex -> ex.sendResponseHeaders(403, -1));
+        server.createContext("/toomany/repos/o/r/releases/tags/v2", ex -> ex.sendResponseHeaders(429, -1));
+        // Rate-limit headers stripped, message in body with a Content-Length header.
+        server.createContext("/bodylimit/repos/o/r/releases/tags/v2", ex -> {
+            byte[] b = "{\"message\":\"API rate limit exceeded for user 1\"}".getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(403, b.length);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write(b);
+            }
+        });
+        // Same rate-limit body without Content-Length (chunked encoding, like some proxies send).
+        server.createContext("/chunked/repos/o/r/releases/tags/v2", ex -> {
+            ex.sendResponseHeaders(403, 0);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write("{\"message\":\"API rate limit exceeded\"}".getBytes(StandardCharsets.UTF_8));
+            }
+        });
+        // Captive-portal stall: promises 200 bytes, sends 40, then blocks on a teardown latch so stop() finishes.
+        server.createContext("/stalled/repos/o/r/releases/tags/v2", ex -> {
+            ex.sendResponseHeaders(403, 200);
+            OutputStream out = ex.getResponseBody();
+            out.write("{\"message\":\"API rate limit exce".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            try {
+                stallRelease.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            out.close();
+        });
+        server.createContext("/broken/", ex -> ex.sendResponseHeaders(500, -1));
+        // 200 response that sends a few bytes and stalls without closing (like a dropped connection),
+        // which used to hang FML discovery or the server wrapper indefinitely.
+        server.createContext("/stalledbody/", ex -> {
+            ex.sendResponseHeaders(200, 4096);
+            OutputStream out = ex.getResponseBody();
+            out.write(new byte[64]);
+            out.flush();
+            try {
+                stallRelease.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            out.close();
+        });
+        // Secondary rate limit: returns Retry-After once, then succeeds.
+        server.createContext("/brief/repos/o/r/releases/tags/v2", ex -> {
+            if (briefLimitHits++ == 0) {
+                ex.getResponseHeaders().add("retry-after", "1");
+                ex.sendResponseHeaders(403, -1);
+                return;
+            }
+            json(ex, "{\"tag_name\":\"v2\",\"assets\":[]}");
+        });
+        // Use a thread pool instead of the default single-threaded executor so stalled handlers don't block
+        // subsequent requests from retry tests.
+        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "fixture-http");
+            t.setDaemon(true);
+            return t;
+        }));
         server.start();
     }
 
     @AfterEach
     void stop() {
+        stallRelease.countDown(); // Release stalled handlers before stop() so teardown doesn't block on them.
         server.stop(0);
     }
 
@@ -105,6 +177,200 @@ class FixtureServerTest {
         long t0 = System.nanoTime();
         IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
         assertInstanceOf(HttpFetcher.TokenDead.class, e, "401 must be TokenDead, not a generic failure");
+        assertEquals(401, ((HttpFetcher.TokenDead) e).code);
+        assertTrue((System.nanoTime() - t0) < 900_000_000L);
+    }
+
+    /** GitHub also returns 403 for rate limits; misclassifying it as token death writes a persistent
+     * marker for a working credential. */
+    @Test
+    void rateLimit403_isNotTokenDeath() {
+        GithubReleases gh = new GithubReleases(base + "/limited", "o/r", "alive", "v2", tmp);
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(HttpFetcher.RateLimited.class, e, "a limit-headered 403 is a pause, not a dead token");
+        assertFalse(e instanceof HttpFetcher.TokenDead);
+        assertEquals(60_000L, ((HttpFetcher.RateLimited) e).retryAfterMs);
+    }
+
+    @Test
+    void bare403_isStillTokenDeath() {
+        GithubReleases gh = new GithubReleases(base + "/scope", "o/r", "wrongscope", "v2", tmp);
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(HttpFetcher.TokenDead.class, e,
+                "a 403 with nothing saying rate limit is a real permission failure");
+        assertEquals(403, ((HttpFetcher.TokenDead) e).code);
+    }
+
+    /** Wait out a short retry-after instead of aborting the whole sync over a one-second pause.
+     *  Longer retry-after values are the hourly rate limit, so skip waiting and fail right away. */
+    @Test
+    void shortRetryAfter_isWaitedOutOnce_thenTheSyncProceeds() throws Exception {
+        GithubReleases gh = new GithubReleases(base + "/brief", "o/r", "alive", "v2", tmp);
+        long t0 = System.nanoTime();
+        gh.release("v2"); // throws if the wait is not honored, because nothing else retries a RateLimited
+        assertTrue((System.nanoTime() - t0) >= 900_000_000L);
+        assertEquals(2, briefLimitHits);
+    }
+
+    /** Fallback when a proxy strips the rate-limit headers: detect rate limiting from the 403 body
+     * instead of treating it as a bad token. */
+    @Test
+    void limitNamedOnlyInTheBody_isStillRateLimited() {
+        GithubReleases gh = new GithubReleases(base + "/bodylimit", "o/r", "alive", "v2", tmp);
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(HttpFetcher.RateLimited.class, e, "the body is the fallback when headers are gone");
+    }
+
+    /** Skip body peeking on chunked 403s (no content-length and no HttpRequest.timeout on streams) so a
+     * stalling portal cannot hang FML discovery; fall through to token death. */
+    @Test
+    void chunked403_isNotPeekedAtAll_evenWhenTheBodyNamesTheLimit() {
+        GithubReleases gh = new GithubReleases(base + "/chunked", "o/r", "alive", "v2", tmp);
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(HttpFetcher.TokenDead.class, e,
+                "an unbounded body read on the boot path is the Law 5 failure, never worth the diagnosis");
+    }
+
+    /** A content-length header can still stall mid-body (readNBytes blocks waiting for all bytes), so
+     * the wall-clock timeout must abort the peek before it hangs FML discovery. */
+    @Test
+    void promisedLengthThatNeverArrives_failsFast_insteadOfParkingTheBoot() {
+        GithubReleases gh = new GithubReleases(base + "/stalled", "o/r", "alive", "v2", tmp);
+        long t0 = System.nanoTime();
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertInstanceOf(HttpFetcher.TokenDead.class, e,
+                "nothing was proven, so it falls through to token death like every other unreadable peek");
+        assertTrue(ms < 10_000, String.valueOf(ms));
+    }
+
+    /** Don't sleep after the final failed attempt when we're about to throw anyway (1s + 2s, not
+     * 1s + 2s + 4s during FML startup). */
+    @Test
+    void theLastAttemptThrowsWithoutSleepingOnTheBackoff() {
+        HttpFetcher f = new HttpFetcher();
+        long t0 = System.nanoTime();
+        assertThrows(IOException.class, () -> f.get(base + "/broken/x", "tok", "application/json"));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 5_000, String.valueOf(ms));
+    }
+
+    /** HttpRequest.timeout ends once headers arrive, so downloads need a stall clock (not a total
+     * timeout, so slow valid jars still finish) to avoid hanging boot forever. */
+    @Test
+    void aBodyThatStallsMidTransfer_failsOnTheStallClock_insteadOfParkingTheBoot() {
+        HttpFetcher f = new HttpFetcher(700);
+        long t0 = System.nanoTime();
+        assertThrows(IOException.class,
+                () -> f.download(base + "/stalledbody/x", "tok", "application/octet-stream", tmp.resolve("x.jar")));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 10_000, String.valueOf(ms));
+    }
+
+    /** Same stall test for the small-body path (used by boot lookups and the watchdog poll thread),
+     * where a stuck readAllBytes would wedge polling until restart. */
+    @Test
+    void readAllBounded_givesUpOnAStalledStream_andCapsTheSize() {
+        java.io.InputStream wedged = new java.io.InputStream() {
+            int left = 8;
+
+            @Override
+            public int read() {
+                if (left-- > 0) {
+                    return 'x';
+                }
+                try {
+                    Thread.sleep(60_000); // Endpoint that accepts the connection and stalls mid-body.
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return -1;
+            }
+        };
+        long t0 = System.nanoTime();
+        IOException e = assertThrows(IOException.class, () -> HttpFetcher.readAllBounded(wedged, 4096, 400));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 8_000, String.valueOf(ms));
+        assertTrue(e.getMessage().contains("stalled"), e.getMessage());
+
+        byte[] tooBig = new byte[9000];
+        assertThrows(IOException.class,
+                () -> HttpFetcher.readAllBounded(new java.io.ByteArrayInputStream(tooBig), 4096, 400),
+                "oversized response without matching limit must throw instead of causing OOM");
+    }
+
+    /** Guard against firstValueAsLong throwing on a malformed Content-Length header during 403
+     * classification; called directly because the JDK client rejects bad headers earlier. */
+    @Test
+    void aJunkContentLength_doesNotEscapeTheThrottleClassifier() {
+        assertFalse(HttpFetcher.rateLimited(resp403(Map.of("content-length", List.of("1,234")))));
+        assertTrue(HttpFetcher.rateLimited(resp403(Map.of("x-ratelimit-remaining", List.of("0")))));
+    }
+
+    /** Same final-attempt backoff fix for per-file downloads: sleep 1s + 2s then throw, without a wasted
+     * 4s sleep after the last try. */
+    @Test
+    void download_alsoThrowsWithoutSleepingOnTheLastBackoff() {
+        HttpFetcher f = new HttpFetcher();
+        long t0 = System.nanoTime();
+        assertThrows(IOException.class,
+                () -> f.download(base + "/broken/x", "tok", "application/octet-stream", tmp.resolve("y.jar")));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 5_000, String.valueOf(ms));
+    }
+
+    /** Minimal response containing only the headers the classifier inspects. */
+    private static java.net.http.HttpResponse<java.io.InputStream> resp403(Map<String, List<String>> headers) {
+        java.net.http.HttpHeaders h = java.net.http.HttpHeaders.of(headers, (a, b) -> true);
+        return new java.net.http.HttpResponse<>() {
+            @Override
+            public int statusCode() {
+                return 403;
+            }
+
+            @Override
+            public java.net.http.HttpRequest request() {
+                return null;
+            }
+
+            @Override
+            public java.util.Optional<java.net.http.HttpResponse<java.io.InputStream>> previousResponse() {
+                return java.util.Optional.empty();
+            }
+
+            @Override
+            public java.net.http.HttpHeaders headers() {
+                return h;
+            }
+
+            @Override
+            public java.io.InputStream body() {
+                return java.io.InputStream.nullInputStream();
+            }
+
+            @Override
+            public java.util.Optional<javax.net.ssl.SSLSession> sslSession() {
+                return java.util.Optional.empty();
+            }
+
+            @Override
+            public java.net.URI uri() {
+                return java.net.URI.create("http://127.0.0.1/");
+            }
+
+            @Override
+            public java.net.http.HttpClient.Version version() {
+                return java.net.http.HttpClient.Version.HTTP_1_1;
+            }
+        };
+    }
+
+    @Test
+    void http429_isRateLimited() {
+        GithubReleases gh = new GithubReleases(base + "/toomany", "o/r", "alive", "v2", tmp);
+        long t0 = System.nanoTime();
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(HttpFetcher.RateLimited.class, e, "429 means exactly one thing on any host");
         assertTrue((System.nanoTime() - t0) < 900_000_000L);
     }
 

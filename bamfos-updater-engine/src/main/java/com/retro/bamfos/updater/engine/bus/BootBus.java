@@ -6,13 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
-/**
- * The one-way feed from the engine to whatever renders the boot (the bus between floors
- * is the filesystem, on purpose -- no classloader assumptions, survives every absent component).
- * Append-only line format, one event per line, tab-separated: EVENT&lt;TAB&gt;field... The earlywindow
- * tails the file and draws; headless runs get only the stdout mirror. Truncated at door start so
- * each boot reads clean. Every write is best-effort: a full disk must never stop a sync.
- */
+// One-way tab-separated event log (.bamfos-updater/bus.log) tailed by earlywindow to render boot sync status.
 public final class BootBus {
 
     public static final String FILE_NAME = "bus.log";
@@ -36,6 +30,21 @@ public final class BootBus {
         return new BootBus(f);
     }
 
+    /** Appends to the existing bus file instead of truncating it. Truncating drops the file size below
+     *  UpdaterFeed's live read offset, making the in-session tailer stop reading progress permanently. */
+    public static BootBus append(Path instanceDir) {
+        Path f = instanceDir.resolve(".bamfos-updater").resolve(FILE_NAME);
+        try {
+            Files.createDirectories(f.getParent());
+            if (!Files.exists(f)) {
+                Files.writeString(f, "", StandardCharsets.UTF_8, StandardOpenOption.CREATE);
+            }
+        } catch (IOException unwritable) {
+            return new BootBus(null);
+        }
+        return new BootBus(f);
+    }
+
     public static BootBus headless() {
         return new BootBus(null);
     }
@@ -46,12 +55,21 @@ public final class BootBus {
         emit("LOG", dmesg);
     }
 
+    /** What the hardware block's three updater rows report: the channel a sync would use, the
+     *  engine build that would run it, and the tag pin. Sent once, right off the config, so the rows carry
+     *  real values on a boot that syncs nothing, which is nearly every boot. No stdout mirror, because the log
+     *  already carries all three (EngineEntry prints the build, the door prints the pin, and the repo is in
+     *  server-sync.log) and this event exists only to fill a display row. */
+    public void ident(String repo, String engineVersion, String tagPin) {
+        emit("IDENT", repo, engineVersion, tagPin);
+    }
+
     /** Starts the POST block when an update is actually running. */
     public void syncBegin(String repo, String from, String to) {
         emit("SYNC", repo, from, to);
     }
 
-    /** Release-notes headline for the status line (PACK UPDATE vX -- ...). */
+    /** Release-notes headline shown on the status line (e.g. PACK UPDATE vX). */
     public void note(String headline) {
         emit("NOTE", headline);
     }
@@ -86,7 +104,13 @@ public final class BootBus {
         }
     }
 
-    /** Sync over: ok | skip | fail. The renderer unlocks DEL and reverts the footer on this. */
+    /** Sync over: ok | skip | limited | fail. The renderer unlocks DEL and reverts the footer on this, only
+     *  `fail` earns an abort why-line (the other three already said their piece), and anything but `ok` gets
+     *  a closing row so the POST block terminates instead of spinning for the rest of the boot.
+     *  The reader is UpdaterFeed.event's END arm, in the earlywindow module, and it matches these four
+     *  strings by literal. Named here on purpose: renaming a state on one side of a filesystem bus
+     *  compiles fine and just renders two rows contradicting each other, so this is the search term that
+     *  finds both halves. */
     public void end(String state) {
         emit("END", state);
     }

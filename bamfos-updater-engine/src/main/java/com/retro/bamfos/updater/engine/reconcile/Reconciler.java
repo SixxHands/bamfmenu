@@ -24,6 +24,9 @@ import java.util.Set;
 // Sync planner and applier: filters by side and pin globs, plans adds/updates/deletes, stages and journals downloads, then commits the ledger.
 public final class Reconciler {
 
+    /** Suffix used when disabling or quarantining a mod jar. */
+    static final String DISABLED_SUFFIX = ".disabled";
+
     public interface Fetcher {
         void fetch(FileEntry entry, Path dest) throws IOException;
     }
@@ -202,13 +205,23 @@ public final class Reconciler {
                 if (led != null) {
                     continue; // Already managed by the pack, so skip quarantine check.
                 }
+                List<String> modids;
                 try {
-                    if (!java.util.Collections.disjoint(JarInfo.read(jar).modids(), killed)) {
-                        plan.actions.add(new Action(Kind.QUARANTINE, path, null, true));
-                    }
+                    modids = JarInfo.read(jar).modids();
                 } catch (IOException unreadable) {
-                    // Skip corrupt untracked jars.
+                    continue; // Skip corrupt untracked jars.
                 }
+                if (java.util.Collections.disjoint(modids, killed)) {
+                    continue;
+                }
+                // Intersect first so we only warn on jars Q1 actually tried to quarantine, not unrelated .disabled
+                // twins. We refuse to overwrite the player's .disabled file and log why since dupeGuard won't.
+                if (Files.exists(mods.resolve(jar.getFileName() + DISABLED_SUFFIX))) {
+                    System.out.println("[updater] integrity: cannot quarantine " + path
+                            + ", a .disabled twin exists");
+                    continue;
+                }
+                plan.actions.add(new Action(Kind.QUARANTINE, path, null, true));
             }
         }
     }
@@ -231,8 +244,11 @@ public final class Reconciler {
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
         Map<String, Path> stagedFiles = new HashMap<>();
+        int stageIdx = 0;
         for (Action a : plan.downloads()) {
-            Path part = staging.resolve(a.entry().sha256() + ".part");
+            // Stage one temp file per manifest path, not per hash. Otherwise two identical files at
+            // different paths would share a staged file and moving the first one would consume it.
+            Path part = staging.resolve(a.entry().sha256() + "-" + (stageIdx++) + ".part");
             fetcher.fetch(a.entry(), part);
             if (!HashUtils.sha256(part).equals(a.entry().sha256())) {
                 throw new IOException("staged bytes for " + a.path() + " failed hash verification");
@@ -242,13 +258,29 @@ public final class Reconciler {
 
         dupeGuard(plan, manifest, ledger);
 
+        // paths this apply gives up on, so the journal never carries their destructive op and the ledger
+        // commit never speaks for them. Filled by the two courtesies that are allowed to fail below
+        Set<String> deferred = new HashSet<>();
+
         // .bak courtesies happen before the journal: a crash after a bak is only litter, never damage
         for (Action a : plan.actions) {
-            if (a.kind() == Kind.REPLACE_BAK) {
+            // Back up edited non-mod files before a rule-E delete (no replacement follows). Skip mods/ so we
+            // don't hash and copy large removed jars.
+            boolean bak = a.kind() == Kind.REPLACE_BAK
+                    || (a.kind() == Kind.DELETE && !a.path().startsWith("mods/"));
+            if (bak) {
                 Disk d = disk(a.path());
                 if (d.exists()) {
-                    Files.copy(d.file(), dir.resolve(a.path() + ".bak-" + safe(ledger.installedVersion)),
-                            StandardCopyOption.REPLACE_EXISTING);
+                    try {
+                        Files.copy(d.file(), dir.resolve(a.path() + ".bak-" + safe(ledger.installedVersion)),
+                                StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException held) {
+                        // Don't let a failed .bak abort the whole sync, but defer this row: continuing would delete or
+                        // overwrite the player's edited file with no backup.
+                        deferred.add(a.path());
+                        System.out.println("[updater] " + a.path()
+                                + " left alone, no .bak could be taken, next sync retries");
+                    }
                 }
             }
         }
@@ -256,6 +288,9 @@ public final class Reconciler {
         Journal journal = new Journal();
         journal.targetVersion = manifest.pack().version();
         for (Action a : plan.actions) {
+            if (deferred.contains(a.path())) {
+                continue; // Skip journaling destructive ops if the .bak copy failed.
+            }
             String target = a.targetDisabled() ? a.path() + ".disabled" : a.path();
             switch (a.kind()) {
                 case INSTALL, REPLACE, REPLACE_BAK, RESTORE, SEED -> {
@@ -263,7 +298,10 @@ public final class Reconciler {
                     if (d.exists() && !d.file().equals(dir.resolve(target))) {
                         journal.ops.add(new Journal.Op("delete", "", rel(d.file()), "")); // bit flip / stale twin
                     }
-                    journal.ops.add(new Journal.Op("move", rel(stagedFiles.get(a.path())), target, a.entry().sha256()));
+                    // Use "seed" (refuses occupied target): in staged mode the player may create this file before next
+                    // boot, and refusing lets the next plan preserve or merge it.
+                    String kind = a.kind() == Kind.SEED ? "seed" : "move";
+                    journal.ops.add(new Journal.Op(kind, rel(stagedFiles.get(a.path())), target, a.entry().sha256()));
                 }
                 case DELETE -> {
                     Disk d = disk(a.path());
@@ -277,33 +315,82 @@ public final class Reconciler {
                         // lose the fires-once flag, so let next boot's normal plan handle it.
                         continue;
                     }
-                    // rename via the journal too: copy then delete-old keeps replay idempotent
-                    Path jar = dir.resolve(a.path());
-                    Path parked = staging.resolve("q-" + jar.getFileName());
-                    Files.copy(jar, parked, StandardCopyOption.REPLACE_EXISTING);
-                    journal.ops.add(new Journal.Op("move", rel(parked), a.path() + ".disabled", HashUtils.sha256(parked)));
-                    journal.ops.add(new Journal.Op("delete", "", a.path(), ""));
+                    // Single in-tree rename op (never copy+delete, which risks losing the jar if staging vanishes).
+                    // Don't backfill quarantined=true from a .disabled name alone; we can't tell it from a player's file.
+                    String sha;
+                    try {
+                        sha = HashUtils.sha256(dir.resolve(a.path()));
+                    } catch (IOException unreadable) {
+                        // Defer this quarantine if hashing fails (AV lock or deleted since planning) instead of aborting
+                        // sync or journaling a bogus sha; Q1 will retry next boot.
+                        deferred.add(a.path());
+                        System.out.println("[updater] integrity: cannot quarantine " + a.path()
+                                + ", unreadable right now, next sync retries");
+                        continue;
+                    }
+                    // "rename", not "move": replay refuses an occupied .disabled name for this kind, because the
+                    // twin check above runs in plan and a STUCK quarantine is finished later by step 0 with
+                    // no plan running, by which time the player may have parked their own jar there
+                    journal.ops.add(new Journal.Op("rename", a.path(), a.path() + DISABLED_SUFFIX, sha));
                 }
                 case ADOPT, ORPHAN, MERGE_SERVERS -> {
                     // merge is a read-modify-write, not a replayable move; it runs below, atomically
                 }
             }
         }
+        journal.ops.addAll(0, carryOver(journal.targetVersion, deferred, journal.ops));
         journal.save(Journal.pathIn(dir));
         if (staged) {
             return;
         }
         pulse.applying();
-        List<Journal.Op> stuck = journal.replay(dir);
-        if (!stuck.isEmpty()) {
-            // pending semantics: the ops survive as the journal for a later step 0;
-            // everything below still commits, because the placed files are real and A2 adopts the rest
+        Journal.Result replayed = journal.replay(dir);
+        if (!replayed.retryable().isEmpty()) {
+            // pending semantics: the ops survive as the journal for a later step 0. The
+            // ledger commit below SKIPS whatever did not land: this rule stops hashing a path once the
+            // ledger carries the target sha, so an entry for bytes that never arrived is the one write
+            // nothing walks back, the ledger swears the file is current and the old bytes go invisible.
+            // The abandoned ones are dropped: no later boot can finish them, and the ledger gate below
+            // is what makes the next plan re-derive those rows from scratch
             journal.ops.clear();
-            journal.ops.addAll(stuck);
+            journal.ops.addAll(replayed.retryable());
             journal.save(Journal.pathIn(dir));
         }
+        Set<String> unfinished = new HashSet<>();
+        for (Journal.Op op : replayed.retryable()) {
+            unfinished.add(strip(op.to()));
+        }
+        for (Journal.Op op : replayed.abandoned()) {
+            unfinished.add(strip(op.to()));
+        }
+        boolean skipped = false;
 
         for (Action a : plan.actions) {
+            if (deferred.contains(a.path())) {
+                // FIRST, because a deferred row journaled nothing at all: the replay report below cannot speak
+                // for it and landed() would say true, since a deferred REPLACE_BAK left the player's file
+                // exactly where it was and a stat at that name sees a regular file. The ledger would then
+                // record the NEW sha over their OLD bytes and this rule would stop hashing that path, which is
+                // the one write nothing walks back. Both defer sites already printed their own why-line
+                skipped = true;
+                continue;
+            }
+            if (unfinished.contains(a.path())) {
+                // Gate every unfinished replay path before landed(): stat can't distinguish old bytes from new on
+                // overwrites, and a stuck delete must keep its ledger row so it isn't misread as untracked.
+                System.out.println("[updater] " + notRecorded(a));
+                skipped = true;
+                continue;
+            }
+            boolean placer = switch (a.kind()) {
+                case ADOPT, INSTALL, REPLACE, REPLACE_BAK, RESTORE, SEED, QUARANTINE -> true;
+                default -> false;
+            };
+            if (placer && !landed(a)) {
+                System.out.println("[updater] " + notRecorded(a));
+                skipped = true;
+                continue;
+            }
             switch (a.kind()) {
                 case ADOPT, INSTALL, REPLACE, REPLACE_BAK, RESTORE -> {
                     Ledger.Entry en = new Ledger.Entry(a.entry().sha256());
@@ -314,6 +401,9 @@ public final class Reconciler {
                 case SEED -> {
                     Ledger.Entry en = new Ledger.Entry(a.entry().sha256());
                     en.seedOnce = true;
+                    // Record on_remove=orphan now: rule E reads it after the manifest is gone, and existing seeds
+                    // emit no action to backfill it later.
+                    en.orphanOnRemove = a.entry().onRemove() == FileEntry.OnRemove.ORPHAN;
                     ledger.files.put(a.path(), en);
                 }
                 case DELETE, ORPHAN -> ledger.files.remove(a.path());
@@ -328,10 +418,13 @@ public final class Reconciler {
                     // Don't fail the ledger commit if servers.dat is locked or the seed is bad since the
                     // other file moves already ran; just skip it and retry on the next sync.
                     try {
-                        String name = com.retro.bamfos.updater.engine.ping.ServersDat
-                                .mergeFirstEntry(dir.resolve(a.path()), Files.readAllBytes(stagedFiles.get(a.path())));
+                        Ledger.Entry prev = ledger.files.get(a.path());
+                        String prior = prev != null ? prev.mergeName : null;
+                        String name = com.retro.bamfos.updater.engine.ping.ServersDat.mergeFirstEntry(
+                                dir.resolve(a.path()), Files.readAllBytes(stagedFiles.get(a.path())), prior);
                         Ledger.Entry en = new Ledger.Entry(a.entry().sha256());
                         en.seedOnce = true;
+                        en.orphanOnRemove = a.entry().onRemove() == FileEntry.OnRemove.ORPHAN;
                         en.mergeName = name;
                         ledger.files.put(a.path(), en);
                     } catch (IOException e) {
@@ -340,13 +433,78 @@ public final class Reconciler {
                 }
             }
         }
-        ledger.installedVersion = manifest.pack().version();
-        ledger.save(Ledger.pathIn(dir));
-        if (stuck.isEmpty()) {
-            // the IN-MEMORY stuck list decides, never a re-read: the saved journal always still
-            // lists the ops it was born with, so re-loading it would keep every journal forever
-            Files.deleteIfExists(Journal.pathIn(dir));
+        if (replayed.allLanded() && !skipped) {
+            // Only advance installed_version when every row landed: SyncCore.ledgerAgrees trusts it as the
+            // pack-is-current shortcut even when bcc-common.toml updated ahead of a stuck sibling.
+            ledger.installedVersion = manifest.pack().version();
         }
+        ledger.save(Ledger.pathIn(dir));
+        if (replayed.retryable().isEmpty()) {
+            // Check the in-memory result rather than re-reading the saved journal (which still lists
+            // all original ops). Abandoned ops don't keep the journal around since retries won't fix them.
+            Files.deleteIfExists(Journal.pathIn(dir));
+            pruneStaging(staging);
+        }
+    }
+
+    /**
+     * Dead downloads, swept only where the journal is already gone. Every row that was deferred, abandoned,
+     * or cut short by a DupeModidAbort leaves its staged .part behind and NOTHING else ever removes one, so
+     * an instance folder grows dead bytes for the life of the box with no line anywhere naming them (* step 6 promises otherwise).
+     * IMPORTANT: this is called from the ONE exit that has just proven no journal survives. A pending op's
+     * staged bytes are the whole of , the reason replay needs no network, so a sweep that runs while a
+     * journal is kept turns a retryable op into an abandoned one and the box stops converging offline.
+     */
+    private static void pruneStaging(Path staging) {
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(staging, "*.part")) {
+            for (Path part : ds) {
+                Files.deleteIfExists(part);
+            }
+        } catch (IOException litter) {
+            // housekeeping, never a reason to fail a sync that already committed its ledger
+        }
+    }
+
+    /**
+     * The ops a step 0 KEPT because they were still stuck, so journal.save cannot quietly destroy them
+     *. They go in FRONT of this plan's ops, because replay
+     * runs in order and our fresher op for the same name still wins.
+     * Three things are left behind. An op this plan RE-DERIVED, because the fresh one owns freshly staged
+     * bytes and replaying both would move the file and then report the second one abandoned, gating a
+     * ledger row that actually landed. An op for a path this apply DEFERRED, because this run already decided
+     * to leave that file alone. And every op at all when the target version moved, which is 's
+     * rollback safety: after a rollback the new plan is authoritative and a leftover op would place bytes
+     * from the version we just left.
+     */
+    private List<Journal.Op> carryOver(String targetVersion, Set<String> deferred, List<Journal.Op> fresh) throws IOException {
+        Journal leftover = Journal.load(Journal.pathIn(dir));
+        if (leftover.ops.isEmpty() || !leftover.targetVersion.equals(targetVersion)) {
+            return List.of();
+        }
+        List<Journal.Op> carried = new ArrayList<>();
+        for (Journal.Op kept : leftover.ops) {
+            // Match by logical path rather than on-disk name (.jar vs .disabled) so a carried op and a fresh
+            // op with a flipped enable bit don't both run and strand a duplicate.
+            boolean rederived = fresh.stream()
+                    .anyMatch(o -> o.kind().equals(kept.kind()) && strip(o.to()).equals(strip(kept.to())));
+            if (!rederived && !deferred.contains(strip(kept.to()))) {
+                carried.add(kept);
+            }
+        }
+        return carried;
+    }
+
+    /** Maps an on-disk journal op path (possibly ending in .disabled) back to its manifest path. */
+    private static String strip(String to) {
+        return to.endsWith(DISABLED_SUFFIX) ? to.substring(0, to.length() - DISABLED_SUFFIX.length()) : to;
+    }
+
+    /** The honest one-liner for a row this apply is not going to record. Q1's jars get their own wording:
+     *  the managed line names a ledger and old bytes an untracked third-party jar does not have. */
+    private static String notRecorded(Action a) {
+        return a.kind() == Kind.QUARANTINE
+                ? a.path() + " could not be disabled, nothing recorded for it, next sync retries"
+                : a.path() + " did not land, ledger left on the old bytes for the next boot";
     }
 
     /** Two ENABLED jars sharing a modid (or two service jars sharing a provider) after this sync
@@ -420,6 +578,16 @@ public final class Reconciler {
         return s == FileEntry.Side.BOTH
                 || (s == FileEntry.Side.CLIENT && side == Side.CLIENT)
                 || (s == FileEntry.Side.SERVER && side == Side.SERVER);
+    }
+
+    /**
+     * Quick stat check for ADOPT and fresh paths. Must stay behind replay's unfinished-path gate, since
+     * stat alone can't distinguish overwritten bytes or a player-owned .disabled target from success.
+     */
+    private boolean landed(Action a) {
+        String name = a.targetDisabled() || a.kind() == Kind.QUARANTINE
+                ? a.path() + DISABLED_SUFFIX : a.path();
+        return Files.isRegularFile(dir.resolve(name));
     }
 
     private String rel(Path p) {

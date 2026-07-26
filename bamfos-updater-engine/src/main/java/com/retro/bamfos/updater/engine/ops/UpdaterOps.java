@@ -3,6 +3,7 @@ package com.retro.bamfos.updater.engine.ops;
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.door.Doors;
+import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.json.MiniJson;
@@ -20,11 +21,19 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The BIOS-facing surface. The BIOS is a view; THIS is the single writer -- menu code
+ * The BIOS-facing surface. The BIOS is a view, THIS is the single writer, menu code
  * never touches manifests, ledgers, or files, it calls here. By menu time jars are loaded and
  * locked, so every sync is STAGED: journal written, applies next boot, "changes staged" is always
  * the honest answer. Return codes over exceptions because callers sit across a reflective boundary:
- * 0 ok/staged, 1 no target to sync to, 2 failed, 3 another sync holds the lock, 4 token dead.
+ * 0 ok/staged, 1 no target to sync to, 2 failed, 3 another sync holds the lock, 4 token dead,
+ * 5 github rate limited, try again later. 5 has its own code so the repair page cannot render a
+ * throttle as "Sync failed. See the log.", because a limit clears itself inside the hour and is not a
+ * failure. unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
+ * changed, 2 the file could not be written. listReleases() answers in it too but INSIDE its map,
+ * under "code", because the picker needs the rows and the reason in one call: 0 the list is live, 2
+ * offline, 4 token dead, 5 rate limited, and every non-zero one still ships the installed version as
+ * its only row. The page strings for each code live in , not here, so the BIOS implementer
+ * reads them off the source of truth instead of a javadoc.
  */
 public final class UpdaterOps {
 
@@ -85,6 +94,97 @@ public final class UpdaterOps {
         }
     }
 
+    /**
+     * Clears the tag= pin so this install tracks the server broadcast again. Doesn't stage a sync (the
+     * next boot will sync automatically); returns 1 if no pin was set.
+     */
+    public int unpin() {
+        try {
+            if (UpdaterConfig.load(dir).tagPin().isEmpty()) {
+                return 1;
+            }
+            writePin("");
+            return 0;
+        } catch (IOException e) {
+            return 2;
+        }
+    }
+
+    /** Max releases to fetch for the rollback picker (sent as per_page so large repos don't return megabytes). */
+    static final int MAX_RELEASES = 10;
+
+    /**
+     * Rollback picker rows, newest first, with a status code (never throws). Offline, returns just the
+     * installed version rather than an empty list, and keeps rate-limit distinct from hard failures.
+     */
+    public Map<String, Object> listReleases() {
+        String installed = installedVersion();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        int code = 0;
+        try {
+            UpdaterConfig cfg = UpdaterConfig.load(dir);
+            // Empty tag and null cache path are intentional here; list calls don't fetch or cache a specific release.
+            GithubReleases gh = new GithubReleases(apiBase, cfg.repo(), cfg.githubToken(), "",
+                    dir.resolve(".bamfos-updater"));
+            for (Map<?, ?> r : gh.releases(MAX_RELEASES)) {
+                if (r.get("tag_name") instanceof String tag && !tag.isEmpty()) {
+                    rows.add(releaseRow(tag,
+                            r.get("name") instanceof String name ? name : "",
+                            r.get("published_at") instanceof String at ? at : "",
+                            Boolean.TRUE.equals(r.get("prerelease")),
+                            tag.equals(installed)));
+                }
+            }
+        } catch (HttpFetcher.RateLimited limited) {
+            // BEFORE the generic catch, same ordering stagedSync needs: folded into 2 the picker calls a
+            // throttle a broken updater, and the player goes hunting for a fix instead of waiting an hour
+            code = 5;
+        } catch (HttpFetcher.TokenDead dead) {
+            code = 4;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt(); // the BIOS runs this on a worker we may be tearing down
+            code = 2;
+        } catch (Exception offline) {
+            code = 2;
+        }
+        if (code != 0) {
+            rows.clear(); // Don't return a partial release list on error.
+            if (!installed.isEmpty()) {
+                rows.add(releaseRow(installed, "", "", false, true));
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("code", code);
+        out.put("installed", installed);
+        out.put("releases", rows);
+        return out;
+    }
+
+    /** Builds a consistent row map for both online and offline modes so callers don't need key checks. */
+    private static Map<String, Object> releaseRow(String tag, String name, String publishedAt,
+                                                  boolean prerelease, boolean installed) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("tag", tag);
+        row.put("name", name);
+        row.put("published_at", publishedAt);
+        row.put("prerelease", prerelease);
+        row.put("installed", installed);
+        return row;
+    }
+
+    /** Current installed version: prefers the bcc stamp, falling back to the last synced ledger version. */
+    private String installedVersion() {
+        Optional<String> stamped = Doors.localVersion(dir);
+        if (stamped.isPresent()) {
+            return stamped.get();
+        }
+        try {
+            return Ledger.load(Ledger.pathIn(dir)).installedVersion;
+        } catch (Exception unreadable) {
+            return "";
+        }
+    }
+
     /** Full hash audit vs the INSTALLED version's manifest, staged. */
     public int repair() {
         try {
@@ -100,8 +200,10 @@ public final class UpdaterOps {
         }
     }
 
-    /** The optional-mods page's data: category=optional entries off the cached manifest, current
-     *  disk/ledger bits, plus every quarantined jar with its recorded why. */
+    /**
+     * Optional-mods page data: category=optional entries with disk/ledger state, plus quarantined jars.
+     * Tracks `missing` separately when neither name is on disk so a hand-deleted jar doesn't render as on.
+     */
     public List<Map<String, Object>> listOptional() {
         List<Map<String, Object>> out = new ArrayList<>();
         try {
@@ -113,29 +215,35 @@ public final class UpdaterOps {
                 for (Object f : files) {
                     if (f instanceof Map<?, ?> fm && "optional".equals(fm.get("category"))
                             && fm.get("path") instanceof String path) {
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        row.put("path", path);
-                        row.put("disabled", !Files.isRegularFile(dir.resolve(path))
-                                && Files.isRegularFile(dir.resolve(path + ".disabled")));
-                        row.put("quarantined", false);
-                        out.add(row);
+                        out.add(modRow(path, false, ""));
                     }
                 }
             }
             for (Map.Entry<String, Ledger.Entry> e : ledger.files.entrySet()) {
                 if (e.getValue().quarantined) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("path", e.getKey());
-                    row.put("disabled", !Files.isRegularFile(dir.resolve(e.getKey())));
-                    row.put("quarantined", true);
-                    row.put("reason", e.getValue().quarantineReason == null ? "" : e.getValue().quarantineReason);
-                    out.add(row);
+                    out.add(modRow(e.getKey(), true,
+                            e.getValue().quarantineReason == null ? "" : e.getValue().quarantineReason));
                 }
             }
         } catch (Exception ignored) {
             // an unreadable cache lists nothing; the page renders empty, nothing breaks
         }
         return out;
+    }
+
+    /** Builds a consistent row map for both kinds so callers don't need key checks. */
+    private Map<String, Object> modRow(String path, boolean quarantined, String reason) {
+        boolean on = Files.isRegularFile(dir.resolve(path));
+        boolean off = Files.isRegularFile(dir.resolve(path + ".disabled"));
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("path", path);
+        row.put("disabled", !on && off);
+        row.put("missing", !on && !off);
+        row.put("quarantined", quarantined);
+        if (quarantined) {
+            row.put("reason", reason);
+        }
+        return row;
     }
 
     /** Flips the filename bit THROUGH the engine so the ledger stays coherent. True =
@@ -194,23 +302,42 @@ public final class UpdaterOps {
         if (lock.isEmpty()) {
             return 3;
         }
+        // Use append() so we don't truncate bus.log under the live tailer, and always emit END in finally
+        // or syncActive() leaves the BIOS file actions locked for the rest of the session.
+        BootBus bus = BootBus.append(dir);
+        String end = "fail";
         try (InstanceLock ignored = lock.get()) {
             String from = Doors.localVersion(dir).orElse("");
-            return Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, BootBus.at(dir));
+            int code = Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, bus);
+            end = "ok";
+            return code;
+        } catch (HttpFetcher.RateLimited limited) {
+            // Catch rate limits before the generic handler so the UI reports throttling instead of a hard sync failure.
+            end = "limited";
+            return 5;
         } catch (HttpFetcher.TokenDead dead) {
             return 4;
         } catch (Exception e) {
             return 2;
+        } finally {
+            bus.end(end);
         }
     }
 
-    /** Rewrites only the tag= line of the properties file; every other line is the human's. */
-    private void writePin(String tag) throws IOException {
+    /**
+     * Rewrites only the tag= line of the properties file; every other line is the human's.
+     * LATIN-1 both ways, NOT UTF-8, because UpdaterConfig.rawProps reads this same file with a latin-1 fallback
+     * for a documented reason (readString throws on a file Notepad saved as ANSI). Read it stricter than the
+     * boot path does and a player who typed one accented character in a comment gets a box where the sync
+     * still works but the BIOS rollback page answers "Sync failed. See the log." forever, with nothing in the
+     * log saying why. latin-1 maps every byte, so this round-trips their bytes untouched either way.
+     */
+    void writePin(String tag) throws IOException {
         Path p = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
         List<String> lines = new ArrayList<>();
         if (Files.isRegularFile(p)) {
-            for (String line : Files.readAllLines(p, StandardCharsets.UTF_8)) {
-                if (!line.trim().startsWith("tag=")) {
+            for (String line : Files.readAllLines(p, StandardCharsets.ISO_8859_1)) {
+                if (!isTagLine(line)) {
                     lines.add(line);
                 }
             }
@@ -220,7 +347,24 @@ public final class UpdaterOps {
         }
         Files.createDirectories(p.getParent());
         Path tmp = p.resolveSibling(p.getFileName() + ".tmp");
-        Files.write(tmp, lines, StandardCharsets.UTF_8);
+        Files.write(tmp, lines, StandardCharsets.ISO_8859_1);
         Files.move(tmp, p, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /* True when the READER would take this line as the tag= pin. UpdaterConfig hands the file to
+       java.util.Properties, which accepts "tag = v1", "tag:v1" and "tag v1" as the same key, so matching
+       the literal "tag=" here instead leaves a hand-spaced pin in the file: unpin() sees a pin, rewrites
+       nothing, answers 0, and the page says "Release lock cleared" over a box that is still pinned with
+       the row underneath it still reading Locked to v0.2.4. One key, parsed the one way. */
+    private static boolean isTagLine(String line) {
+        String s = line.trim();
+        if (s.startsWith("#") || s.startsWith("!")) {
+            return false; // Preserve comment lines as-is; Properties ignores them.
+        }
+        int end = 0;
+        while (end < s.length() && "=: \t\f".indexOf(s.charAt(end)) < 0) {
+            end++;
+        }
+        return "tag".contentEquals(s.subSequence(0, end));
     }
 }

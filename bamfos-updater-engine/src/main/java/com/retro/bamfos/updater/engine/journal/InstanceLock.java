@@ -35,16 +35,32 @@ public final class InstanceLock implements AutoCloseable {
                 Files.writeString(file, Long.toString(self), StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
                 return Optional.of(new InstanceLock(file));
             } catch (IOException exists) {
+                String content;
+                try {
+                    content = Files.readString(file, StandardCharsets.UTF_8).trim();
+                } catch (Exception unreadable) {
+                    content = ""; // garbage/empty lock = stale
+                }
                 long holder;
                 try {
-                    holder = Long.parseLong(Files.readString(file, StandardCharsets.UTF_8).trim());
-                } catch (Exception unreadable) {
-                    holder = -1; // garbage lock = stale
+                    holder = Long.parseLong(content);
+                } catch (NumberFormatException nan) {
+                    holder = -1;
                 }
                 boolean alive = holder > 0 && holder != self
                         && ProcessHandle.of(holder).map(ProcessHandle::isAlive).orElse(false);
                 if (alive) {
                     return Optional.empty();
+                }
+                // reclaim ONLY if the file still names the exact dead/garbage content we observed:
+                // if another process legitimately took the lock between our read and now, its live
+                // PID differs, and a blind delete would clobber a real lock (two holders at once)
+                try {
+                    if (!Files.readString(file, StandardCharsets.UTF_8).trim().equals(content)) {
+                        return Optional.empty();
+                    }
+                } catch (IOException gone) {
+                    continue; // already deleted by whoever won -- retry the CREATE_NEW
                 }
                 Files.deleteIfExists(file); // stale: dead PID or unreadable -- reclaim and retry once
             }

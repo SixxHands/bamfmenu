@@ -7,6 +7,7 @@ package com.retro.bamfmenu.early.bios.host;
 public enum Mode {
     POST,      // the loading terminal
     SETUP,     // BIOS SETUP menu + jukebox
+    REPAIR,    // the UPDATE AND REPAIR window (only reachable when the updater bound)
     CUTSCENE,  // the Recovery intro cutscene
     RHYTHM,    // the BAMFBEAT rhythm game
     TETRIS,    // the "Enable Mechanics" Tetris

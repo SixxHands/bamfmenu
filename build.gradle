@@ -39,6 +39,18 @@ dependencies {
        bamfmenu.jar -- it cannot be a classpath dependency or a jar-in-jar, because FancyModLoader
        selects the early-window provider from a mods-folder scan before either is visible. For dev it
        is dropped into run/mods/ (see the copyEarlyWindowToRunMods task below). */
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+/* Plain JUnit, NOT ModDevGradle's unitTest block: the only testable classes in this module are the ones
+   that touch no Minecraft class at all (Bugcheck, the blue screen's classification and every word it
+   prints), so the tests need a JVM and nothing else. Adding the MDG test rig here would buy a game
+   runtime for code that deliberately has no game in it. */
+tasks.named('test') {
+    useJUnitPlatform()
 }
 
 /* Build the early-window jar whenever the client run is prepared, and drop it into run/mods/ so the

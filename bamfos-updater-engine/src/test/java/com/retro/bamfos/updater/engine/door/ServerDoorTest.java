@@ -4,6 +4,7 @@ import com.retro.bamfos.updater.engine.Fx;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
+import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.util.HashUtils;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -86,6 +87,11 @@ class ServerDoorTest {
             }
         });
         server.createContext("/dead/repos/", ex -> ex.sendResponseHeaders(401, -1));
+        // Simulated GitHub rate limit: 403 with rate-limit headers (distinct from /dead/ auth failures).
+        server.createContext("/limited/repos/", ex -> {
+            ex.getResponseHeaders().add("x-ratelimit-remaining", "0");
+            ex.sendResponseHeaders(403, -1);
+        });
         server.start();
     }
 
@@ -117,6 +123,32 @@ class ServerDoorTest {
     }
 
     @Test
+    void serverSide_announcesDiscoveryAndSync_thenAlreadyCurrent() throws IOException {
+        // pre-satisfy the two self-entries so the run is a clean update (nothing staged), and the re-run is a
+        // TRUE no-op, this is the exact console the player sees on the wrapper
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        ServerDoor door = new ServerDoor(base);
+
+        assertEquals(0, door.run(dir, "vT", false));
+        Path log = dir.resolve(".bamfos-updater").resolve("server-sync.log");
+        String logText = Files.readString(log, StandardCharsets.UTF_8);
+        assertTrue(logText.contains("new release vT discovered"), logText);
+        assertTrue(logText.contains("updating server ? -> vT"), logText);
+        assertTrue(logText.contains("server synced to vT"), logText);
+
+        Path last = dir.resolve(".bamfos-updater").resolve("last-sync.json");
+        String summary = (String) ((Map<?, ?>) MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8))).get("summary");
+        assertTrue(summary.startsWith("updated ? -> vT"), summary);
+
+        assertEquals(0, door.run(dir, "vT", false)); // everything (incl. self-entries) matches now
+        assertTrue(Files.readString(log, StandardCharsets.UTF_8).contains("server already current (vT)"));
+        assertEquals("already current (vT)",
+                ((Map<?, ?>) MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8))).get("summary"));
+    }
+
+    @Test
     void offline_exitsZeroAndTouchesNothing() {
         ServerDoor door = new ServerDoor("http://127.0.0.1:1"); // closed port
         assertEquals(0, door.run(dir, "vT", false));
@@ -145,6 +177,18 @@ class ServerDoorTest {
         assertTrue(Files.exists(marker));
         assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
         assertFalse(Files.exists(marker));
+    }
+
+    /** Server rate-limits must not write the token-dead marker and must log to server-sync.log so the
+     * log does not end on an unfinished update. */
+    @Test
+    void rateLimited_neverWritesTheTokenDeadMarker_andClosesTheLoudLog() throws IOException {
+        assertEquals(0, new ServerDoor(base + "/limited").run(dir, "vT", false));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve(ServerDoor.TOKEN_DEAD_MARKER)));
+        String log = Files.readString(dir.resolve(".bamfos-updater").resolve("server-sync.log"),
+                StandardCharsets.UTF_8);
+        assertTrue(log.contains("github rate limited (403)"), String.valueOf(log));
+        assertTrue(log.contains("launching"), String.valueOf(log));
     }
 
     @Test

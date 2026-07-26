@@ -129,6 +129,16 @@ public interface BiosContext {
     /**  Draws the underlying Bios Setup UI graphics beneath overlay screens/wipes. */
     void renderSetupUnder();
 
+    // the shared BIOS shell, for a screen that has to look like SETUP (the UPDATE AND REPAIR window)
+    /** Draws the wordmark header into the given logical canvas, returns the body Y under it. */
+    int drawBiosHeader(int logicalW, int logicalH);
+
+    /** The logical canvas width SETUP itself would use for a box of `rows` options. */
+    int biosBodyWidth(int rows); // one owner for the short-window widen rule, else the two screens pick different font sizes
+
+    /** True while the updater engine is writing files, the boot lockout's own signal. */
+    boolean updaterSyncActive(); // a BIOS page that touches files has to refuse for as long as this holds
+
     // The Recovery face art frames (eyes / smile), shared with the SETUP achievement panel so they stay provider-owned.
     String[] recoveryFaceA();
 

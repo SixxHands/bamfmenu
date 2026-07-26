@@ -61,14 +61,14 @@ public final class Nbt {
             case 0x05 -> in.readFloat();
             case 0x06 -> in.readDouble();
             case 0x07 -> {
-                byte[] b = new byte[in.readInt()];
+                byte[] b = new byte[checked(in.readInt())];
                 in.readFully(b);
                 yield b;
             }
             case 0x08 -> readString(in);
             case 0x09 -> {
                 int elem = in.readByte();
-                int count = in.readInt();
+                int count = checked(in.readInt());
                 List<Val> items = new ArrayList<>(Math.max(0, count));
                 for (int i = 0; i < count; i++) {
                     items.add(readPayload(in, elem));
@@ -77,14 +77,14 @@ public final class Nbt {
             }
             case 0x0A -> readCompound(in);
             case 0x0B -> {
-                int[] a = new int[in.readInt()];
+                int[] a = new int[checked(in.readInt())];
                 for (int i = 0; i < a.length; i++) {
                     a[i] = in.readInt();
                 }
                 yield a;
             }
             case 0x0C -> {
-                long[] a = new long[in.readInt()];
+                long[] a = new long[checked(in.readInt())];
                 for (int i = 0; i < a.length; i++) {
                     a[i] = in.readLong();
                 }
@@ -154,6 +154,18 @@ public final class Nbt {
 
     private static void writeString(DataOutputStream out, String s) throws IOException {
         out.writeUTF(s);
+    }
+
+    private static final int MAX_ELEMS = 8_388_608; // servers.dat is tiny; reject absurd lengths
+
+    /** Bound an untrusted array length before allocating, a hostile servers.dat could otherwise
+     *  hand us 0x7FFFFFFF and OOM the boot, breaking the "malformed = no-signal, never a crash" rule.
+     *  Negative also catches an int overflow from a *4 / *8 element size upstream. */
+    private static int checked(int n) throws IOException {
+        if (n < 0 || n > MAX_ELEMS) {
+            throw new IOException("NBT array length out of range: " + n);
+        }
+        return n;
     }
 
     private Nbt() {

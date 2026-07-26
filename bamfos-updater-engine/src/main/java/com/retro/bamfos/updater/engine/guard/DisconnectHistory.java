@@ -11,12 +11,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Engine-written record of what each Q2 cycle actually DID, keyed by kick fingerprint.
- * The mod reads this at kick time to pick the blue-screen variant: a fingerprint whose last cycle
- * quarantined nothing AND changed no version has already proven a restart won't help -- that recur
- * is the UNREPAIRABLE screen, and this file is the anti-loop memory behind it.
- */
+// Tracks what the last kick-recovery boot actually changed per kick fingerprint so bamfmenu won't tell you to restart in an infinite loop.
 public final class DisconnectHistory {
 
     public static final class Entry {

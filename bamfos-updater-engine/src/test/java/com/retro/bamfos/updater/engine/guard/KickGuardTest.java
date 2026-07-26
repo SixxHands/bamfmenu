@@ -54,6 +54,22 @@ class KickGuardTest {
         assertTrue(Files.exists(dir.resolve("mods/chipped-x.jar")));
     }
 
+    /** Emit quarantined jars under the integrity subsystem with one shared reason line per batch so
+     * multi-jar kicks do not overflow the boot terminal. */
+    @Test
+    void quarantineBlock_isOneRowPerJarAndOneReasonForTheBatch() throws IOException {
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        Fx.write(dir, "mods/envelope-y.jar", Fx.jar("envelopey"));
+        breadcrumb("Channel of mod x failed: chippedx:main and envelopey:main missing on the server side");
+
+        KickGuard.consume(dir, List.of(), BootBus.at(dir));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertEquals(2, bus.stream().filter(l -> l.startsWith("LOG\tintegrity: quarantined ")).count(), String.valueOf(bus));
+        assertEquals(1, bus.stream().filter(l -> l.equals("LOG\treason: server integrity policy")).count(), String.valueOf(bus));
+        assertTrue(bus.indexOf("LOG\treason: server integrity policy") == bus.size() - 1, String.valueOf(bus));
+    }
+
     @Test
     void managedAndPinnedJars_areNeverTargets() throws IOException {
         Fx.write(dir, "mods/managed.jar", Fx.jar("managedmod"));
@@ -78,6 +94,88 @@ class KickGuardTest {
         assertEquals("none", out.action());
         assertTrue(Files.exists(dir.resolve("mods/some.jar")));
         assertFalse(Files.exists(Breadcrumb.pathIn(dir)));
+    }
+
+    @Test
+    void disabledTwinExists_leavesJarAndConsumesBreadcrumb() throws IOException {
+        // A .disabled file with the same name already exists (from the user), so don't overwrite it.
+        // Leave the culprit in place for the duplicate guard to report instead.
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        Fx.write(dir, "mods/chipped-x.jar.disabled", "a user's own file".getBytes());
+        breadcrumb("Channel chippedx:main is missing on the server side");
+
+        var out = KickGuard.consume(dir, List.of(), BootBus.headless()).orElseThrow();
+        assertTrue(out.quarantined().isEmpty());
+        assertTrue(Files.exists(dir.resolve("mods/chipped-x.jar")));
+        assertFalse(Ledger.load(Ledger.pathIn(dir)).files.containsKey("mods/chipped-x.jar"));
+        assertFalse(Files.exists(Breadcrumb.pathIn(dir)));
+    }
+
+    /** The reason the mod half writes is NeoForge's own prose wrapped around the channel dump, so mod,
+     *  server, client and channel are all whole words in it. A player's hand-added jar whose modid happens
+     *  to be one of them must not go dark, and nothing in the pack ever re-enables it if it does. */
+    @Test
+    void neoforgeHeaderWords_neverQuarantineAModNamedAfterThem() throws IOException {
+        Fx.write(dir, "mods/server-utils.jar", Fx.jar("server"));
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        breadcrumb("Channel of mod x failed to connect: chippedx:main is missing on the server side, "
+                + "but the client requires it");
+
+        var out = KickGuard.consume(dir, List.of(), BootBus.headless()).orElseThrow();
+        assertEquals(List.of("mods/chipped-x.jar"), out.quarantined());
+        assertTrue(Files.exists(dir.resolve("mods/server-utils.jar")));
+        assertFalse(Files.exists(dir.resolve("mods/server-utils.jar.disabled")));
+    }
+
+    /** Proxy kick messages often include a URL, and https:// looks like a channel id with "https"
+     *  as the namespace. Filter out URL schemes before checking for channels so a link doesn't hide the actual mod. */
+    @Test
+    void urlInTheReason_doesNotSuppressAttribution() throws IOException {
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        breadcrumb("You were kicked: chippedx is not allowed here, see https://wiki.example/rules");
+
+        var out = KickGuard.consume(dir, List.of(), BootBus.headless()).orElseThrow();
+        assertEquals(List.of("mods/chipped-x.jar"), out.quarantined());
+    }
+
+    /** Ignore host:port addresses in proxy kick text; they match the namespace:path pattern and would
+     * hide the actual culprit mod. */
+    @Test
+    void hostAndPortInTheReason_doesNotSuppressAttribution() throws IOException {
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        breadcrumb("Incompatible client, remove chippedx and reconnect to play.example.net:25565");
+
+        var out = KickGuard.consume(dir, List.of(), BootBus.headless()).orElseThrow();
+        assertEquals(List.of("mods/chipped-x.jar"), out.quarantined());
+    }
+
+    /** Don't emit contradictory status lines. When an existing .disabled file blocks the move, the
+     *  per-jar line already explains what happened, so don't follow it with a summary saying no
+     *  untracked modules matched. Same applies if AV locks the jar. */
+    @Test
+    void aNamedJarWeCouldNotMove_neverPrintsTheNamedNothingLine() throws IOException {
+        Fx.write(dir, "mods/chipped-x.jar", Fx.jar("chippedx"));
+        Fx.write(dir, "mods/chipped-x.jar.disabled", "a user's own file".getBytes());
+        breadcrumb("Channel chippedx:main is missing on the server side");
+
+        KickGuard.consume(dir, List.of(), BootBus.at(dir));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.stream().anyMatch(l -> l.contains("cannot quarantine mods/chipped-x.jar")), String.valueOf(bus));
+        assertTrue(bus.stream().noneMatch(l -> l.contains("named no untracked modules")), String.valueOf(bus));
+    }
+
+    /** The control for the row above: a reason that really named nothing on disk still says so, or the quiet
+     *  boot loses the only line that tells the player Q2 looked and found nothing of his. */
+    @Test
+    void aReasonNamingNothingOnDisk_stillSaysSo() throws IOException {
+        Fx.write(dir, "mods/innocent.jar", Fx.jar("innocent"));
+        breadcrumb("Channel chippedx:main is missing on the server side");
+
+        KickGuard.consume(dir, List.of(), BootBus.at(dir));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.stream().anyMatch(l -> l.contains("named no untracked modules")), bus.toString());
     }
 
     @Test

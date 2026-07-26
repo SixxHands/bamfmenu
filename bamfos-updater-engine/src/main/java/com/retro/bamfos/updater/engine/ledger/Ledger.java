@@ -4,6 +4,7 @@ import com.retro.bamfos.updater.engine.json.JsonWriter;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 
 import java.io.IOException;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,7 +45,16 @@ public final class Ledger {
         if (!Files.isRegularFile(file)) {
             return l; // absent ledger = fresh seed; the reconciler adopts/repairs from hashes
         }
-        Object root = MiniJson.parse(Files.readString(file, StandardCharsets.UTF_8));
+        Object root;
+        try {
+            root = MiniJson.parse(Files.readString(file, StandardCharsets.UTF_8));
+        } catch (MiniJson.JsonError | CharacterCodingException corrupt) {
+            // A crash can leave a truncated ledger.json; fall back to a fresh seed instead of crashing sync().
+            // Next sync re-derives rows from disk (adopting matches, backing up edits) and replaces the file.
+            System.out.println("[updater] ledger is unreadable (" + corrupt
+                    + "), re-deriving every row from what is on disk");
+            return l;
+        }
         if (!(root instanceof Map<?, ?> m)) {
             return l;
         }

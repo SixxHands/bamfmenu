@@ -16,11 +16,8 @@ public final class EngineEntry {
         return v == null ? "dev" : v;
     }
 
-    /**
-     * Runs the engine. args carry the door's context: --server --dir D [--tag T] [--repair].
-     * Return code is the shim's exit code on the server door -- 0 always except corrupted-local-state
-     *.
-     */
+    /** Entry point invoked by the shim with server/dir/tag/repair CLI args. Always returns 0
+     *  so the server still boots; the wrapper does not branch on the exit code. */
     public static int enter(String[] args) {
         System.out.println("[updater] engine " + version() + " up");
         boolean server = false;

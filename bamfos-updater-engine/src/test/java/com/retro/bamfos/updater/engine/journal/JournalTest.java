@@ -53,6 +53,77 @@ class JournalTest {
         assertFalse(Files.exists(dir.resolve("mods/x.jar")));
     }
 
+    /** Do not overwrite a user's existing .disabled twin during step-0 replay; mark the op abandoned
+     * (not retryable) so it neither clobbers the file nor loops forever. */
+    @Test
+    void quarantineRename_refusesAnOccupiedDisabledName_insteadOfEatingTheirFile() throws IOException {
+        byte[] culprit = "the jar on the kill list".getBytes(StandardCharsets.UTF_8);
+        byte[] parked = "the player's own parked copy".getBytes(StandardCharsets.UTF_8);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/foo.jar"), culprit);
+        Files.write(dir.resolve("mods/foo.jar.disabled"), parked); // appeared between the plan and this replay
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("rename", "mods/foo.jar", "mods/foo.jar.disabled", HashUtils.sha256(culprit)));
+
+        Journal.Result r = j.replay(dir);
+        assertEquals(1, r.abandoned().size());
+        assertTrue(r.retryable().isEmpty());
+        assertArrayEquals(parked, Files.readAllBytes(dir.resolve("mods/foo.jar.disabled")));
+        assertArrayEquals(culprit, Files.readAllBytes(dir.resolve("mods/foo.jar")));
+    }
+
+    /** Report missing or stale staged sources as abandoned instead of skipping or retrying them, so
+     * we never commit the ledger for files that didn't get written. */
+    @Test
+    void aSourceThatIsGoneOrWrong_isReportedAbandoned_neverSilentlySkipped() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/stale"), "tampered".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/gone", "mods/a.jar", HashUtils.sha256(NEW)));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/stale", "mods/b.jar", HashUtils.sha256(NEW)));
+
+        Journal.Result r = j.replay(dir);
+        assertEquals(2, r.abandoned().size());
+        assertTrue(r.retryable().isEmpty());
+        assertFalse(Files.exists(dir.resolve("mods/a.jar")));
+        assertFalse(Files.exists(dir.resolve("mods/b.jar")));
+    }
+
+    /** Managed file placements still overwrite existing files since upgrades replace the old version. */
+    @Test
+    void managedMove_stillReplacesTheOldFile() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/part1"), NEW);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/x.jar"), "the old version".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/x.jar", HashUtils.sha256(NEW)));
+        assertTrue(j.replay(dir).allLanded());
+        assertArrayEquals(NEW, Files.readAllBytes(dir.resolve("mods/x.jar")));
+    }
+
+    /**
+     * A power loss during replay can leave journal.json truncated or zeroed. Treat an unreadable journal as
+     * abandoned instead of throwing out of step 0, so the ledger gate re-plans the missing work on next boot.
+     */
+    @Test
+    void anUnreadableJournal_isDiscarded_neverBricksEveryFutureBoot() throws IOException {
+        Path file = Journal.pathIn(dir);
+        Files.createDirectories(file.getParent());
+
+        Files.writeString(file, "{\"target_version\":\"v2\",\"ops\":[{\"kind\":\"mov"); // cut off mid-write
+        assertTrue(Journal.load(file).ops.isEmpty());
+        assertFalse(Files.exists(file));
+
+        Files.write(file, new byte[64]); // the zero-filled block a power loss leaves behind
+        assertTrue(Journal.load(file).ops.isEmpty());
+        assertFalse(Files.exists(file));
+
+        Files.write(file, new byte[]{(byte) 0xC3}); // not even UTF-8: readString throws before the parser
+        assertTrue(Journal.load(file).ops.isEmpty());
+        assertFalse(Files.exists(file));
+    }
+
     @Test
     void lock_blocksLiveHolder_reclaimsDeadHolder() throws IOException {
         // a live holder (this very JVM) blocks a second acquire

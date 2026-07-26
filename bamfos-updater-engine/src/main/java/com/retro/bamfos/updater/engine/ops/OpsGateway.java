@@ -22,6 +22,8 @@ public final class OpsGateway {
                 case "status" -> o.status();
                 case "syncNow" -> o.syncNow();
                 case "syncTo" -> o.syncTo(String.valueOf(args[0]));
+                case "unpin" -> o.unpin();
+                case "listReleases" -> o.listReleases();
                 case "repair" -> o.repair();
                 case "listOptional" -> o.listOptional();
                 case "setDisabled" -> o.setDisabled(String.valueOf(args[0]), Boolean.TRUE.equals(args[1]));

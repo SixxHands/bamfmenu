@@ -5,9 +5,9 @@ import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,41 +36,70 @@ public final class GithubReleases implements Reconciler.Fetcher {
     }
 
     public static String realApi() {
-        return "https://api.github.com";
+        // Test/integration seam: honored ONLY when the env var is set (never in a shipped run, so
+        // production behavior is byte-identical), letting a local fixture stand in for GitHub for a
+        // REAL boot.jar --server end-to-end. Same intent as ServerDoor's injectable apiBase, but
+        // reachable from the shim's reflected entry (EngineEntry) which always calls realApi().
+        String override = System.getenv("BAMFOS_API_BASE");
+        return override != null && !override.isBlank() ? override : "https://api.github.com";
     }
 
     /** The release JSON for a tag ("latest" = the /releases/latest endpoint, server door only). */
     public Map<?, ?> release(String tag) throws IOException, InterruptedException {
         String url = baseUrl + "/repos/" + repo + "/releases/"
                 + ("latest".equals(tag) ? "latest" : "tags/" + tag);
-        try (InputStream in = http.get(url, token, "application/vnd.github+json").body()) {
-            Object parsed = MiniJson.parse(new String(in.readAllBytes(), StandardCharsets.UTF_8));
-            if (!(parsed instanceof Map<?, ?> m)) {
-                throw new IOException("release response is not an object");
-            }
-            Map<String, Long> ids = new HashMap<>();
-            if (m.get("assets") instanceof List<?> assets) {
-                for (Object a : assets) {
-                    if (a instanceof Map<?, ?> am && am.get("name") instanceof String n && am.get("id") instanceof Long id) {
-                        ids.put(n, id);
-                        // GITHUB SANITIZES asset filenames on upload (spaces become dots, parens
-                        // vanish): the manifest says "ATi Structures (1.21+).jar", the release says
-                        // "ATi.Structures.1.21+.jar", and an exact-match lookup strands every such
-                        // mod. Key a normalized form too; a wrong pick can't slip through because the
-                        // hash check downstream rejects it loudly.
-                        ids.putIfAbsent(norm(n), id);
-                    }
+        // getBody, NEVER readAllBytes off the stream: HttpRequest.timeout stops covering the exchange once
+        // the headers land, so a host that answers and then stalls parks this read with no deadline at all,
+        // and on the client it parks inside FML discovery
+        Object parsed = MiniJson.parse(new String(
+                http.getBody(url, token, "application/vnd.github+json"), StandardCharsets.UTF_8));
+        if (!(parsed instanceof Map<?, ?> m)) {
+            throw new IOException("release response is not an object");
+        }
+        Map<String, Long> ids = new HashMap<>();
+        if (m.get("assets") instanceof List<?> assets) {
+            for (Object a : assets) {
+                if (a instanceof Map<?, ?> am && am.get("name") instanceof String n && am.get("id") instanceof Long id) {
+                    ids.put(n, id);
+                    // GitHub sanitizes uploaded asset names (spaces -> dots, parens stripped), so index a
+                    // normalized key too; downstream hash verification still rejects any wrong match.
+                    ids.putIfAbsent(norm(n), id);
                 }
             }
-            assetIds.put(String.valueOf(m.get("tag_name")), ids);
-            if (m.get("tag_name") instanceof String tn && !tn.equals(tag) && !"latest".equals(tag)) {
-                throw new IOException("asked for tag " + tag + ", got " + tn);
-            }
-            if (tag.equals(this.tag)) {
-                targetRelease = m;
-            }
-            return m;
         }
+        assetIds.put(String.valueOf(m.get("tag_name")), ids);
+        // Also cache under the requested tag alias (like "latest") so follow-up downloadAsset("latest", ...)
+        // lookups hit instead of throwing and leaving the server stuck on an old version.
+        assetIds.put(tag, ids);
+        if (m.get("tag_name") instanceof String tn && !tn.equals(tag) && !"latest".equals(tag)) {
+            throw new IOException("asked for tag " + tag + ", got " + tn);
+        }
+        if (tag.equals(this.tag)) {
+            targetRelease = m;
+        }
+        return m;
+    }
+
+    /** Fetches non-draft releases newest-first for the rollback picker via HttpFetcher (preserving
+     *  RateLimited/TokenDead). Caps per_page on the wire so huge asset arrays don't exceed getBody's
+     *  8 MB limit, and filters out drafts since /releases/tags/&lt;tag&gt; cannot resolve them. */
+    public List<Map<?, ?>> releases(int max) throws IOException, InterruptedException {
+        Object parsed = MiniJson.parse(new String(
+                http.getBody(baseUrl + "/repos/" + repo + "/releases?per_page=" + max, token,
+                        "application/vnd.github+json"), StandardCharsets.UTF_8));
+        if (!(parsed instanceof List<?> arr)) {
+            throw new IOException("releases response is not an array");
+        }
+        List<Map<?, ?>> out = new ArrayList<>();
+        for (Object o : arr) {
+            if (o instanceof Map<?, ?> m && !Boolean.TRUE.equals(m.get("draft"))) {
+                out.add(m);
+            }
+            if (out.size() == max) {
+                break; // cap results in case the server ignores per_page
+            }
+        }
+        return out;
     }
 
     /** Returns a string field from the release JSON (e.g. "body" for release notes), or null if absent. */
@@ -80,9 +109,34 @@ public final class GithubReleases implements Reconciler.Fetcher {
 
     public String manifestJson() throws IOException, InterruptedException {
         release(tag);
+        pruneCaches();
         Path tmp = cacheDir.resolve("manifest-" + tag + ".json");
         downloadAsset(tag, "manifest.json", tmp);
         return java.nio.file.Files.readString(tmp, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The release caches from every PREVIOUS sync, swept. Both names here are tag-unique and nothing ever
+     * removed either, so the real pack (which sources the whole config bucket out of one release zip) left a
+     * fresh copy of that zip in staging per release: twenty releases, twenty copies plus twenty manifest
+     * jsons, hundreds of MB inside the instance folder that no UI names and the player cannot know is safe to
+     * delete. Free to drop, because these files are only ever re-read through the in-memory zipCache, which lives
+     * exactly one sync, so a file from an older run is already dead weight rather than a saved download.
+     * Runs from manifestJson, which is the first thing every sync does, so nothing this sync wrote can be in
+     * the sweep. Staged .part files are NOT touched: those are 's bytes and only the Reconciler knows
+     * when a journal is done with them.
+     */
+    private void pruneCaches() {
+        try (java.nio.file.DirectoryStream<Path> ds = java.nio.file.Files.newDirectoryStream(cacheDir)) {
+            for (Path p : ds) {
+                String n = p.getFileName().toString();
+                if (n.startsWith("zip-") || (n.startsWith("manifest-") && n.endsWith(".json"))) {
+                    java.nio.file.Files.deleteIfExists(p);
+                }
+            }
+        } catch (IOException litter) {
+            // housekeeping, never a reason to fail a sync
+        }
     }
 
     @Override

@@ -53,11 +53,46 @@ class M6ReconcilerTest {
 
         // Next boot step 0: replay staged bytes, then rule A2 adopts them.
         Journal j = Journal.load(Journal.pathIn(dir));
-        assertTrue(j.replay(dir).isEmpty());
+        assertTrue(j.replay(dir).allLanded());
         assertArrayEquals(newBytes, Files.readAllBytes(dir.resolve("config/a.toml")));
         Ledger fresh = Ledger.load(Ledger.pathIn(dir));
         SyncPlan next = new Reconciler(dir, Reconciler.Side.CLIENT, List.of()).plan(m, fresh);
         assertTrue(next.actions.stream().allMatch(a -> a.kind() == SyncPlan.Kind.ADOPT));
+    }
+
+    /**
+     * A staged SEED op must refuse to overwrite a file the player created before next boot's step 0 runs,
+     * letting the next sync re-plan safely (keeping user configs or merging servers.dat).
+     */
+    @Test
+    void aStagedSeed_refusesToEatAFileTheSessionCreated() throws IOException {
+        byte[] seed = Fx.serversDat("198.51.100.10");
+        byte[] theirs = Fx.serversDat("their-own-server");
+        FileEntry entry = serversEntry(seed);
+        Manifest m = Fx.manifest("vT", List.of(), entry);
+        Reconciler rec = new Reconciler(dir, Reconciler.Side.CLIENT, List.of());
+        Ledger ledger = new Ledger();
+
+        SyncPlan p = rec.plan(m, ledger);
+        assertEquals(SyncPlan.Kind.SEED, p.actions.get(0).kind());
+        rec.apply(p, m, ledger, Fx.fetcher(), Reconciler.Pulse.NONE, true); // staged: journal only
+        Files.write(dir.resolve("servers.dat"), theirs); // the session the player spends adding a server
+
+        Journal j = Journal.load(Journal.pathIn(dir));
+        assertEquals("seed", j.ops.get(0).kind());
+        Journal.Result r = j.replay(dir);
+        assertEquals(1, r.abandoned().size());
+        assertTrue(r.retryable().isEmpty());
+        assertArrayEquals(theirs, Files.readAllBytes(dir.resolve("servers.dat")));
+        Files.delete(Journal.pathIn(dir)); // what step 0 does when a journal has nothing retryable
+
+        // Next boot keeps the user's file and merges our entry into it via rule D
+        // (detailed merge cases are tested below).
+        Ledger fresh = Ledger.load(Ledger.pathIn(dir));
+        SyncPlan next = rec.plan(m, fresh);
+        assertEquals(SyncPlan.Kind.MERGE_SERVERS, next.actions.get(0).kind());
+        rec.apply(next, m, fresh, Fx.fetcher());
+        assertEquals("198.51.100.10", ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElseThrow());
     }
 
     @Test

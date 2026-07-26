@@ -78,6 +78,29 @@ class RangeResumeTest {
     }
 
     @Test
+    void completeDlOrphaned_416OnResume_dropsItAndRestartsFromZero() throws Exception {
+        // If a crash or locked move leaves a full-sized .dl file, requesting bytes=<fullLen>- gets HTTP 416
+        // from S3 until we discard the leftover partial.
+        server.createContext("/poison", ex -> {
+            String range = ex.getRequestHeaders().getFirst("Range");
+            if (range != null) {
+                ex.sendResponseHeaders(416, -1); // Range Not Satisfiable: offset is at/past the asset end
+                ex.close();
+                return;
+            }
+            ex.sendResponseHeaders(200, BODY.length);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write(BODY);
+            }
+        });
+        Path dest = dir.resolve("poison.bin");
+        Files.write(dir.resolve("poison.bin.dl"), BODY); // a complete orphaned partial
+        new HttpFetcher().download(base + "/poison", "tok", "application/octet-stream", dest);
+        assertArrayEquals(BODY, Files.readAllBytes(dest));
+        assertFalse(Files.exists(dir.resolve("poison.bin.dl")));
+    }
+
+    @Test
     void hostIgnoresRange_fullRestartStillConverges() throws Exception {
         // pre-plant a bogus partial: a host answering 200 must trigger truncate-and-restart
         Path dest = dir.resolve("asset.bin");

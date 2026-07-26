@@ -74,6 +74,15 @@ public final class ServersDat {
      * fields intact. Places the full seed if missing; returns the entry name for merge_name. Atomic write.
      */
     public static String mergeFirstEntry(Path local, byte[] seedBytes) throws IOException {
+        return mergeFirstEntry(local, seedBytes, null);
+    }
+
+    /**
+     * Looks up our entry by priorName first (handles seed renames) and overlays all seed fields.
+     * Propagates read errors (like AV locks) so we retry later instead of wiping the player's list;
+     * only falls back to the seed after backing up bytes we actually read and couldn't parse.
+     */
+    public static String mergeFirstEntry(Path local, byte[] seedBytes, String priorName) throws IOException {
         Nbt.Root seed = Nbt.read(new java.io.ByteArrayInputStream(seedBytes));
         var seedEntry = firstEntry(seed);
         if (seedEntry == null) {
@@ -83,24 +92,38 @@ public final class ServersDat {
         String seedIp = seedEntry.get("ip") instanceof Nbt.Val i && i.v() instanceof String s ? s : "";
 
         Nbt.Root localTree = null;
-        if (Files.isRegularFile(local)) {
-            try (var in = Files.newInputStream(local)) {
-                localTree = Nbt.read(in);
-            } catch (IOException | RuntimeException unreadable) {
-                localTree = null; // their file is broken; the seed becomes the file, .bak nothing (it was garbage)
+        byte[] localBytes = null;
+        if (Files.exists(local)) {
+            // Read outside the parse catch (and check exists, not isRegularFile) so a directory or AccessDenied
+            // throws instead of being treated as a corrupt servers.dat.
+            localBytes = Files.readAllBytes(local);
+            try {
+                localTree = Nbt.read(new java.io.ByteArrayInputStream(localBytes));
+            } catch (IOException | RuntimeException unparseable) {
+                localTree = null; // File is unreadable/corrupt: back it up and replace it with the seed.
             }
         }
         byte[] out;
         if (localTree == null || serversList(localTree) == null) {
+            if (localBytes != null) {
+                // Back up an unreadable/unparseable servers.dat before replacing it (e.g. a gzipped file fails
+                // uncompressed NBT parsing, and this is the player's whole server list).
+                Files.write(local.resolveSibling(local.getFileName() + ".bak-unreadable"), localBytes);
+            }
             out = seedBytes;
         } else {
             Nbt.ListVal servers = serversList(localTree);
-            var ours = findEntry(localTree, seedName);
+            var ours = priorName != null && !priorName.isEmpty() ? findEntry(localTree, priorName) : null;
+            if (ours == null) {
+                ours = findEntry(localTree, seedName);
+            }
             if (ours != null) {
-                if (ours.get("ip") instanceof Nbt.Val ip && seedIp.equals(ip.v())) {
+                String curName = ours.get("name") instanceof Nbt.Val nm && nm.v() instanceof String s ? s : "";
+                String curIp = ours.get("ip") instanceof Nbt.Val ip && ip.v() instanceof String s ? s : "";
+                if (curName.equals(seedName) && curIp.equals(seedIp)) {
                     return seedName; // Already up to date; skip rewriting to preserve mtime.
                 }
-                ours.put("ip", new Nbt.Val(0x08, seedIp));
+                ours.putAll(seedEntry); // Overwrite all seed fields (name, ip, etc.) while keeping any extra user fields.
             } else {
                 if (servers.elemType() != 0x0A) {
                     // vanilla writes elemType 0 (TAG_End) for an EMPTY list; inserting into that
@@ -156,6 +179,11 @@ public final class ServersDat {
     }
 
     private static void skip(DataInputStream in, int n) throws IOException {
+        // n is derived from an untrusted readInt (sometimes *4 / *8, which can overflow negative):
+        // bound it before allocating so a hostile servers.dat can't OOM the boot via firstIp
+        if (n < 0 || n > 33_554_432) {
+            throw new IOException("servers.dat skip length out of range: " + n);
+        }
         in.readFully(new byte[n]);
     }
 
