@@ -45,17 +45,9 @@ public final class UpdatingNotice {
 
     // Notice text
 
-    /**
-     * The pack host's wording. Player facing, so the exclamation mark and the plain speech stay.
-     * The no-target sentence does NOT claim an update, and that is the same honesty rule target() answers
-     * to, one step further along. ServerDoor opens this window before the config even loads, so it runs on
-     * every ordinary boot of a converged box and on every cycle of a crash loop behind the wrapper's 10s
-     * backoff. Saying "updating" there tells a player's server list an update is happening every single time
-     * the box restarts, which is how a notice trains people to ignore it. Starting up is what is actually
-     * true whenever nothing on disk names a target, and "Back in a minute" is true either way.
-     */
+    // Status headline for updating vs starting up without a known target tag.
     public static String headline(String target) {
-        return target.isEmpty() ? "The server is starting up!" : "Updating the server to " + target + "!";
+        return target.isEmpty() ? "Starting server..." : "Updating the server to " + target + "!";
     }
 
     /** Two lines, because that is what the server list draws. */

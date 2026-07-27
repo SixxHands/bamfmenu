@@ -29,8 +29,8 @@ class UpdatingNoticeTest {
      */
     @Test
     void doesNotClaimAnUpdateWhenNothingOnDiskNamesOne() {
-        assertEquals("The server is starting up!", UpdatingNotice.headline(""));
-        assertEquals("The server is starting up!\nBack in a minute", UpdatingNotice.motd(""));
+        assertEquals("Starting server...", UpdatingNotice.headline(""));
+        assertEquals("Starting server...\nBack in a minute", UpdatingNotice.motd(""));
 
         Map<?, ?> root = (Map<?, ?>) MiniJson.parse(UpdatingNotice.statusJson("", null));
         String drawn = String.valueOf(((Map<?, ?>) root.get("description")).get("text"));
