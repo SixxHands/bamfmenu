@@ -9,6 +9,8 @@ import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
+import com.retro.bamfos.updater.engine.ping.Nbt;
+import com.retro.bamfos.updater.engine.ping.ServersDat;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -58,6 +60,10 @@ public final class UpdaterOps {
             out.put("version", Doors.localVersion(dir).orElse(ledger.installedVersion));
             out.put("pinned", cfg.tagPin());
             out.put("token_dead", Doors.tokenDead(dir));
+            // Server address pinged for version broadcasts so the BIOS can display it; empty is normal
+            // (falls back to servers.dat).
+            out.put("server_host", cfg.serverHost());
+            out.put("server_port", cfg.serverPort());
             long disabled = ledger.files.values().stream().filter(e -> e.disabled && !e.quarantined).count();
             long quarantined = ledger.files.values().stream().filter(e -> e.quarantined).count();
             out.put("disabled_count", disabled);
@@ -134,6 +140,52 @@ public final class UpdaterOps {
             return 0;
         } catch (IOException e) {
             return 2;
+        }
+    }
+
+    // Updates both server_host in bamfos-updater.properties and Minecraft's servers.dat together so syncing and joining stay in sync.
+    public int setServer(String host, int port) {
+        String h = host == null ? "" : host.trim();
+        if (h.isEmpty() || h.contains(" ") || port < 1 || port > 65535) {
+            return 2;
+        }
+        try {
+            UpdaterConfig before = UpdaterConfig.load(dir);
+            if (h.equals(before.serverHost()) && port == before.serverPort()) {
+                return 1; // Don't report "saved" if the file didn't actually change.
+            }
+            writeKeys(Map.of("server_host", h, "server_port", Integer.toString(port)));
+            return mergeServerList(h, port) ? 0 : 3;
+        } catch (IOException | RuntimeException e) {
+            return 2;
+        }
+    }
+
+    /**
+     * Updates our entry in servers.dat via the normal seed merge, preserving the player's other servers.
+     * Carries the existing entry name over unchanged so we don't overwrite a player's custom label.
+     */
+    private boolean mergeServerList(String host, int port) {
+        try {
+            Path serversDat = dir.resolve("servers.dat");
+            String priorName = Ledger.load(dir).files.values().stream()
+                    .map(e -> e.mergeName)
+                    .filter(n -> n != null && !n.isBlank())
+                    .findFirst()
+                    .orElse("BAMFOS");
+            String ip = port == 25565 ? host : host + ":" + port; // Omit default port 25565 so the saved server entry matches what the player typed.
+            LinkedHashMap<String, Nbt.Val> entry = new LinkedHashMap<>();
+            entry.put("name", new Nbt.Val(8, priorName));
+            entry.put("ip", new Nbt.Val(8, ip));
+            LinkedHashMap<String, Nbt.Val> root = new LinkedHashMap<>();
+            root.put("servers", new Nbt.Val(9, new Nbt.ListVal(10, List.of(new Nbt.Val(10, entry)))));
+            byte[] seed = Nbt.write(new Nbt.Root("", root));
+            ServersDat.mergeFirstEntry(serversDat, seed, priorName);
+            return true;
+        } catch (IOException | RuntimeException theirListIsTheirs) {
+            // Never replace a servers.dat we couldn't read or write; return 3 so the UI knows only the config
+            // side succeeded.
+            return false;
         }
     }
 
@@ -371,30 +423,38 @@ public final class UpdaterOps {
      * log saying why. latin-1 maps every byte, so this round-trips their bytes untouched either way.
      */
     void writePin(String tag) throws IOException {
+        writeKeys(Map.of("tag", tag));
+    }
+
+    /**
+     * Rewrites only the named keys in a single atomic pass (so a crash can't split host and port).
+     * Empty values delete the key since UpdaterConfig treats absent and empty identically.
+     */
+    private void writeKeys(Map<String, String> pairs) throws IOException {
         Path p = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
         List<String> lines = new ArrayList<>();
         if (Files.isRegularFile(p)) {
             for (String line : Files.readAllLines(p, StandardCharsets.ISO_8859_1)) {
-                if (!isTagLine(line)) {
+                if (pairs.keySet().stream().noneMatch(k -> isKeyLine(line, k))) {
                     lines.add(line);
                 }
             }
         }
-        if (!tag.isEmpty()) {
-            lines.add("tag=" + tag);
-        }
+        // Sort keys so rewrites stay deterministic and produce clean diffs.
+        pairs.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e -> {
+            if (!e.getValue().isEmpty()) {
+                lines.add(e.getKey() + "=" + e.getValue());
+            }
+        });
         Files.createDirectories(p.getParent());
         Path tmp = p.resolveSibling(p.getFileName() + ".tmp");
         Files.write(tmp, lines, StandardCharsets.ISO_8859_1);
         Files.move(tmp, p, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    /* True when the READER would take this line as the tag= pin. UpdaterConfig hands the file to
-       java.util.Properties, which accepts "tag = v1", "tag:v1" and "tag v1" as the same key, so matching
-       the literal "tag=" here instead leaves a hand-spaced pin in the file: unpin() sees a pin, rewrites
-       nothing, answers 0, and the page says "Release lock cleared" over a box that is still pinned with
-       the row underneath it still reading Locked to v0.2.4. One key, parsed the one way. */
-    private static boolean isTagLine(String line) {
+    /* Matches any key separator java.util.Properties accepts ('=', ':', whitespace) so writes always
+       find the same line UpdaterConfig reads. */
+    private static boolean isKeyLine(String line, String key) {
         String s = line.trim();
         if (s.startsWith("#") || s.startsWith("!")) {
             return false; // Preserve comment lines as-is; Properties ignores them.
@@ -403,6 +463,6 @@ public final class UpdaterOps {
         while (end < s.length() && "=: \t\f".indexOf(s.charAt(end)) < 0) {
             end++;
         }
-        return "tag".contentEquals(s.subSequence(0, end));
+        return key.contentEquals(s.subSequence(0, end));
     }
 }

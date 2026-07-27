@@ -49,4 +49,9 @@ public final class EngineOps implements RepairOps {
     public boolean setDisabled(String path, boolean disabled) {
         return OpsBridge.flag("setDisabled", path, disabled);
     }
+
+    @Override
+    public int setServer(String host, int port) {
+        return OpsBridge.code("setServer", host, port);
+    }
 }

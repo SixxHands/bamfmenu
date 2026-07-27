@@ -29,6 +29,10 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class RepairScreen implements Screen, RepairContext {
 
     private final Queue<Integer> input;
+    /* Typed characters, a SEPARATE queue from the keys on purpose: one queue carrying both would
+       have to encode which kind each entry is, and the first bug in that scheme types a letter
+       every time somebody presses an arrow. */
+    private final Queue<Integer> typed;
     /* SETUP's option count, so this box reserves the SAME vertical budget its menu does and crossing
        between the two screens cannot resize the text or move the divider. */
     private final int reservedRows;
@@ -43,7 +47,8 @@ public final class RepairScreen implements Screen, RepairContext {
     private RepairSession session;
     private BiosContext host;        // the provider's single context instance, for leaving + the header
 
-    public RepairScreen(Queue<Integer> input, int reservedRows) {
+    public RepairScreen(Queue<Integer> input, Queue<Integer> typed, int reservedRows) {
+        this.typed = typed;
         this.input = input;
         this.reservedRows = reservedRows;
     }
@@ -77,6 +82,12 @@ public final class RepairScreen implements Screen, RepairContext {
             return;
         }
         drainWorker(s, ctx);
+        // characters first: a codepoint and the ENTER that commits it can land in the same frame, and
+        // draining keys first would run the commit against a field missing its last character
+        Integer ch;
+        while ((ch = typed.poll()) != null) {
+            s.type(ch);
+        }
         Integer key;
         while ((key = input.poll()) != null) {
             s.key(RepairKeys.of(key), this);

@@ -9,6 +9,7 @@ import com.retro.bamfmenu.early.core.repair.api.RepairPage;
 import com.retro.bamfmenu.early.core.repair.api.RepairResult;
 import com.retro.bamfmenu.early.core.repair.api.UpdaterState;
 import com.retro.bamfmenu.early.core.repair.input.RepairIntent;
+import com.retro.bamfmenu.early.core.repair.input.TextEntry;
 import com.retro.bamfmenu.early.core.repair.registry.RepairRegistry;
 import com.retro.bamfmenu.early.core.repair.view.RepairBox;
 import com.retro.bamfmenu.early.core.repair.view.RepairFrame;
@@ -24,6 +25,7 @@ public final class RepairSession {
 
     private static final String HINTS_LIST = "UP/DOWN  Select      ENTER  Choose      ESC  Back      F2  Volume";
     private static final String HINTS_PROMPT = "ENTER  Yes      ESC  No";
+    private static final String HINTS_EDIT = "TYPE  Edit      LEFT/RIGHT  Move      ENTER  Save      ESC  Cancel";
     /* Names the two keys that really are locked, because the arrows still move on purpose (a frozen-looking
        window reads as a hung one) and the provider takes F2 before this screen sees it, so a bar claiming
        every key is locked is contradicted by the next thing a player presses. 's rule with the
@@ -42,6 +44,8 @@ public final class RepairSession {
     private int panelWidth = 60;
 
     private RepairEffect.Act pending; // the are-you-sure box, null when none is up
+    private TextEntry editing;              // the open field, null when nothing is being typed
+    private RepairEffect.Edit editingEffect; // action to run when ENTER submits the active text field
     private String working = "";      // non-empty while the worker keeps an action
     private RepairResult last;        // the notice line, null until something has happened
 
@@ -80,9 +84,16 @@ public final class RepairSession {
         last = result;
     }
 
+    /** Routes a typed codepoint to the open text field; separate from key() so printable chars never hit menu intents. */
+    public void type(int codepoint) {
+        if (!busy() && editing != null) {
+            editing.type(codepoint);
+        }
+    }
+
     /**
-     * One key, already turned into an intent. The gate ladder is the whole safety story: busy refuses
-     * first, then a prompt owns the keys, then a page, then the list.
+     * Handles a mapped key intent in priority order:
+     * busy lockout first, then open field, confirm prompt, sub-page, and finally the main list.
      */
     public void key(RepairIntent intent, RepairContext ctx) {
         if (busy()) {
@@ -92,6 +103,32 @@ public final class RepairSession {
                 last = RepairResult.locked();
             } else {
                 moveSelection(intent);
+            }
+            return;
+        }
+        if (editing != null) {
+            switch (intent) {
+                case ACTIVATE -> {
+                    // Re-check the gate on submit in case a sync started while the user was typing.
+                    String typed = editing.value().trim();
+                    RepairEffect.Edit edit = editingEffect;
+                    if (typed.isEmpty()) {
+                        return; // Ignore ENTER on an empty text field.
+                    }
+                    editing = null;
+                    editingEffect = null;
+                    start(new RepairEffect.Act(edit.working(), "", ops -> edit.action().run(ops, typed)), ctx);
+                }
+                case BACK -> {
+                    editing = null;
+                    editingEffect = null;
+                    last = new RepairResult(RepairResult.Kind.REFUSED, "Cancelled.");
+                }
+                case LEFT -> editing.left();
+                case RIGHT -> editing.right();
+                case ERASE -> editing.erase();
+                default -> {
+                }
             }
             return;
         }
@@ -196,6 +233,18 @@ public final class RepairSession {
                 }
             }
             case RepairEffect.Act a -> offer(a, ctx);
+            case RepairEffect.Edit e -> {
+                // Check the gate before opening the text field as well as on ENTER so players don't
+                // type an address only to have it rejected afterward.
+                String locked = RepairGate.FILE_SAFE.whyNot(state);
+                if (!locked.isEmpty()) {
+                    last = new RepairResult(RepairResult.Kind.REFUSED, locked);
+                    return;
+                }
+                editing = new TextEntry(e.initial().apply(state), TextEntry.MAX);
+                editingEffect = e;
+                last = null;
+            }
         }
     }
 
@@ -228,6 +277,9 @@ public final class RepairSession {
         if (busy()) {
             return HINTS_BUSY;
         }
+        if (editing != null) {
+            return HINTS_EDIT;
+        }
         if (pending != null) {
             return HINTS_PROMPT;
         }
@@ -241,7 +293,7 @@ public final class RepairSession {
     public RepairFrame frame(int maxChars, int interiorRows, int tick) {
         panelWidth = RepairBox.rightInner(maxChars);
         RepairFrames.View view = new RepairFrames.View(items, sel, state, page, pageSel, pageTop,
-                working, last, hints(), prompt());
+                working, last, hints(), prompt(), editTitle(), editField());
         RepairFrames.Built built = RepairFrames.build(view, maxChars, interiorRows, tick);
         pageSel = built.pageSel();
         pageTop = built.pageTop();
@@ -263,6 +315,27 @@ public final class RepairSession {
     /** The are-you-sure question currently up, "" when none is. */
     public String prompt() {
         return pending == null ? "" : pending.confirm();
+    }
+
+    /** Heading for the open text field, or "" when no field is active. */
+    public String editTitle() {
+        return editingEffect == null ? "" : editingEffect.title();
+    }
+
+    /** True while a text entry field is open. */
+    public boolean editingField() {
+        return editing != null;
+    }
+
+    /** Current text field value without the caret character. */
+    public String editValue() {
+        return editing == null ? "" : editing.value();
+    }
+
+    /* Renders the text field with its caret, sized to the panel width minus modal border and padding
+       so the caret never clips under the frame on narrow windows. */
+    private String editField() {
+        return editing == null ? "" : editing.visible(Math.max(12, panelWidth - 8));
     }
 
     /** Most recent status line shown in the window, or "" if none. */

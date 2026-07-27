@@ -26,4 +26,8 @@ public interface RepairOps {
 
     /** Toggles the .disabled suffix on an optional mod through the engine so the ledger stays in sync. */
     boolean setDisabled(String path, boolean disabled);
+
+    /** Updates the server address for both the updater and the player's server list.
+     *  Returns 0 if both updated, 1 if already set, 2 if refused/failed, or 3 if only the updater updated. */
+    int setServer(String host, int port);
 }

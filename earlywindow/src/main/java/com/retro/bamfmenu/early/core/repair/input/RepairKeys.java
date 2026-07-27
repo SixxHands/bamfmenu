@@ -9,17 +9,26 @@ public final class RepairKeys {
     private static final int KEY_KP_ENTER = 335;
     private static final int KEY_UP = 265;
     private static final int KEY_DOWN = 264;
+    private static final int KEY_LEFT = 263;
+    private static final int KEY_RIGHT = 262;
+    private static final int KEY_BACKSPACE = 259;
 
     private RepairKeys() {
     }
 
-    /** What this key means here, NONE for everything the window does not use. */
+    /**
+     * Translates a key code to a UI intent, or NONE if unused.
+     * LEFT/RIGHT/ERASE map unconditionally here; RepairSession decides whether a text field is open.
+     */
     public static RepairIntent of(int key) {
         return switch (key) {
             case KEY_UP -> RepairIntent.UP;
             case KEY_DOWN -> RepairIntent.DOWN;
             case KEY_ENTER, KEY_KP_ENTER -> RepairIntent.ACTIVATE;
             case KEY_ESCAPE -> RepairIntent.BACK;
+            case KEY_LEFT -> RepairIntent.LEFT;
+            case KEY_RIGHT -> RepairIntent.RIGHT;
+            case KEY_BACKSPACE -> RepairIntent.ERASE;
             default -> RepairIntent.NONE;
         };
     }

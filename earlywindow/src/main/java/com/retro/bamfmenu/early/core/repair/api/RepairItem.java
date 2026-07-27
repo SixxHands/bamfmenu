@@ -1,5 +1,7 @@
 package com.retro.bamfmenu.early.core.repair.api;
 
+import java.util.function.Function;
+
 /**
  * Immutable row definition for the UPDATE AND REPAIR menu, discovered from a RepairDef folder.
  * `gate` and `status` read the live snapshot so rows reflect the real install state.
@@ -18,6 +20,17 @@ public record RepairItem(String id, String label, String help, RepairGate gate,
     public static RepairItem page(String id, String label, String help, RepairGate gate,
                                   RepairStatus status, RepairPage page) {
         return new RepairItem(id, label, help, gate, status, new RepairEffect.Page(page));
+    }
+
+    /**
+     * Builds a row that prompts for typed input and runs an action on it.
+     * `initial` reads the snapshot instead of capturing a string at boot, since this row changes that value.
+     */
+    public static RepairItem edit(String id, String label, String help, RepairGate gate,
+                                  RepairStatus status, String title,
+                                  Function<UpdaterState, String> initial, RepairEffect.EditAction action) {
+        return new RepairItem(id, label, help, gate, status,
+                new RepairEffect.Edit(title, label, initial, action));
     }
 
     /** Why this row cannot run against this snapshot, "" when it can. */

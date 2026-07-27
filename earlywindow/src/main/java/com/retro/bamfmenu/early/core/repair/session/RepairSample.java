@@ -21,7 +21,7 @@ public final class RepairSample {
     public static final String[] SCENARIOS = {
             "reading", "idle", "pinned", "syncing", "working", "confirm",
             "status", "optional", "optional-missing", "notes", "rollback", "rollback-offline",
-            "rollback-first", "hostile", "hostile-notes"};
+            "rollback-first", "hostile", "hostile-notes", "editing", "editing-long"};
 
     /* A fixed clock so two renders of the same scenario are byte-identical. */
     private static final long NOW = 1_780_000_000_000L;
@@ -52,7 +52,7 @@ public final class RepairSample {
                 "ok", NOW - 14 * 60_000L, NOW, "syncing".equals(scenario), 1, 1, false,
                 "Nether rework lands: ash dunes, quartz shelves, and the new seam block.\n"
                         + "Fixes a crash when a contraption crossed a portal mid-assembly.",
-                List.copyOf(mods), null);
+                List.copyOf(mods), null, "198.51.100.10", 25565);
         return switch (scenario) {
             case "rollback" -> base.withReleases(releases(ReleaseList.LIVE, 5));
             case "rollback-offline" -> base.withReleases(releases(ReleaseList.OFFLINE, 1));
@@ -77,7 +77,9 @@ public final class RepairSample {
                 "See https://github.com/example/bamfos-pack/blob/main/docs/a-very-long-unbroken-link-that-"
                         + "wrap-cannot-split-because-there-is-not-one-single-space-anywhere-inside-it-at-all"
                         + "-and-it-keeps-going for the full notes.",
-                List.copyOf(mods), null);
+                List.copyOf(mods), null,
+                // the overflow scenario's job is to be too long for its cell, addresses included
+                "a-very-long-host-name-that-no-narrow-panel-can-hold.example.invalid", 25599);
     }
 
     /** Builds a sample session by driving the real key handler so the state is always reachable. */
@@ -98,6 +100,21 @@ public final class RepairSample {
                 select(s, quiet, "verify");
                 s.key(RepairIntent.ACTIVATE, quiet); // the prompt
                 s.key(RepairIntent.ACTIVATE, quiet); // yes, and the worker takes it
+            }
+            case "editing" -> {
+                // Open text field on a partial address; taller than confirm dialogs (6 lines vs 3),
+                // so this checks clearance above the control bar.
+                select(s, quiet, "server");
+                s.key(RepairIntent.ACTIVATE, quiet);
+                s.key(RepairIntent.ERASE, quiet); // Delete a digit so the caret isn't at the end of the line.
+                "9".codePoints().forEach(s::type);
+            }
+            case "editing-long" -> {
+                // address wider than any panel to verify horizontal scrolling instead of overflowing the modal
+                select(s, quiet, "server");
+                s.key(RepairIntent.ACTIVATE, quiet);
+                "a-really-long-replacement-host-name.someones-vps-provider.example:25599"
+                        .codePoints().forEach(s::type);
             }
             default -> {
             }

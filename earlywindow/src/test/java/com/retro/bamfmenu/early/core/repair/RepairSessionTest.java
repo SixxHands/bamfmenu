@@ -42,7 +42,8 @@ class RepairSessionTest {
         for (RepairItem item : items) {
             ids.add(item.id());
         }
-        assertEquals(List.of("status", "verify", "sync", "optional", "notes", "rollback", "clearlock"), ids);
+        assertEquals(List.of("status", "verify", "sync", "optional", "notes", "rollback", "server",
+                        "clearlock"), ids);
     }
 
     @Test
@@ -218,7 +219,8 @@ class RepairSessionTest {
     private static UpdaterState withNoOptionalMods() {
         UpdaterState base = RepairSample.state("idle");
         return new UpdaterState(true, base.installed(), base.pinned(), false, base.lastSyncResult(),
-                base.lastSyncAt(), base.nowMillis(), false, 0, 0, false, base.notes(), List.of(), null);
+                base.lastSyncAt(), base.nowMillis(), false, 0, 0, false, base.notes(), List.of(), null,
+                base.serverHost(), base.serverPort());
     }
 
     private static void select(RepairSession s, String id) {
@@ -285,6 +287,9 @@ class RepairSessionTest {
         int repairCode;
         int syncCode;
         int unpinCode;
+        int setServerCode;
+        String serverHost;
+        int serverPort;
         boolean toggleOk = true;
         int repairs;
         int syncs;
@@ -330,6 +335,13 @@ class RepairSessionTest {
             toggledPath = path;
             toggledTo = disabled;
             return toggleOk;
+        }
+
+        @Override
+        public int setServer(String host, int port) {
+            serverHost = host;
+            serverPort = port;
+            return setServerCode;
         }
     }
 }

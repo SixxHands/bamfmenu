@@ -24,7 +24,7 @@ public final class RepairFrames {
     /** Snapshot of inputs needed to build a frame without reaching back into session state. */
     public record View(List<RepairItem> items, int sel, UpdaterState state, RepairPage page,
                        int pageSel, int pageTop, String working, RepairResult last,
-                       String hints, String confirm) {
+                       String hints, String confirm, String editTitle, String editField) {
 
         /** True while a worker action is running, switching the notice slot to a spinner. */
         public boolean busy() {
@@ -82,7 +82,7 @@ public final class RepairFrames {
                     : RepairFrame.Row.of(left, leftTone, rightText[r], rightTone[r]));
         }
         RepairFrame frame = new RepairFrame(TITLE, RepairBox.top(maxChars), out, RepairBox.bottom(maxChars),
-                v.hints(), promptLines(v.confirm()));
+                v.hints(), modalLines(v.confirm(), v.editTitle(), v.editField()));
         return new Built(frame, pageSel, pageTop);
     }
 
@@ -238,7 +238,12 @@ public final class RepairFrames {
         return SPINNER[Math.abs(tick / 3) % SPINNER.length];
     }
 
-    private static List<String> promptLines(String confirm) {
+    /* Confirm dialogs and text input share one modal channel so `prompting()` covers both.
+       Text input draws between `> <` with a `_` caret rather than nesting a second border. */
+    private static List<String> modalLines(String confirm, String editTitle, String editField) {
+        if (!editTitle.isEmpty()) {
+            return List.of("", editTitle, "", "> " + editField, "", "[ENTER] Save      [ESC] Cancel");
+        }
         return confirm.isEmpty() ? List.of() : List.of("", confirm, "[ENTER] Yes      [ESC] No");
     }
 }

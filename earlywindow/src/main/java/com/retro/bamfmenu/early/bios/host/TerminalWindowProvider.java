@@ -437,7 +437,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        with SETUP_OPTIONS.length so its box reserves the SAME vertical budget this menu does, and
        crossing between the two screens cannot resize the text. */
     private final java.util.Queue<Integer> repairInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
-    private final RepairScreen repairScreen = new RepairScreen(repairInput, SETUP_OPTIONS.length);
+    /* Typed characters for the repair window's fields. Same main-thread-enqueues/render-thread-drains rule
+       every other input in here follows, and its own queue so a character is never mistaken for a key. */
+    private final java.util.Queue<Integer> repairTyped = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final RepairScreen repairScreen = new RepairScreen(repairInput, repairTyped, SETUP_OPTIONS.length);
     private volatile boolean repairStartRequested;
 
     /* Our own pre-Minecraft OpenAL audio (the rhythm/Tetris music + the volume menu); torn down at hand-off
@@ -1528,10 +1531,14 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     /* Text input for the password dialog (main thread, during glfwPollEvents). Only collects printable
        ASCII while a password prompt is up; Enter / Backspace / Esc are handled in onKey. */
     private void onChar(long w, int codepoint) {
-        if (handedOff || passwordFor < 0) {
+        if (handedOff) {
+            return; // the callback is freed at hand-off anyway, this is the belt to that pair of braces
+        }
+        if (state == Mode.REPAIR) {
+            repairTyped.offer(codepoint); // the session decides whether a field is open to receive it
             return;
         }
-        if (codepoint >= 32 && codepoint < 127 && passwordInput.length() < 32) {
+        if (passwordFor >= 0 && codepoint >= 32 && codepoint < 127 && passwordInput.length() < 32) {
             passwordInput = passwordInput + (char) codepoint;
         }
     }
