@@ -172,6 +172,43 @@ class ServerDoorTest {
                 ((Map<?, ?>) MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8))).get("summary"));
     }
 
+    /** Fetching a missing file while already on the target tag is a repair, not a new release, so
+     * server-sync.log must not print "new release discovered" or "vT -> vT". */
+    @Test
+    void sameVersionRepair_announcesARepair_neverANewRelease() throws IOException {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false)); // Converge first so the install is actually on vT.
+
+        Path log = dir.resolve(".bamfos-updater").resolve("server-sync.log");
+        Files.writeString(log, ""); // Check only lines from this run since the initial sync above logged "new release".
+        Files.delete(dir.resolve("mods/m1.jar")); // the row a player's antivirus takes
+        assertEquals(0, door.run(dir, "vT", false));
+
+        String logText = Files.readString(log, StandardCharsets.UTF_8);
+        assertTrue(logText.contains("repairing 1 file(s) on vT"), logText);
+        assertFalse(logText.contains("new release"), String.valueOf(logText));
+        assertFalse(logText.contains("vT -> vT"), String.valueOf(logText));
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+    }
+
+    /** Pins must prevent staging self-entries (shim and engine .new) too, since run-server.bat moves
+     * staged files unconditionally before the engine runs. */
+    @Test
+    void pinnedSelfEntries_areNeverStaged() throws IOException {
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties"),
+                "repo=o/r\ngithub_token=tok\npin=" + ServerDoor.SHIM_PATH + "," + ServerDoor.ENGINE_PATH + "\n");
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertFalse(Files.exists(dir.resolve(ServerDoor.SHIM_PATH + ".new")));
+        assertFalse(Files.exists(dir.resolve(ServerDoor.ENGINE_PATH + ".new")));
+        // Pinning the updater jars still lets ordinary pack rows update.
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+    }
+
     @Test
     void offline_exitsZeroAndTouchesNothing() {
         ServerDoor door = new ServerDoor("http://127.0.0.1:1"); // closed port

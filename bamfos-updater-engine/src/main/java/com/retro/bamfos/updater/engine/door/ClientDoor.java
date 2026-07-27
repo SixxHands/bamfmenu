@@ -1,6 +1,5 @@
 package com.retro.bamfos.updater.engine.door;
 
-import com.retro.bamfos.updater.engine.EngineEntry;
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
@@ -32,13 +31,21 @@ public final class ClientDoor {
         String versionBefore = localVersion(dir).orElse("");
         int code = 0;
         String end = "skip";
+        // Tracks whether sync actually finished checking the pack (vs bailing out early). Kept separate from
+        // `end` for the kick-history check in the finally block.
+        boolean reachedVerdict = false;
+        // Default indicator is idle (no GitHub request made). Converged installs exit here normally,
+        // so idle must not look like an error.
+        String channel = "idle";
+        boolean pinned = false;
         try {
             bus.line("com.bamf.updater: kmod start");
             bus.line("com.bamf.updater: module initialized");
             UpdaterConfig cfg = UpdaterConfig.load(dir);
-            // before the lock and before any network: the hardware rows report what a sync WOULD use, so
-            // they have to fill on the boots that never reach one, which is nearly every boot
-            bus.ident(cfg.repo(), EngineEntry.version(), cfg.tagPin());
+            // before the lock and before any network: the channel row has to fill on the boots that never
+            // reach a sync, which is nearly every boot. The NAME only, because nothing here knows yet what github
+            // did, and a trailing OK sent from this point would just mean "the door started"
+            bus.ident(cfg.repo());
             Optional<InstanceLock> lock = InstanceLock.acquire(dir);
             if (lock.isEmpty()) {
                 bus.line("updater: instance lock held, sync skipped");
@@ -53,13 +60,15 @@ public final class ClientDoor {
                 String tag;
                 if (!cfg.tagPin().isEmpty()) {
                     tag = cfg.tagPin(); // pinned version intentionally ignores the server broadcast
-                    // the same noun the hardware block's Release Lock row shows, so the log line and the row
-                    // read as one fact instead of two
+                    pinned = true; // Show the pinned tag here using the same label as the BIOS status page; the POST row only says
+                    // PINNED, so removing this line would hide which tag is pinned.
                     bus.line("updater: release lock active, pinned to " + tag);
                 } else {
                     Optional<String> broadcast = Doors.broadcast(dir, cfg);
                     if (broadcast.isEmpty()) {
                         bus.line("updater: no carrier, sync skipped");
+                        // Match the row wording to the log line above so they read consistently.
+                        channel = "no-carrier";
                         return EngineHealth.proven(dir, 0); // treat no-carrier as offline so it clears probation
                     }
                     // fresh read, NOT versionBefore: step 0 may have just replayed a staged sync
@@ -77,6 +86,9 @@ public final class ClientDoor {
                         boolean agrees = SyncCore.ledgerAgrees(dir, local);
                         if (missing.isEmpty() && cached && agrees) {
                             bus.line("updater: packages current (" + local + "), nothing to do");
+                            // three checks agreed that this box is already as converged as a boot can make it,
+                            // which is a VERDICT and not a skip. The finally is where that distinction pays off
+                            reachedVerdict = true;
                             return EngineHealth.proven(dir, 0);
                         }
                         if (missing.isPresent()) {
@@ -105,6 +117,8 @@ public final class ClientDoor {
                 code = SyncCore.sync(dir, cfg, tag, versionBefore, false, false,
                         Reconciler.Side.CLIENT, apiBase, bus, true);
                 end = "ok";
+                reachedVerdict = true;
+                channel = "ok"; // github responded, so mark the channel check ok
                 return code;
             }
         } catch (HttpFetcher.RateLimited limited) {
@@ -120,12 +134,14 @@ public final class ClientDoor {
             // under the honest line, so the player reads two rows that contradict each other. Quoted exactly,
             // because a reader who greps this string has to land on the line that prints it
             end = "limited";
+            channel = "ok"; // rate limit still means github responded and the channel is reachable
             return 0;
         } catch (HttpFetcher.TokenDead dead) {
             SyncCore.tokenDead(dir, dead);
             bus.line("AuthEvent: GITHUB token FAILED (" + dead.code + "), updates disabled");
             EngineHealth.proven(dir); // A revoked credential is a token problem, not a broken engine.
             end = "fail";
+            channel = "fail"; // Request was refused, so mark the channel row failed.
             return 0;
         } catch (GithubReleases.ReleaseMissing gone) {
             bus.line(abortLine(gone)); // Record token-dead in last-sync.json (not just stdout) so the BIOS UPDATE AND REPAIR row
@@ -137,26 +153,43 @@ public final class ClientDoor {
             EngineHealth.proven(dir); // github answered 404 so the engine itself is healthy (see EngineHealth); record a distinct state
             // here since the network and token worked, the requested release just doesn't exist
             end = "no-release";
+            // count 404 as a completed check (see finally) since restarting won't make a missing release appear
+            reachedVerdict = true;
+            // still mark the channel row failed because the target release doesn't exist
+            channel = "fail";
             return 0;
         } catch (Exception e) {
+            boolean offline = SyncCore.networkFault(e);
             String why = abortLine(e);
             bus.line(why); // the terminal deserves the why-line too
             System.out.println("[updater] sync skipped: " + e); // Always let the game boot, and record offline/failed in last-sync.json so UPDATE AND REPAIR
             // doesn't keep showing a stale "ok" across days of failed boots.
-            SyncCore.recordFailure(dir, SyncCore.networkFault(e) ? "offline" : "failed", why + " (" + e + ")");
+            SyncCore.recordFailure(dir, offline ? "offline" : "failed", why + " (" + e + ")");
             if (EngineHealth.attributable(e)) {
                 EngineHealth.proven(dir);
             }
-            end = "fail";
+            // a dead carrier gets its OWN end state, same rule the throttle and the missing release already
+            // answer to: the specific why-line above ("repository unreachable, boot continues") already told
+            // the player what happened, and `fail` makes UpdaterFeed stack "sync aborted, boot continues"
+            // underneath it, which is two rows about one router reboot with the vaguer one last
+            end = offline ? "offline" : "fail";
+            // A sync was attempted and failed here, so never leave the row on idle or ok (e.g., on a
+            // duplicate-modid abort) where it would contradict the failure in the POST block.
+            channel = offline ? "no-carrier" : "fail";
             return 0;
         } finally {
+            // One verdict per boot, from here for the same reason end() is here: every exit runs through it, so
+            // no path can leave the row testing forever. The pin only takes the row when nothing louder claimed
+            // it, because a refusal or a dead carrier is what he has to act on, and a pinned boot printed
+            // "release lock active, pinned to <tag>" in the log either way. BEFORE end(), so END stays the last
+            // line on the bus.
+            bus.channel(pinned && "ok".equals(channel) ? "pinned" : channel);
             bus.end(end);
-            // A boot where the sync never got its shot (no carrier, instance locked, token dead) could
-            // not have converged ANYTHING, and writing "this cycle changed nothing" there is exactly
-            // what flips the next identical kick to the terminal screen. A quarantine still counts, because
-            // that landed on disk before the sync was reached.
-            String outcome = end;
-            kick.filter(k -> "ok".equals(outcome) || !k.quarantined().isEmpty())
+            // Record kick history when a quarantine ran or sync finished checking (including "packages
+            // current"), so unfixable kicks don't loop restarts forever. Skip it when sync never got a
+            // chance (offline, locked, throttled, token-dead) so a retryable boot isn't marked unchanged.
+            boolean verdict = reachedVerdict;
+            kick.filter(k -> verdict || !k.quarantined().isEmpty())
                     .ifPresent(k -> recordCycle(dir, k, versionBefore));
         }
     }

@@ -20,6 +20,29 @@ public final class Doors {
         return ClientDoor.localVersion(dir);
     }
 
+    /** Returns the version actually converged on disk. Prefers the ledger's installed_version over
+     *  bcc-common.toml when they disagree, since bcc can update during a partial apply while other jars
+     *  stay stale. An empty installed_version falls back to bcc (unmanaged existing server). */
+    public static Optional<String> settledVersion(Path dir) {
+        Optional<String> local = localVersion(dir);
+        if (local.isEmpty()) {
+            return local;
+        }
+        String installed = installedVersion(dir);
+        return installed.isEmpty() || installed.equals(local.get()) ? local : Optional.of(installed);
+    }
+
+    /** Returns "" if the ledger is missing or unreadable so settledVersion treats it as never managed
+     *  instead of triggering a restart loop. */
+    private static String installedVersion(Path dir) {
+        try {
+            return com.retro.bamfos.updater.engine.ledger.Ledger
+                    .load(com.retro.bamfos.updater.engine.ledger.Ledger.pathIn(dir)).installedVersion;
+        } catch (Exception unreadable) {
+            return "";
+        }
+    }
+
     /** Gets the server BCC broadcast from the configured host, falling back to the first entry in servers.dat. */
     public static Optional<String> broadcast(Path dir, UpdaterConfig cfg) {
         String host = cfg.serverHost();

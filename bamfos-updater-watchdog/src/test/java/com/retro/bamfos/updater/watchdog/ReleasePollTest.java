@@ -131,6 +131,31 @@ class ReleasePollTest {
         assertFalse(poll.noRelease);
     }
 
+    /**
+     * Verifies per-cycle flags clear even when the next poll throws a network error (fixture stopped),
+     * so an outage does not stay stuck reporting an earlier 403 rate limit.
+     */
+    @Test
+    void aPollThatDiedOnTheWire_reportsThisCycle_notTheLastThrottleItSaw() throws IOException {
+        HttpServer flaky = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String host = "http://127.0.0.1:" + flaky.getAddress().getPort();
+        flaky.createContext("/repos/o/r/releases/latest", ex -> {
+            ex.sendResponseHeaders(429, -1);
+            ex.close();
+        });
+        flaky.start();
+        ReleasePoll poll = new ReleasePoll(host, "o/r", "tok");
+        assertTrue(poll.latestTag().isEmpty());
+        assertTrue(poll.rateLimited);
+
+        flaky.stop(0);
+        assertTrue(poll.latestTag().isEmpty());
+
+        assertFalse(poll.rateLimited);
+        assertEquals("no answer from github this cycle, so this server looks offline. The next poll retries.",
+                OpsBrain.pollProblem(poll.tokenDead, poll.deadCode, poll.rateLimited, poll.noRelease, false));
+    }
+
     /** Verifies the default constructor uses the env-aware resolver and falls back to the default API URL. */
     @Test
     void theShippedConstructorResolvesThroughTheSameSeamAsTheFetcher() {

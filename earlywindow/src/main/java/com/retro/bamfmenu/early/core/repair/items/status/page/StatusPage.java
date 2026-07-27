@@ -40,6 +40,8 @@ public final class StatusPage implements RepairPage {
             out.add(PageRow.gap());
         }
         out.add(PageRow.text(row("Installed", state.installedOrUnknown())));
+        // Kept here after POST collapsed its hardware rows: this is the only place showing which tag
+        // is pinned, and it reads last-sync state so it works even when no boot sync ran.
         out.add(PageRow.text(row("Release Lock", state.isPinned() ? state.pinned() + "  PINNED"
                 : blind ? UNKNOWN : "none")));
         out.add(PageRow.text(row("Last Sync", blind ? UNKNOWN : state.lastSyncCell())));

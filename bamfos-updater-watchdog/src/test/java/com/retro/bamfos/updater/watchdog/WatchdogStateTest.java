@@ -126,4 +126,30 @@ class WatchdogStateTest {
         // no file at all -> empty, never an exception
         assertTrue(WatchdogState.preBootSummary(dir.resolve("nope"), now, 60L * 60 * 1000).isEmpty());
     }
+
+    /**
+     * Verifies wrapperRan defaults to false when the shim mark is absent or stale, keeping panel and
+     * direct-start servers announce-only so they do not halt without a relauncher.
+     */
+    @Test
+    void wrapperRan_believesOnlyAFreshMark() throws IOException {
+        long now = 2_000_000_000_000L;
+        long window = 6L * 60 * 60 * 1000;
+        Path bam = dir.resolve(".bamfos-updater");
+        Files.createDirectories(bam);
+
+        assertFalse(WatchdogState.wrapperRan(dir, now, window));
+
+        Files.writeString(bam.resolve("wrapper-run"), Long.toString(now - 5_000));
+        assertTrue(WatchdogState.wrapperRan(dir, now, window));
+
+        Files.writeString(bam.resolve("wrapper-run"), Long.toString(now - 2 * window));
+        assertFalse(WatchdogState.wrapperRan(dir, now, window));
+
+        Files.writeString(bam.resolve("wrapper-run"), Long.toString(now + window));
+        assertFalse(WatchdogState.wrapperRan(dir, now, window));
+
+        Files.writeString(bam.resolve("wrapper-run"), "not a number");
+        assertFalse(WatchdogState.wrapperRan(dir, now, window));
+    }
 }

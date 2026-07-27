@@ -5,6 +5,11 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -259,6 +264,59 @@ class OpsBrainTest {
         assertTrue(OpsBrain.restartCancelReply("v0.2.6").contains("v0.2.6"));
         assertTrue(OpsBrain.restartCancelReply("v0.2.6").contains("not re-arm"));
         assertEquals("restart cancelled.", OpsBrain.restartCancelReply(""));
+    }
+
+    /**
+     * Reproduces ScheduledThreadPoolExecutor returning negative getDelay while a fixed-delay task runs
+     * (e.g. during /bamfos sync) to verify /bamfos status clamps to 0 instead of reporting a dead poller.
+     */
+    @Test
+    void nextPoll_readsARunningPollAsDueNow_neverAsAPollerThatIsGone() throws Exception {
+        ScheduledExecutorService pool = Executors.newSingleThreadScheduledExecutor();
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            ScheduledFuture<?> task = pool.scheduleWithFixedDelay(() -> {
+                running.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException stopping) {
+                    Thread.currentThread().interrupt();
+                }
+            }, 0, 300, TimeUnit.SECONDS);
+            assertTrue(running.await(5, TimeUnit.SECONDS));
+            Thread.sleep(1100); // past a whole second, so the delay is unambiguously negative
+
+            assertTrue(task.getDelay(TimeUnit.SECONDS) < 0);
+            assertFalse(task.isDone());
+            assertFalse(task.isCancelled());
+            assertEquals(0, OpsBrain.nextPoll(task));
+
+            String board = String.join(" | ", OpsBrain.statusLines(
+                    state("v0.2.6", "", false, "ok", NOW - 1000), true, 300,
+                    OpsBrain.nextPoll(task), -1, "", NOW));
+            assertTrue(board.contains("next poll due now"), board);
+            assertFalse(board.contains("NEVER"), String.valueOf(board));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    /** -1 still means no restart is scheduled. */
+    @Test
+    void nextPoll_keepsMinusOneForAPollerThatIsActuallyGone() {
+        ScheduledExecutorService pool = Executors.newSingleThreadScheduledExecutor();
+        try {
+            assertEquals(-1, OpsBrain.nextPoll(null));
+            ScheduledFuture<?> task = pool.scheduleWithFixedDelay(() -> {
+            }, 300, 300, TimeUnit.SECONDS);
+            assertTrue(OpsBrain.nextPoll(task) > 0);
+            task.cancel(false);
+            assertEquals(-1, OpsBrain.nextPoll(task));
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     private static Map<String, Object> state(String version, String pin, boolean tokenDead,

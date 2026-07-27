@@ -524,7 +524,8 @@ class UpdaterOpsTest {
     void bootBus_framesEventsAndStripsTabs() throws IOException {
         BootBus bus = BootBus.at(dir);
         bus.line("updater: packages current (v0.2.4), nothing to do");
-        bus.ident("o/r", "1.0.1", "");
+        bus.ident("o/r");
+        bus.channel("idle");
         bus.syncBegin("o/r", "v1", "v2");
         bus.fileDone("weird\tname.jar");
         bus.note("PACK UPDATE v2, the headline");
@@ -537,7 +538,8 @@ class UpdaterOpsTest {
 
         assertEquals(List.of(
                 "LOG\tupdater: packages current (v0.2.4), nothing to do",
-                "IDENT\to/r\t1.0.1\t", // an unpinned box sends an EMPTY third field, never the word none
+                "IDENT\to/r", // Channel name only, since IDENT runs before we query GitHub.
+                "CHANNEL\tidle", // Status indicator is sent as a separate event once the updater finishes checking.
                 "SYNC\to/r\tv1\tv2",
                 "FDONE\tweird name.jar", // Tabs inside the payload shouldn't break field parsing.
                 "NOTE\tPACK UPDATE v2, the headline",

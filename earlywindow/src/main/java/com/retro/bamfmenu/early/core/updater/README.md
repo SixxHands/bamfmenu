@@ -4,7 +4,7 @@ Everything the early window knows about the updater comes through this folder, a
 separate paths that fail separately.
 
 `UpdaterFeed` is the DISPLAY path: it tails `.bamfos-updater/bus.log` and turns the engine's events into the
-POST block, the dmesg lines, the three detected-hardware rows, and the mid-sync flag. The filesystem IS the bus
+POST block, the dmesg lines, the Update Channel hardware row, and the mid-sync flag. The filesystem IS the bus
 on purpose, so no combination of absent, old or broken updater can cost us a frame.
 
 `OpsBridge` is the CONTROL path: the one class that knows the shim's class name, reached reflectively so this
@@ -19,6 +19,16 @@ joke row and the POST screen says the kmod is missing, once.
 - **`UpdaterFeed`** owns the bus reader and the POST display model. Truncates the file at construction (the
   window starts BEFORE the locator phase, so everything read after is THIS boot's), keeps a fixed row footprint
   that scrolls itself, and terminates the block on a non-ok END rather than leaving a spinner spinning forever.
+  The Update Channel row resolves in two events and not one: `IDENT` brings the channel NAME (the door sends it
+  before the lock and before any network, so the row exists on the boots that never sync) and `CHANNEL` brings
+  the verdict that becomes the trailing indicator. That is deliberate, the trailing OK used to ride `IDENT`, so
+  it printed on every boot that never contacted github, which makes nearly all of them.
+  The shim test behind that row is any `mods/bamfos-updater-boot*.jar` and not the exact managed name, because a
+  hand-dropped release asset keeps its version and FML finds the locator by its service file (the twin rule is
+  `EmbeddedToken.findShim`); `IDENT` arriving takes the row on its own too, since a door that answered is proof
+  a shim ran however it got loaded. The CAPS finale answers to whether the VERSION moved: same version with
+  files restored draws BAMFOS REPAIRED n FILES, and a sync that moved only the updater's own jars sends no
+  SYNCED at all, so the pending line stands alone.
   `syncActive()` is the mid-sync flag the DEL gate and the repair window's single-writer refusal both read.
   Render thread only.
 - **`OpsBridge`** resolves `UpdaterBridge` + its two methods ONCE in a static initialiser and latches presence

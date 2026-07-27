@@ -55,13 +55,17 @@ public final class BootBus {
         emit("LOG", dmesg);
     }
 
-    /** What the hardware block's three updater rows report: the channel a sync would use, the
-     *  engine build that would run it, and the tag pin. Sent once, right off the config, so the rows carry
-     *  real values on a boot that syncs nothing, which is nearly every boot. No stdout mirror, because the log
-     *  already carries all three (EngineEntry prints the build, the door prints the pin, and the repo is in
-     *  server-sync.log) and this event exists only to fill a display row. */
-    public void ident(String repo, String engineVersion, String tagPin) {
-        emit("IDENT", repo, engineVersion, tagPin);
+    /** Emits the configured repo name for the Update Channel row before any lock or network call.
+     *  Not mirrored to stdout since this only fills the display row; channel() sets the status later. */
+    public void ident(String repo) {
+        emit("IDENT", repo);
+    }
+
+    /** Sets the Update Channel indicator: ok | fail | idle | no-carrier | pinned (one per boot, from finally).
+     *  `ok` includes throttles, `idle` means converged with no request, and `pinned` overrides ok/idle.
+     *  Matched by literal in UpdaterFeed.indicator (earlywindow); keep both sides in sync. */
+    public void channel(String state) {
+        emit("CHANNEL", state);
     }
 
     /** Starts the POST block when an update is actually running. */
@@ -94,26 +98,31 @@ public final class BootBus {
         emit("PHASE", "Applying");
     }
 
-    /** The finale, owner-authored CAPS: hot result now, pending line only when swaps are staged. */
+    /**
+     * The finale, owner-authored CAPS: hot result now, pending line only when swaps are staged.
+     * NO stdout mirror, unlike every other line on this bus, and that is the fix and not an oversight: the
+     * dedicated server runs this exact code from the wrapper's pre-JVM shim, so it printed
+     * BIOS UPDATE COMPLETE. REBOOT TO APPLY. into the wrapper console and logs/latest.log, on a box
+     * with no BIOS, at an operator who is not the one who reboots. Each side words its own console: the
+     * server has SyncCore.serverLog, the client prints the neutral summary, and the CAPS belong to the one
+     * surface that has a boot terminal to draw them on (UpdaterFeed.postBlock, which words these events).
+     */
     public void synced(String from, String to, boolean pending) {
-        System.out.println("[updater] BAMFOS UPDATED FROM " + from + " TO " + to + ".");
         emit("SYNCED", from, to);
         if (pending) {
-            System.out.println("[updater] BIOS UPDATE COMPLETE. REBOOT TO APPLY.");
             emit("PENDING");
         }
     }
 
-    /** Sync over: ok | skip | limited | no-release | fail. The renderer unlocks DEL and reverts the footer on
-     *  this, only `fail` earns an abort why-line (the other four already said their piece), and anything but
-     *  `ok` gets a closing row so the POST block terminates instead of spinning for the rest of the boot.
-     *  `limited` and `no-release` exist for exactly that reason: both are the WORLD refusing, not this box
-     *  breaking, and either one reported as `fail` stacks "sync aborted" under a line that already said the
-     *  honest thing.
-     *  The reader is UpdaterFeed.event's END arm, in the earlywindow module, and it matches these strings
-     *  by literal. Named here on purpose: renaming a state on one side of a filesystem bus compiles fine
-     *  and just renders two rows contradicting each other, so this is the search term that finds both
-     *  halves. */
+    /** Staged updater-only swap where no pack files changed, so we just show REBOOT TO APPLY
+     *  (decided by SyncCore). */
+    public void pendingOnly() {
+        emit("PENDING");
+    }
+
+    /** Ends sync: ok | skip | limited | no-release | offline | fail. Unlocks DEL and closes the POST block.
+     *  Only `fail` adds a generic abort line; the other non-ok states already logged a specific reason.
+     *  Matched by literal in UpdaterFeed.event's END arm (earlywindow); keep both sides in sync. */
     public void end(String state) {
         emit("END", state);
     }

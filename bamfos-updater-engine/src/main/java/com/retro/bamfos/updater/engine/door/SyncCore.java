@@ -170,11 +170,18 @@ final class SyncCore {
         // Log loudly on the wrapper console before downloads start so the server doesn't look hung.
         // Checking versionChanged also catches engine/shim-only bumps absent from plan.downloads().
         boolean serverSide = side == Reconciler.Side.SERVER;
-        if (serverSide && (!plan.downloads().isEmpty() || !fromVersion.equals(manifest.pack().version()))) {
+        boolean versionMoved = !fromVersion.equals(manifest.pack().version());
+        if (serverSide && (!plan.downloads().isEmpty() || versionMoved)) {
             String was = fromVersion.isEmpty() ? "?" : fromVersion;
-            serverLog(dir, "new release " + manifest.pack().version() + " discovered (server on " + was + ")");
-            serverLog(dir, "updating server " + was + " -> " + manifest.pack().version()
-                    + " (" + plan.downloads().size() + " files) before the server opens");
+            if (versionMoved) {
+                serverLog(dir, "new release " + manifest.pack().version() + " discovered (server on " + was + ")");
+                serverLog(dir, "updating server " + was + " -> " + manifest.pack().version()
+                        + " (" + plan.downloads().size() + " files) before the server opens");
+            } else {
+                // Same version with files to fetch is a repair, not a new release, so log it as a repair instead of "new release discovered".
+                serverLog(dir, "repairing " + plan.downloads().size() + " file(s) on "
+                        + manifest.pack().version() + " before the server opens");
+            }
         }
         Reconciler.Fetcher feed = (e, dest) -> {
             bus.fileStart(fileName(e.path()));
@@ -185,10 +192,17 @@ final class SyncCore {
 
         boolean pendingSelf = false;
         List<String> refusedEngines = EngineHealth.rejectedEngines(dir);
+        // Respect path pins on self entries too. Skipping staging here also protects run-server.bat, which
+        // unconditionally moves bamfos-updater-boot.jar.new into place before the engine even runs.
+        PinMatcher selfPins = new PinMatcher(cfg.pins());
         for (FileEntry e : self) {
             Path current = dir.resolve(e.path());
             boolean same = Files.isRegularFile(current) && HashUtils.sha256(current).equals(e.sha256());
             if (same) {
+                continue;
+            }
+            if (selfPins.pinned(e.path())) {
+                selfPinned(e.path());
                 continue;
             }
             if (e.path().equals(ENGINE_PATH) && refusedEngines.contains(e.sha256())) {
@@ -241,13 +255,31 @@ final class SyncCore {
                 serverLog(dir, "server already current (" + manifest.pack().version() + "), launching");
             }
         } else {
-            summary = "updated " + was + " -> " + manifest.pack().version()
-                    + " (" + plan.downloads().size() + " files)"
-                    + (pending ? ", some apply on next boot" : "");
-            bus.synced(was, manifest.pack().version(), pending);
+            String now = manifest.pack().version();
+            int moved = plan.downloads().size();
+            String tail = pending ? ", some apply on next boot" : "";
+            // Only use "updated/rolled back" wording when the pack version actually changed; same-version repairs
+            // and self-entry-only updates shouldn't claim "UPDATED FROM vX TO vX".
+            if (!was.equals(now)) {
+                summary = "updated " + was + " -> " + now + " (" + moved + " files)" + tail;
+            } else if (moved > 0) {
+                summary = "repaired " + moved + " file(s) on " + now + tail;
+            } else {
+                summary = "staged the updater's own files on " + now + tail;
+            }
+            if (!was.equals(now) || moved > 0) {
+                bus.synced(was, now, pending);
+            } else if (pending) {
+                bus.pendingOnly();
+            }
             if (serverSide) {
-                serverLog(dir, "server synced to " + manifest.pack().version()
+                serverLog(dir, "server synced to " + now
                         + (pending ? " (staged files apply on the next boot)" : "") + ", launching");
+            } else {
+                // the client's own console copy, which BootBus.synced used to print for both sides in the
+                // BIOS's voice. latest.log is the file a player pastes when he wants help, so the result has
+                // to be in it, and the summary is the same neutral one-liner the durable record keeps
+                System.out.println("[updater] " + summary);
             }
         }
         // `pending` and not `ok` for a sync that did not converge: the summary two lines up already says
@@ -263,6 +295,13 @@ final class SyncCore {
     private static void shimWaiting(String path) {
         System.out.println("[updater] " + path + ".new is staged and waiting, nothing on the client swaps it in: "
                 + "replace the jar by hand or take it with the next pack re-ship");
+    }
+
+    /** Logs one line whenever a sync skips a pinned self-entry so the operator can see the pin is active
+     *  and knows how to clear it once the bad shim or engine is fixed. */
+    private static void selfPinned(String path) {
+        System.out.println("[updater] " + path + " is pinned, not taking the release's copy: "
+                + "remove it from pin= in .bamfos-updater/bamfos-updater.properties to let updates through");
     }
 
     /** Logs why a manifest-listed engine was skipped after prior rejections, naming both ways out:

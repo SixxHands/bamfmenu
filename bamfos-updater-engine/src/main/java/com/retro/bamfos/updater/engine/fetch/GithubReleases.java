@@ -35,13 +35,27 @@ public final class GithubReleases implements Reconciler.Fetcher {
         this.cacheDir = cacheDir;
     }
 
+    public static final String API = "https://api.github.com";
+
+    /** Resolves BAMFOS_API_BASE for local end-to-end tests via EngineEntry.
+     *  Clamped to loopback ONLY because HttpFetcher sends the embedded PAT on hop 0 (stripping auth only
+     *  on redirects). Parse the URI host rather than matching prefixes (e.g., 127.0.0.1@evil.example). */
     public static String realApi() {
-        // Test/integration seam: honored ONLY when the env var is set (never in a shipped run, so
-        // production behavior is byte-identical), letting a local fixture stand in for GitHub for a
-        // REAL boot.jar --server end-to-end. Same intent as ServerDoor's injectable apiBase, but
-        // reachable from the shim's reflected entry (EngineEntry) which always calls realApi().
         String override = System.getenv("BAMFOS_API_BASE");
-        return override != null && !override.isBlank() ? override : "https://api.github.com";
+        return loopback(override) ? override.trim() : API;
+    }
+
+    /** Package-private helper so tests can exercise the clamp without setting an env var. */
+    static boolean loopback(String base) {
+        if (base == null || base.isBlank()) {
+            return false;
+        }
+        try {
+            String host = java.net.URI.create(base.trim()).getHost();
+            return "127.0.0.1".equals(host) || "localhost".equals(host) || "[::1]".equals(host);
+        } catch (RuntimeException notAUri) {
+            return false;
+        }
     }
 
     // Tag 404s immediately instead of retrying, since only publishing the release fixes a missing tag.

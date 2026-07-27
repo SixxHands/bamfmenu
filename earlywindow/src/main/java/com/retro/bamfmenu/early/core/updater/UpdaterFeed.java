@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.stream.Stream;
 
 // Tails .bamfos-updater/bus.log and turns updater events into the POST screen status lines (file-based so a missing or broken updater never breaks earlywindow).
 public final class UpdaterFeed {
@@ -20,12 +21,9 @@ public final class UpdaterFeed {
     }
 
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
-    /** The hardware block's own word for a device that has not answered yet, reused so the updater rows sit
-     *  in the same register as the Display Adapter row above them. */
+    /** Reused from the hardware block so the updater row matches Display Adapter while probing. */
     private static final String DETECTING = "Detecting ...";
-    /* Keep the status block at a fixed height and scroll it instead of growing downward, it
-       keeps a fixed footprint and SCROLLS ITSELF, each line past the max shifting everything up
-       one, like a real terminal region. The layout below stays where it was. */
+    // Keep the status block at a fixed height and scroll new lines instead of pushing the layout down.
     private static final int MAX_ROWS = 8;
     private static final int DONE_KEPT = 12; // memory cap only; the visible window is MAX_ROWS
 
@@ -41,6 +39,7 @@ public final class UpdaterFeed {
     private String to = "";
     private String note = "";
     private int manifestEntries;
+    private int planned; // File count from PLAN, used to format the final repair summary.
     private String currentFile = "";
     private final List<String> doneFiles = new ArrayList<>();
     private boolean applying;
@@ -50,10 +49,9 @@ public final class UpdaterFeed {
     private boolean pendingSwaps;
     private String closingRow; // Final status line when END isn't ok (null while still running).
     private final boolean shimPresent;
-    private boolean identified; // the door answered IDENT, so the hardware rows carry real values
+    private boolean identified; // True once we get IDENT with the channel name.
     private String identChannel = "";
-    private String identEngine = "";
-    private String identLock = "";
+    private String channelState = ""; // Channel status from the updater (empty until reported).
 
     public UpdaterFeed(String gameDir) {
         busFile = Paths.get(gameDir, ".bamfos-updater", "bus.log");
@@ -64,11 +62,32 @@ public final class UpdaterFeed {
             }
         } catch (IOException ignored) {
         }
-        shimPresent = Files.isRegularFile(Paths.get(gameDir, "mods", "bamfos-updater-boot.jar"));
+        shimPresent = shimIn(Paths.get(gameDir, "mods"));
         if (!shimPresent) {
             // Use the same kmod prefix as the updater when the boot shim isn't installed.
             pendingLog.add("com.bamf.updater: kmod not found, package manager offline");
         }
+    }
+
+    /**
+     * Checks `mods/` for the managed shim or `bamfos-updater-boot*.jar` (manual installs keep version suffixes).
+     * Duplicated from `EmbeddedToken.findShim` so earlywindow stays decoupled from updater classes.
+     */
+    private static boolean shimIn(Path mods) {
+        if (Files.isRegularFile(mods.resolve("bamfos-updater-boot.jar"))) {
+            return true;
+        }
+        try (Stream<Path> listing = Files.list(mods)) {
+            return listing.anyMatch(UpdaterFeed::looksLikeTheShim);
+        } catch (IOException | RuntimeException noModsDir) {
+            return false;
+        }
+    }
+
+    private static boolean looksLikeTheShim(Path p) {
+        String n = p.getFileName().toString();
+        // Require .jar at the end so disabled jars like bamfos-updater-boot.jar.disabled are ignored.
+        return n.startsWith("bamfos-updater-boot") && n.endsWith(".jar") && Files.isRegularFile(p);
     }
 
     /** Reads whatever the engine appended since last frame. Render thread only. */
@@ -108,9 +127,8 @@ public final class UpdaterFeed {
             case "IDENT" -> {
                 identified = true;
                 identChannel = channelName(f.length > 1 ? f[1] : "");
-                identEngine = f.length > 2 ? f[2] : "";
-                identLock = f.length > 3 ? f[3] : "";
             }
+            case "CHANNEL" -> channelState = f.length > 1 ? f[1] : "";
             case "SYNC" -> {
                 sawSync = true;
                 syncActive = true;
@@ -120,6 +138,7 @@ public final class UpdaterFeed {
             }
             case "NOTE" -> note = f.length > 1 ? f[1] : "";
             case "MANIFEST" -> manifestEntries = parseInt(f, 1);
+            case "PLAN" -> planned = parseInt(f, 1);
             case "FILE" -> currentFile = f.length > 1 ? f[1] : "";
             case "FDONE" -> {
                 currentFile = "";
@@ -147,9 +166,12 @@ public final class UpdaterFeed {
                 String state = f.length > 1 ? f[1] : "";
                 currentFile = "";
                 if (sawSync && !"ok".equals(state)) {
-                    closingRow = "limited".equals(state)
-                            ? "Update paused ........ RATE LIMITED"
-                            : "Update stopped ....... FAILED";
+                    // Match the NO CARRIER label on the hardware row when offline instead of showing FAILED next to it.
+                    closingRow = switch (state) {
+                        case "limited" -> "Update paused ........ RATE LIMITED";
+                        case "offline" -> "Update stopped ....... NO CARRIER";
+                        default -> "Update stopped ....... FAILED";
+                    };
                 }
                 // Match "fail" literally: `limited` and `no-release` print their own lines,
                 // and unknown future states should stay on the generic FAILED row without contradicting it.
@@ -180,29 +202,36 @@ public final class UpdaterFeed {
     }
 
     /**
-     * The updater's three rows for the detected-hardware block:
-     * the channel a sync would pull from, the engine build that would run it, and the release lock. All three
-     * report state the engine actually read, never a default this side guessed at, so each one reads
-     * "Detecting ..." until the door sends IDENT during the locator phase, exactly how the Display Adapter
-     * row above them behaves. Empty when the shim jar is not in mods/: there is no channel, no build and no
-     * lock to report, and the log already said the kmod is missing, so three NOT INSTALLED rows would only
-     * say it three more times.
+     * Hardware-block row showing the update channel and its status for this boot.
+     * Filled in two steps: IDENT sets the channel name, then the status appends when the updater finishes.
+     * Empty when no shim jar is in mods/, though a live IDENT takes precedence over filename checks.
      */
     public List<String> hardwareRows() {
-        if (!shimPresent) {
+        if (!shimPresent && !identified) {
             return List.of();
         }
-        String lock = identLock.isEmpty() ? "none" : identLock + "  PINNED";
-        return List.of(
-                "Update Channel   : " + answered(identChannel, "  OK"),
-                "Updater Module   : " + answered(identEngine, "  OK"),
-                // an empty pin is the answer "not pinned", so this row has no blank case to guard
-                "Release Lock     : " + (identified ? lock : DETECTING));
+        return List.of("Update Channel   : " + answered(identChannel, indicator()));
     }
 
-    /** A row's value once the door has answered, else the word for a device that has not. A BLANK field
-     *  counts as no answer, because `Update Channel   :   OK` reports a device with no name, which is the one
-     *  thing these rows exist not to do (a hand-edited `repo=` with nothing after it lands here). */
+    /**
+     * Maps the updater channel status (`BootBus.channel`) to the trailing status label.
+     * IDLE is normal when already up to date; unknown states leave the label blank.
+     */
+    private String indicator() {
+        return switch (channelState) {
+            case "ok" -> "  OK";
+            case "fail" -> "  FAILED";
+            case "idle" -> "  IDLE";
+            case "no-carrier" -> "  NO CARRIER";
+            case "pinned" -> "  PINNED";
+            default -> "";
+        };
+    }
+
+    /**
+     * Returns the channel name from IDENT, or the fallback label if none arrived.
+     * Blank values (like an empty `repo=`) count as missing so we never display `Update Channel   :   OK`.
+     */
     private String answered(String field, String trailer) {
         return identified && !field.isEmpty() ? field + trailer : DETECTING;
     }
@@ -238,7 +267,7 @@ public final class UpdaterFeed {
             out.add(new Line("Applying ............. " + (ended ? "OK" : ""), false));
         }
         if (syncedFrom != null) {
-            out.add(new Line("BAMFOS UPDATED FROM " + syncedFrom + " TO " + syncedTo + ".", true));
+            out.add(new Line(finale(), true));
         }
         if (pendingSwaps) {
             out.add(new Line("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", true));
@@ -248,6 +277,18 @@ public final class UpdaterFeed {
         }
         // Keep the newest rows visible by trimming from the top.
         return out.size() <= MAX_ROWS ? out : out.subList(out.size() - MAX_ROWS, out.size());
+    }
+
+    /** The pack host's CAPS finale, worded off whether the VERSION actually moved. A converged box runs a whole
+     *  sync on the routine repair path (an antivirus ate one managed jar), with the tag set to the version it
+     *  is already on, and the block used to close on BAMFOS UPDATED FROM v0.2.6 TO v0.2.6, which is the
+     *  brightest row on the screen saying nothing true. The engine sends no SYNCED at all when only its own
+     *  jars moved, so a zero here cannot happen. */
+    private String finale() {
+        if (!syncedFrom.equals(syncedTo)) {
+            return "BAMFOS UPDATED FROM " + syncedFrom + " TO " + syncedTo + ".";
+        }
+        return "BAMFOS REPAIRED " + planned + (planned == 1 ? " FILE ON " : " FILES ON ") + syncedTo + ".";
     }
 
     private static String dotted(String name) {

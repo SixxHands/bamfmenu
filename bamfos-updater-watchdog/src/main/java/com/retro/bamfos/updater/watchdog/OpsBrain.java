@@ -210,6 +210,8 @@ final class OpsBrain {
                 : "token ok, nothing has refused it.");
         out.add(nextPollSeconds < 0
                 ? "next poll NEVER, the poll schedule is not running. Restart the server to get it back."
+                : nextPollSeconds == 0
+                ? "next poll due now (every " + pollSeconds + "s), so a poll or a sync has the thread."
                 : "next poll in " + nextPollSeconds + "s (every " + pollSeconds + "s)");
         if (armedSeconds >= 0) {
             out.add("restart ARMED, " + armedSeconds + "s out. /bamfos restart cancel to call it off.");
@@ -236,6 +238,18 @@ final class OpsBrain {
         }
         long at = ops.get("last_sync_at") instanceof Number n ? n.longValue() : 0L;
         return at <= 0 || at > now ? result + ", at an unknown time." : result + ", " + ago(now - at) + ".";
+    }
+
+    /**
+     * Returns seconds until the next poll, or -1 ONLY when no poller is active.
+     * ScheduledThreadPoolExecutor reports a negative delay while a fixed-delay task is running (e.g. during
+     * /bamfos sync), so clamp running tasks to 0; kept here so unit tests cover it.
+     */
+    static long nextPoll(java.util.concurrent.ScheduledFuture<?> task) {
+        if (task == null || task.isCancelled() || task.isDone()) {
+            return -1;
+        }
+        return Math.max(0, task.getDelay(java.util.concurrent.TimeUnit.SECONDS));
     }
 
     /**

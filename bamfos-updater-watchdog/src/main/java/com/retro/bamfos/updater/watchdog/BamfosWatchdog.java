@@ -36,6 +36,7 @@ public final class BamfosWatchdog {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final long COOLDOWN_MS = 6L * 60 * 60 * 1000; // storm guard: one restart per target per 6h
     private static final int TICK_SAMPLE_SECONDS = 15; // only caps how late a hang gets detected
+    private static final long WRAPPER_WINDOW_MS = 6L * 60 * 60 * 1000; // 6h freshness window for the last-sync summary
 
     private volatile MinecraftServer server;
     private ScheduledExecutorService poller;
@@ -48,6 +49,8 @@ public final class BamfosWatchdog {
     private volatile int pollSeconds = 300;
     private volatile boolean autoRestart = true;
     private volatile int countdownSeconds = 60;
+    /** Set once in start() and read by opReload so reloading config can't re-trigger a restart. */
+    private volatile boolean wrapperPresent;
 
     // Written on the server thread; restartAtTick and tick are volatile because the poll thread reads them
     // (and volatile prevents 64-bit long tearing). Plain tick++ is safe since only the server thread writes it.
@@ -107,11 +110,20 @@ public final class BamfosWatchdog {
     private void start(MinecraftServer started) {
         server = started;
         dir = server.getServerDirectory();
-        echoPreBootSync(dir); // surface what the pre-JVM shim did into logs/latest.log, first thing
+        echoPreBootSync(dir); // Echo the pre-JVM shim summary into logs/latest.log, then check once outside the config try-block
+        // so the fallback path cannot leave auto_restart true without a wrapper.
+        wrapperPresent = WatchdogState.wrapperRan(dir, System.currentTimeMillis(), WRAPPER_WINDOW_MS);
+        if (!wrapperPresent) {
+            LOGGER.warn("[watchdog] nothing ran the updater before this JVM, so there is no wrapper loop to "
+                    + "bring the server back: auto_restart is forced OFF and new releases are announced only. "
+                    + "Start the server with run-server.bat to get automatic restarts back.");
+        }
+        autoRestart = wrapperPresent;
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             poll = new ReleasePoll(cfg.repo(), cfg.githubToken());
-            autoRestart = cfg.autoRestart();
+            // Fold wrapperRan into the field here so status/log output matches actual restart behavior.
+            autoRestart = cfg.autoRestart() && wrapperPresent;
             Properties extra = UpdaterConfig.rawProps(dir);
             // Keep clamping inside WatchdogState so it is unit-tested; a period <= 0 would throw in scheduleAtFixedRate
             // outside this catch and disable polling for the rest of the session.
@@ -182,7 +194,8 @@ public final class BamfosWatchdog {
             if (!problem.isEmpty()) {
                 return OpsBrain.Reply.ok(problem); // offline, or a channel with nothing published on it
             }
-            String local = Doors.localVersion(dir).orElse("");
+            // Use settled version, not raw bcc-common.toml, so a partial sync with held files still triggers a restart.
+            String local = Doors.settledVersion(dir).orElse("");
             Properties state = WatchdogState.load(dir);
             String lastTarget = state.getProperty("last_target", "");
             int attempts = WatchdogState.attemptsFor(state, latest); // the tag-reset rule lives with its test
@@ -321,10 +334,8 @@ public final class BamfosWatchdog {
         if (down()) {
             return OpsBrain.Reply.bad(OpsBrain.NOT_STARTED);
         }
-        ScheduledFuture<?> t = pollTask;
-        long next = t == null || t.isCancelled() || t.isDone() ? -1 : t.getDelay(TimeUnit.SECONDS);
         return OpsBrain.Reply.ok(OpsBrain.statusLines(new UpdaterOps(dir, poll.apiBase).status(),
-                autoRestart, pollSeconds, next, OpsBrain.armedSeconds(restartAtTick, tick),
+                autoRestart, pollSeconds, OpsBrain.nextPoll(pollTask), OpsBrain.armedSeconds(restartAtTick, tick),
                 vetoedTarget, System.currentTimeMillis()));
     }
 
@@ -352,7 +363,7 @@ public final class BamfosWatchdog {
             pollSeconds = newPoll; // only update this if rescheduling succeeded so status stays accurate
         }
         poll = new ReleasePoll(cfg.repo(), cfg.githubToken());
-        autoRestart = cfg.autoRestart();
+        autoRestart = cfg.autoRestart() && wrapperPresent; // same fold as start(), see the field
         countdownSeconds = WatchdogState.countdownSeconds(extra);
         tokenDeadLogged = false; // reset warn-once flags so a bad new token still logs a warning
         rateLimitedLogged = false;

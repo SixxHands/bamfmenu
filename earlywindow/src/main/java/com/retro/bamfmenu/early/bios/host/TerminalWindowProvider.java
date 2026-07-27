@@ -1216,8 +1216,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         h.add("Display Adapter  : " + (gpuName == null ? "Detecting ..." : gpuName));
         h.add("System           : " + osInfo + "   Java " + javaInfo);
         if (updaterFeed != null) {
-            // the updater's own devices, same Award register: channel, engine build, release lock. Empty
-            // until the shim is installed, because UpdaterFeed refuses to print a value it has not been told
+            // the updater's own device, same Award register: the update channel and what it did this boot.
+            // Empty until the shim is installed, because UpdaterFeed refuses to print a value it was never told
             h.addAll(updaterFeed.hardwareRows());
         }
         List<String> out = new ArrayList<>(h.size());
@@ -2795,11 +2795,13 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     }
 
     /* Accumulate the real boot phase into a rolling log (newest last): FML updates the EARLY bar's LABEL as
-       it goes ("Discovering mod files", "Scanning mod candidates", ...), so we track that label, translate it
-       to the OS register, and append each new distinct one, deduping against the most recent so a repeated
-       status does not spam the log. This terminal never sees a mod-CONSTRUCTION label: the hold loop lives
-       inside setupMinecraftWindow, which FML calls from VirtualScreen.newWindow inside Minecraft's
-       constructor, so blocking there blocks the constructor and ClientModLoader.begin cannot run either. */
+       it goes ("Discovering mod files", "Scanning mod candidates", ...), so we track that label and append
+       each new distinct one VERBATIM, deduping against the most recent so a repeated status does not spam the
+       log. Verbatim is a rule and not a shortcut, this line is a DIAGNOSTIC SURFACE and has to match
+       latest.log and any forum answer; BootPhase's header carries the whole reasoning and the war story.
+       This terminal never sees a mod-CONSTRUCTION label: the hold loop lives inside setupMinecraftWindow,
+       which FML calls from VirtualScreen.newWindow inside Minecraft's constructor, so blocking there blocks
+       the constructor and ClientModLoader.begin cannot run either. */
     private void pumpLog(int maxChars) {
         try {
             String text = phaseText();

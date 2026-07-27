@@ -38,12 +38,8 @@ final class ReleasePoll {
         this(GithubReleases.realApi(), repo, token);
     }
 
-    /** The same test/integration seam the fetcher has, on purpose through the SAME resolver: realApi
-     *  honors BAMFOS_API_BASE only when the env var is set, so a shipped run is byte-identical, and a
-     *  local fixture can play github for the in-session poll instead of that path only ever being
-     *  provable against the real thing. Reused rather than re-read here, because two copies of one env-var
-     *  contract drift, and then the door and the watchdog stop agreeing on what "latest" is, which is
-     *  the exact thrash the class header warns about. */
+    /** Reuses the fetcher's BAMFOS_API_BASE resolver (loopback-only so PATs cannot be redirected) so local
+     *  test fixtures work and the door and watchdog never disagree on the API base. */
     ReleasePoll(String apiBase, String repo, String token) {
         this.apiBase = apiBase;
         this.repo = repo;
@@ -71,9 +67,10 @@ final class ReleasePoll {
             if (etag != null) {
                 rq.header("If-None-Match", etag);
             }
-            // cleared here rather than on each branch below, because a 404 followed by any other answer must not
-            // leave the operator reading "no published release" about a channel that has one now
+            // Reset per-cycle flags up front so a network exception below can't leave stale 403/404 state behind.
+            // Keep tokenDead until a 200 or authenticated 304 proves the credential works again.
             noRelease = false;
+            rateLimited = false;
             HttpResponse<InputStream> resp = client.send(rq.build(), HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream in = resp.body()) {
                 if (resp.statusCode() == 304) {

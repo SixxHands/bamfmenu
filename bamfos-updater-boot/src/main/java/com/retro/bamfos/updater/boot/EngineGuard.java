@@ -38,7 +38,7 @@ import java.util.function.Supplier;
  * a player could be talked through, which is the failure class this guard exists to prevent.
  * IMPORTANT: no version-string compare anywhere, deliberately, because bans ordering compares on version
  * strings and the one ordered compare in the system is the integer updater_abi. The verdict here is
- * behavioural, "did it report a run it could account for", NEVER "is it newer".
+ * behavioral, "did it report a run it could account for", NEVER "is it newer".
  * all the way through: every failure is a printed line and a continue, and a restore that cannot
  * replace the jar leaves the flag armed so the next boot retries instead of losing the verdict.
  */

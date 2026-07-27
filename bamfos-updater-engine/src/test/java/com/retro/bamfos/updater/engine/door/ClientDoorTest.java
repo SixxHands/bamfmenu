@@ -1,6 +1,5 @@
 package com.retro.bamfos.updater.engine.door;
 
-import com.retro.bamfos.updater.engine.EngineEntry;
 import com.retro.bamfos.updater.engine.Fx;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
@@ -168,18 +167,20 @@ class ClientDoorTest {
         assertEquals(List.of(
                 "LOG\tcom.bamf.updater: kmod start",
                 "LOG\tcom.bamf.updater: module initialized",
-                "IDENT\to/r\t" + EngineEntry.version() + "\t", // the fixture's repo, straight off the config
+                "IDENT\to/r", // IDENT only reports the repo name from config.
                 "LOG\tupdater: packages current (vNEW), nothing to do",
+                // When the boot doesn't need GitHub, the status row should show IDLE (instead of OK on IDENT).
+                "CHANNEL\tidle",
                 "END\tskip"),
                 Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")));
     }
 
     /**
      * The double-launch boot, which is the ONE boot where IDENT's position is load-bearing: the door returns at
-     * the lock-held line, so if IDENT were sent inside the lock the three hardware rows would sit on
-     * `Detecting ...` for the entire session, which is the exact thing UpdaterFeed's rows exist not to do. A
-     * live foreign PID in the lock file is the only way to make acquire() refuse (our own PID reclaims it), and
-     * the parent-or-any-live-process pick is the same one ServerDoorTest uses.
+     * the lock-held line, so if IDENT were sent inside the lock the hardware row would sit on `Detecting ...`
+     * for the entire session, which is the exact thing that row exists not to do. A live foreign PID in the
+     * lock file is the only way to make acquire() refuse (our own PID reclaims it), and the
+     * parent-or-any-live-process pick is the same one ServerDoorTest uses.
      */
     @Test
     void secondInstance_identsBeforeTheLockLine() throws IOException {
@@ -197,7 +198,48 @@ class ClientDoorTest {
         int held = bus.indexOf("LOG\tupdater: instance lock held, sync skipped");
         assertTrue(held >= 0, String.valueOf(bus));
         assertTrue(ident >= 0 && ident < held, String.valueOf(bus));
+        assertEquals("idle", channel());
         assertFalse(Files.exists(dir.resolve("mods")));
+    }
+
+    /** Status line must be emitted separately from IDENT. */
+    private String channel() throws IOException {
+        for (String line : Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"))) {
+            if (line.startsWith("CHANNEL\t")) {
+                return line.substring("CHANNEL\t".length());
+            }
+        }
+        return fail("every boot exit must record a channel status, but none was written");
+    }
+
+    /** Verify Update Channel verdicts land only after real status checks, not as a fake OK on IDENT.
+     * PINNED and rate-limit verdicts are covered in their own fixture tests below. */
+    @Test
+    void theChannelVerdict_saysWhatGithubDid_neverThatTheDoorRan() throws IOException {
+        // Already up to date: local version matches broadcast, so we skip GitHub.
+        bcc("vNEW");
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8));
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.save(Ledger.pathIn(dir));
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertEquals("idle", channel());
+
+        // Behind the broadcast version, so a full sync runs against GitHub.
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertEquals("ok", channel());
+
+        // Missing release tag: GitHub returned 404, which shouldn't be reported as OK.
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base + "/gone").run(dir));
+        assertEquals("fail", channel());
+
+        // No server reachable: row uses the same no-carrier wording as the log line.
+        props("server_host=127.0.0.1\nserver_port=1\n"); // closed port
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertEquals("no-carrier", channel());
     }
 
     private static int indexOfPrefix(List<String> lines, String prefix) {
@@ -456,6 +498,7 @@ class ClientDoorTest {
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
         assertEquals("END\tlimited", bus.get(bus.size() - 1));
         assertEquals("limited", lastSync().get("result"));
+        assertEquals("ok", channel());
     }
 
     /**
@@ -619,6 +662,9 @@ class ClientDoorTest {
         bcc("vOLD");
         assertEquals(0, new ClientDoor(base).run(dir));
         assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        // Even though the sync succeeded, show the pinned state on the status row since there is no separate
+        // Release Lock row anymore.
+        assertEquals("pinned", channel());
     }
 
     @Test
@@ -635,6 +681,152 @@ class ClientDoorTest {
         String hist = Files.readString(dir.resolve(".bamfos-updater").resolve("disconnect-history.json"));
         assertTrue(hist.contains("fp77"));
         assertTrue(hist.contains("quarantined mods/chipped-x.jar"));
+    }
+
+    /** Record a no-change kick history entry even on converged boots so KickWatch escalates repeated
+     * unfixable kicks instead of looping restart prompts forever. */
+    @Test
+    void convergedBox_kickThatQuarantinesNothing_stillRecordsTheCycle() throws IOException {
+        bcc("vNEW"); // Version, caches, and ledger all match so we hit the packages-current early return.
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8));
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.save(Ledger.pathIn(dir));
+        // the kick names a mod that is not on this disk at all, so there is nothing for Q2 to disable
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("last-disconnect.json"),
+                "{\"server\":\"127.0.0.1\",\"reason\":\"Channel gravestone:main is missing on the client side\","
+                        + "\"fingerprint\":\"fpSKEW\",\"at\":1}");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        Path hist = dir.resolve(".bamfos-updater").resolve("disconnect-history.json");
+        assertTrue(Files.isRegularFile(hist));
+        Map<?, ?> entry = (Map<?, ?>) ((Map<?, ?>) ((Map<?, ?>) MiniJson.parse(
+                Files.readString(hist, StandardCharsets.UTF_8))).get("entries")).get("fpSKEW");
+        assertNotNull(entry);
+        assertEquals("none", entry.get("last_action"));
+        assertNull(entry.get("version_changed"));
+    }
+
+    /** Do not record a no-change kick cycle when offline (NO CARRIER); the crumb is consumed, but sync
+     * never ran so a retry might still fix it. */
+    @Test
+    void aBootWhoseSyncNeverGotItsShot_recordsNoCycle() throws IOException {
+        props("server_host=127.0.0.1\nserver_port=1\n"); // closed port: no broadcast, no compare, no sync
+        bcc("vNEW");
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("last-disconnect.json"),
+                "{\"server\":\"127.0.0.1\",\"reason\":\"Channel gravestone:main is missing\","
+                        + "\"fingerprint\":\"fpDARK\",\"at\":1}");
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertEquals("no-carrier", channel());
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve("last-disconnect.json")));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve("disconnect-history.json")));
+    }
+
+    /** Update the channel status on unexpected sync failures (like a missing manifest.json) instead of
+     * leaving it stuck on IDLE above a FAILED POST block. */
+    @Test
+    void aSyncThatBrokeAfterGithubAnswered_neverLeavesTheRowIdle() throws IOException {
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base + "/nomanifest").run(dir));
+        assertEquals("fail", channel());
+    }
+
+    /**
+     * A dead carrier mid-sync gets its OWN end state, same rule the throttle and the missing release already
+     * answer to. On `fail` the earlywindow stacks its generic "updater: sync aborted, boot continues" under
+     * the specific line the door already printed, so one router reboot rendered three rows, the vaguest last,
+     * while the durable record classified the same event as `offline`. Base points at a closed port, so the
+     * fault is a real refused connect and not a simulated one.
+     */
+    @Test
+    void aDeadCarrierMidSync_endsOffline_notFail() throws IOException {
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor("http://127.0.0.1:1").run(dir));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertEquals("END\toffline", bus.get(bus.size() - 1), String.valueOf(bus));
+        assertTrue(bus.contains("LOG\tupdater: repository unreachable, boot continues"), String.valueOf(bus));
+        assertEquals("no-carrier", channel());
+        assertEquals("offline", lastSync().get("result"));
+    }
+
+    /** Same-version repair (e.g. restoring a deleted jar) must not print "BAMFOS UPDATED FROM vNEW TO vNEW"
+     * or write a version-change finale into last-sync.json. */
+    @Test
+    void aRepairSyncOnAConvergedBox_neverClaimsAVersionMove() throws IOException {
+        bcc("vOLD");
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW); // both self-entries pre-satisfied, so run 1 is a clean ok
+        Fx.write(dir, SyncCore.ENGINE_PATH, ENGINE_NEW);
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertEquals("ok", lastSync().get("result"));
+
+        Files.delete(dir.resolve("mods/cm.jar")); // the antivirus
+        String out = captureOut(() -> assertEquals(0, new ClientDoor(base).run(dir)));
+
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertEquals("repaired 1 file(s) on vNEW", lastSync().get("summary"));
+        assertFalse(out.contains("vNEW TO vNEW"), String.valueOf(out));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("SYNCED\tvNEW\tvNEW"), String.valueOf(bus));
+        assertTrue(bus.contains("PLAN\t1"), String.valueOf(bus));
+    }
+
+    /** When only the updater engine changes on an already-current pack (empty backfill plan), emit the
+     * engine reboot notice without a pack-updated finale. */
+    @Test
+    void aSyncThatMovedOnlyTheUpdatersOwnJars_announcesNoPackChange() throws IOException {
+        bcc("vNEW");
+        Fx.write(dir, "mods/cm.jar", CM); // every managed file already right, so the plan comes out empty
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW);
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.files.put("mods/cm.jar", new Ledger.Entry(HashUtils.sha256(CM)));
+        led.save(Ledger.pathIn(dir));
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertTrue(Files.exists(dir.resolve(SyncCore.ENGINE_PATH + ".new")));
+        assertEquals("staged the updater's own files on vNEW, some apply on next boot", lastSync().get("summary"));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("PENDING"), String.valueOf(bus));
+        assertTrue(bus.stream().noneMatch(l -> l.startsWith("SYNCED\t")), String.valueOf(bus));
+    }
+
+    /** BootBus is shared with the dedicated server, so BIOS-specific CAPS lines must stay off stdout
+     * while the neutral summary still prints to latest.log. */
+    @Test
+    void theBiosCapsLines_stayOnTheBus_andNeverReachTheConsole() throws IOException {
+        bcc("vOLD"); // Leave shim and engine outdated so the engine stages them and emits PENDING.
+        String out = captureOut(() -> assertEquals(0, new ClientDoor(base).run(dir)));
+
+        assertFalse(out.contains("BIOS UPDATE COMPLETE"), String.valueOf(out));
+        assertFalse(out.contains("BAMFOS UPDATED FROM"), String.valueOf(out));
+        assertTrue(out.contains("[updater] updated vOLD -> vNEW"), String.valueOf(out));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("SYNCED\tvOLD\tvNEW"), String.valueOf(bus));
+        assertTrue(bus.contains("PENDING"), bus.toString());
+    }
+
+    /** Watchdog convergence must check both bcc-common.toml and ledger installed_version so a partial sync
+     * still triggers a restart, while an empty installed_version is ignored for existing servers. */
+    @Test
+    void settledVersion_believesTheLedgerOverBcc_butNeverAnAbsentOne() throws IOException {
+        bcc("v3");
+        assertEquals("v3", Doors.settledVersion(dir).orElse(""));
+
+        Ledger agreed = new Ledger();
+        agreed.installedVersion = "v3";
+        agreed.save(Ledger.pathIn(dir));
+        assertEquals("v3", Doors.settledVersion(dir).orElse(""));
+
+        Ledger heldBack = new Ledger();
+        heldBack.installedVersion = "v2"; // Simulate a partial sync where bcc updated but another managed file failed.
+        heldBack.save(Ledger.pathIn(dir));
+        assertEquals("v2", Doors.settledVersion(dir).orElse(""));
+
+        assertTrue(Doors.settledVersion(dir.resolve("nope")).isEmpty());
     }
 
     @Test

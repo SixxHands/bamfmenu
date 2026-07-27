@@ -73,6 +73,26 @@ final class WatchdogState {
         return Optional.empty();
     }
 
+    /**
+     * Returns true if the pre-JVM shim wrote a fresh mark for this boot, indicating a wrapper loop is active.
+     * Defaults to false (announce-only) when absent or stale so direct/panel servers never halt without a relauncher.
+     */
+    static boolean wrapperRan(Path dir, long now, long freshnessMs) {
+        try {
+            Path f = dir.resolve(".bamfos-updater").resolve("wrapper-run");
+            if (!Files.isRegularFile(f)) {
+                return false;
+            }
+            long at = Long.parseLong(Files.readString(f, StandardCharsets.UTF_8).trim());
+            long age = now - at;
+            // a mark from the FUTURE is a clock that moved, never a wrapper, because believing it would keep
+            // auto-restart armed on an unwrappered box for as long as the skew lasts
+            return age >= 0 && age < freshnessMs;
+        } catch (IOException | RuntimeException unreadable) {
+            return false;
+        }
+    }
+
     static int intProp(Properties p, String key, int dflt) {
         try {
             return Integer.parseInt(p.getProperty(key, Integer.toString(dflt)).trim());

@@ -15,8 +15,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * The READER half of the boot bus, which is the half nothing used to guard: the engine's ClientDoorTest pins
  * the writer's END states, so a rename there goes red, while this side could silently drift and the player
  * would just read two rows contradicting each other with nothing failing anywhere. The bus IS a file, so a
- * synthetic bus.log is the whole fixture, no engine and no GL context needed (BootBus.end's four states are
- * ok | skip | limited | fail).
+ * synthetic bus.log is the whole fixture, no engine and no GL context needed (BootBus.end writes
+ * ok | skip | limited | no-release | fail, BootBus.channel writes ok | fail | idle | no-carrier | pinned).
  */
 class UpdaterFeedTest {
 
@@ -118,39 +118,42 @@ class UpdaterFeedTest {
         assertEquals("updater: no carrier, sync skipped", drain(feed));
     }
 
-    /** The updater rows are POST rows: fixed footprint from the first frame, each one earning its value when
-     *  the engine answers, exactly the contract the Display Adapter row above them already runs on. The door
-     *  does not open until FML reaches the locator phase, so Detecting ... is the honest state until then and
-     *  a default this side filled in would be the dishonest one. */
+    /**
+     * Keeps one Update Channel row whose status arrives after the check, not on IDENT,
+     * since IDENT fires before network access and used to print OK on offline/idle boots.
+     */
     @Test
-    void hardwareRows_detectUntilTheEngineIdentifies_thenCarryRealValues() throws IOException {
+    void theChannelRow_namesTheChannelAtIdent_andWaitsForTheVerdictToIndicate() throws IOException {
         UpdaterFeed quiet = feedOn("LOG\tcom.bamf.updater: kmod start");
-        assertEquals(List.of(
-                "Update Channel   : Detecting ...",
-                "Updater Module   : Detecting ...",
-                "Release Lock     : Detecting ..."), quiet.hardwareRows());
+        assertEquals(List.of("Update Channel   : Detecting ..."), quiet.hardwareRows());
 
-        UpdaterFeed known = feedOn("IDENT\tSixxHands/bamfos-pack\t1.0.1\t");
-        assertEquals(List.of(
-                "Update Channel   : bamfos-pack  OK", // the repo NAME, never the pack's account with it
-                "Updater Module   : 1.0.1  OK",
-                "Release Lock     : none"), known.hardwareRows());
+        UpdaterFeed named = feedOn("IDENT\tSixxHands/bamfos-pack");
+        assertEquals(List.of("Update Channel   : bamfos-pack"), named.hardwareRows());
+
+        UpdaterFeed answered = feedOn("IDENT\tSixxHands/bamfos-pack", "CHANNEL\tok");
+        assertEquals(List.of("Update Channel   : bamfos-pack  OK"), answered.hardwareRows());
 
         // Empty `repo=` shouldn't count as a channel name, otherwise we'd render "Update Channel   :   OK".
-        UpdaterFeed blank = feedOn("IDENT\t\t\t");
-        assertEquals("Update Channel   : Detecting ...", blank.hardwareRows().get(0));
+        UpdaterFeed blank = feedOn("IDENT\t", "CHANNEL\tok");
+        assertEquals(List.of("Update Channel   : Detecting ..."), blank.hardwareRows());
     }
 
-    /** A pin is the one row here that changes what the box DOES, so it says so instead of reading like any
-     *  other value. */
+    /** Pins all five channel verdicts, with IDLE treated as the normal steady state when no check is needed. */
     @Test
-    void pinnedIdent_marksTheReleaseLock() throws IOException {
-        UpdaterFeed feed = feedOn("IDENT\tSixxHands/bamfos-pack\t1.0.1\tv0.2.4");
-        assertEquals("Release Lock     : v0.2.4  PINNED", feed.hardwareRows().get(2));
+    void everyVerdict_getsItsOwnWord() throws IOException {
+        assertEquals("Update Channel   : bamfos-pack  IDLE", row("idle"));
+        assertEquals("Update Channel   : bamfos-pack  OK", row("ok"));
+        assertEquals("Update Channel   : bamfos-pack  FAILED", row("fail"));
+        assertEquals("Update Channel   : bamfos-pack  NO CARRIER", row("no-carrier"));
+        assertEquals("Update Channel   : bamfos-pack  PINNED", row("pinned"));
+        assertEquals("Update Channel   : bamfos-pack", row("promoted"));
     }
 
-    /** No shim jar means there is no channel, no build and no lock, and the log line already said the kmod is
-     *  missing, so three NOT INSTALLED rows would only say it three more times. */
+    private String row(String state) throws IOException {
+        return feedOn("IDENT\tSixxHands/bamfos-pack", "CHANNEL\t" + state).hardwareRows().get(0);
+    }
+
+    /** Without a shim jar, omit the channel row since the log already notes the updater isn't installed. */
     @Test
     void noShim_rendersNoHardwareRowsAndOneKmodLine() throws IOException {
         UpdaterFeed feed = feedWithNoShim();
@@ -165,6 +168,92 @@ class UpdaterFeedTest {
         List<UpdaterFeed.Line> block = feed.postBlock(0);
         assertTrue(block.stream().anyMatch(l -> l.text().equals("Update Channel   : bamfos-pack")),
                 block.toString());
+    }
+
+    /**
+     * A router that goes away mid-download is the WORLD refusing, not this box breaking, so it gets the same
+     * treatment `limited` and `no-release` already had. On the old `fail` this rendered three rows about one
+     * event: the door's own specific line, then a generic FAILED, then "updater: sync aborted, boot continues"
+     * stacked under the line that had already explained it, vaguest last. The closing row wears the hardware
+     * row's own words so the two read as one fact, same rule NO CARRIER follows everywhere else.
+     */
+    @Test
+    void offlineEnd_saysNoCarrier_andStacksNoSecondWhyLine() throws IOException {
+        UpdaterFeed feed = feedOn("SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "MANIFEST\t412",
+                "FDONE\tcobblemon-1.6.1.jar",
+                "FILE\tcreate-6.0.4.jar", // Still downloading when the connection drops.
+                "LOG\tupdater: repository unreachable, boot continues",
+                "CHANNEL\tno-carrier",
+                "END\toffline");
+        List<UpdaterFeed.Line> block = feed.postBlock(0);
+
+        assertEquals("Update stopped ....... NO CARRIER", block.get(block.size() - 1).text(), String.valueOf(block));
+        assertTrue(block.stream().noneMatch(l -> l.text().startsWith("Fetching")), String.valueOf(block));
+        assertEquals("updater: repository unreachable, boot continues", drain(feed));
+        assertFalse(feed.syncActive());
+    }
+
+    /**
+     * Finale wording depends on whether the version changed, so a same-version repair
+     * never prints "BAMFOS UPDATED FROM v0.2.6 TO v0.2.6".
+     */
+    @Test
+    void aRepairFinale_neverClaimsAVersionMove() throws IOException {
+        UpdaterFeed one = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t1", "FDONE\tcm.jar", "SYNCED\tv0.2.6\tv0.2.6", "END\tok");
+        assertEquals("BAMFOS REPAIRED 1 FILE ON v0.2.6.", lastOf(one));
+
+        UpdaterFeed many = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t3", "SYNCED\tv0.2.6\tv0.2.6", "END\tok");
+        assertEquals("BAMFOS REPAIRED 3 FILES ON v0.2.6.", lastOf(many));
+
+        UpdaterFeed moved = feedOn("SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t9", "SYNCED\tv0.2.4\tv0.2.6", "END\tok");
+        assertEquals("BAMFOS UPDATED FROM v0.2.4 TO v0.2.6.", lastOf(moved));
+    }
+
+    /** When only the updater jars changed, the engine skips SYNCED and just prints REBOOT TO APPLY.
+     *  Don't synthesize an extra summary row here. */
+    @Test
+    void aSelfEntryOnlySync_drawsThePendingLineAndNoFinale() throws IOException {
+        UpdaterFeed feed = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t0", "PENDING", "END\tok");
+        List<UpdaterFeed.Line> block = feed.postBlock(0);
+        assertEquals("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", lastOf(feed));
+        assertTrue(block.stream().noneMatch(l -> l.text().startsWith("BAMFOS ")), String.valueOf(block));
+    }
+
+    private static String lastOf(UpdaterFeed feed) {
+        List<UpdaterFeed.Line> block = feed.postBlock(0);
+        return block.get(block.size() - 1).text();
+    }
+
+    /**
+     * Hand-dropped release jars keep version suffixes in the filename (matching EmbeddedToken's prefix scan).
+     * FML loads them by service file, so detection must use prefix matching instead of an exact filename.
+     */
+    @Test
+    void aHandDroppedVersionedShim_countsAsInstalled() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater"));
+        Files.createDirectories(dir.resolve("mods"));
+        Files.writeString(dir.resolve("mods").resolve("bamfos-updater-boot-0.0.3.jar"), "the shim");
+        UpdaterFeed feed = new UpdaterFeed(dir.toString());
+
+        assertNull(drain(feed));
+        assertEquals(List.of("Update Channel   : Detecting ..."), feed.hardwareRows());
+    }
+
+    /** FML only loads *.jar, so a .disabled shim shouldn't show up as installed. */
+    @Test
+    void aParkedShim_doesNotCountAsInstalled() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater"));
+        Files.createDirectories(dir.resolve("mods"));
+        Files.writeString(dir.resolve("mods").resolve("bamfos-updater-boot.jar.disabled"), "parked");
+        UpdaterFeed feed = new UpdaterFeed(dir.toString());
+
+        assertTrue(feed.hardwareRows().isEmpty());
+        assertEquals("com.bamf.updater: kmod not found, package manager offline", drain(feed));
     }
 
     /** Drains the queue and returns the last line, or null if nothing was queued. */

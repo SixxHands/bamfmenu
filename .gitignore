@@ -24,8 +24,9 @@ hs_err_pid*.log
 # Minecraft Runtime run directory
 run/
 
-# Local token
+# Local tokens
 bamfos-token.local
+*-token.local
 
 # Excluded folders (testing specific / backups)
 scratch/
