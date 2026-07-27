@@ -82,6 +82,21 @@ class UpdaterFeedTest {
         assertNull(drain(limited));
     }
 
+    /**
+     * `no-release` should close the Fetching block without adding "sync aborted" under the engine
+     * message. Matching `fail` literally (not "!ok") keeps older earlywindow builds safe.
+     */
+    @Test
+    void aNoReleaseEnd_closesTheBlock_withoutStackingTheAbortLine() throws IOException {
+        UpdaterFeed feed = feedOn(midSync("no-release"));
+        List<UpdaterFeed.Line> block = feed.postBlock(0);
+
+        assertEquals("Update stopped ....... FAILED", block.get(block.size() - 1).text());
+        assertTrue(block.stream().noneMatch(l -> l.text().startsWith("Fetching")), String.valueOf(block));
+        assertNull(drain(feed));
+        assertFalse(feed.syncActive());
+    }
+
     /** On a clean END, don't add another row since the two uppercase summary lines already closed the block. */
     @Test
     void okEnd_addsNoClosingRow() throws IOException {

@@ -13,7 +13,8 @@ final class WatchdogBrain {
         RESTART,       // announce + countdown + halt; the wrapper does the rest
         ANNOUNCE_ONLY, // auto_restart=false: just notify, let the operator restart manually
         HOLD_COOLDOWN, // already restarted for this tag recently; wait for cooldown
-        HOLD_GIVEUP    // max restart attempts reached for this tag; wait for a newer release
+        HOLD_GIVEUP,   // max restart attempts reached for this tag; wait for a newer release
+        HOLD_VETOED    // an operator ran /bamfos restart cancel for this tag; OpsBrain.vetoed, never decide()
     }
 
     static Decision decide(String latestTag, String localVersion, boolean autoRestart,

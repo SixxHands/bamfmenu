@@ -3,8 +3,10 @@ package com.retro.bamfos.updater.engine.door;
 import com.retro.bamfos.updater.engine.EngineEntry;
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
+import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.DisconnectHistory;
+import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
@@ -40,7 +42,9 @@ public final class ClientDoor {
             Optional<InstanceLock> lock = InstanceLock.acquire(dir);
             if (lock.isEmpty()) {
                 bus.line("updater: instance lock held, sync skipped");
-                return 0;
+                // Clear probation on named skips too: the engine ran and decided cleanly, and most boots on a
+                // current install end here, so skipping the clear would trigger a false rollback.
+                return EngineHealth.proven(dir, 0);
             }
             try (InstanceLock ignored = lock.get()) {
                 SyncCore.stepZero(dir);
@@ -56,7 +60,7 @@ public final class ClientDoor {
                     Optional<String> broadcast = Doors.broadcast(dir, cfg);
                     if (broadcast.isEmpty()) {
                         bus.line("updater: no carrier, sync skipped");
-                        return 0;
+                        return EngineHealth.proven(dir, 0); // treat no-carrier as offline so it clears probation
                     }
                     // fresh read, NOT versionBefore: step 0 may have just replayed a staged sync
                     // that rewrote bcc, and comparing the broadcast against the pre-replay value
@@ -64,7 +68,7 @@ public final class ClientDoor {
                     String local = localVersion(dir).orElse("");
                     if (local.isEmpty()) {
                         bus.line("updater: no version stamp in config/bcc-common.toml, sync skipped");
-                        return 0;
+                        return EngineHealth.proven(dir, 0);
                     }
                     if (broadcast.get().equals(local)) {
                         Optional<String> missing = SyncCore.firstMissingManaged(dir, cfg.pins());
@@ -73,7 +77,7 @@ public final class ClientDoor {
                         boolean agrees = SyncCore.ledgerAgrees(dir, local);
                         if (missing.isEmpty() && cached && agrees) {
                             bus.line("updater: packages current (" + local + "), nothing to do");
-                            return 0;
+                            return EngineHealth.proven(dir, 0);
                         }
                         if (missing.isPresent()) {
                             // A managed file is missing even though the version matches; bypass the shortcut so the
@@ -96,8 +100,10 @@ public final class ClientDoor {
                     }
                     tag = broadcast.get(); // upgrades and rollbacks use the same sync path
                 }
+                // true: this IS the promoted engine, the shim loaded these very bytes out of
+                // .bamfos-updater/engine/, so a sync it finishes is the alibi the probation flag is waiting on
                 code = SyncCore.sync(dir, cfg, tag, versionBefore, false, false,
-                        Reconciler.Side.CLIENT, apiBase, bus);
+                        Reconciler.Side.CLIENT, apiBase, bus, true);
                 end = "ok";
                 return code;
             }
@@ -105,6 +111,10 @@ public final class ClientDoor {
             // Catch RateLimited before TokenDead and never write the token-dead marker: rate limits clear
             // on their own within an hour, while the marker would falsely flag the token as revoked.
             bus.line("updater: github rate limited, sync retries next boot");
+            // write this to last-sync.json too so the BIOS screen doesn't keep showing an old ok status when
+            // rate-limited. Downstream treats `limited` as non-fatal.
+            SyncCore.recordFailure(dir, "limited", "github rate limited, the next boot retries");
+            EngineHealth.proven(dir); // github answered, so the engine is working, see EngineHealth
             // its OWN end state, never "fail": the realistic trip is mid-download, which is after syncBegin,
             // and UpdaterFeed's END arm turns a failed end into "updater: sync aborted, boot continues" right
             // under the honest line, so the player reads two rows that contradict each other. Quoted exactly,
@@ -114,11 +124,29 @@ public final class ClientDoor {
         } catch (HttpFetcher.TokenDead dead) {
             SyncCore.tokenDead(dir, dead);
             bus.line("AuthEvent: GITHUB token FAILED (" + dead.code + "), updates disabled");
+            EngineHealth.proven(dir); // A revoked credential is a token problem, not a broken engine.
             end = "fail";
             return 0;
+        } catch (GithubReleases.ReleaseMissing gone) {
+            bus.line(abortLine(gone)); // Record token-dead in last-sync.json (not just stdout) so the BIOS UPDATE AND REPAIR row
+            // shows the exact cause instead of a generic abort.
+            SyncCore.recordFailure(dir, "no-release", gone.alias // Handle the alias branch here too, same as abortLine.
+                    ? "the " + gone.repo + " channel has no published release yet, nothing to converge to"
+                    : "no release named " + gone.tag + " on " + gone.repo
+                            + " (or the token cannot see it), nothing to converge to");
+            EngineHealth.proven(dir); // github answered 404 so the engine itself is healthy (see EngineHealth); record a distinct state
+            // here since the network and token worked, the requested release just doesn't exist
+            end = "no-release";
+            return 0;
         } catch (Exception e) {
-            bus.line(abortLine(e)); // the terminal deserves the why-line too
-            System.out.println("[updater] sync skipped: " + e); // the game must still boot
+            String why = abortLine(e);
+            bus.line(why); // the terminal deserves the why-line too
+            System.out.println("[updater] sync skipped: " + e); // Always let the game boot, and record offline/failed in last-sync.json so UPDATE AND REPAIR
+            // doesn't keep showing a stale "ok" across days of failed boots.
+            SyncCore.recordFailure(dir, SyncCore.networkFault(e) ? "offline" : "failed", why + " (" + e + ")");
+            if (EngineHealth.attributable(e)) {
+                EngineHealth.proven(dir);
+            }
             end = "fail";
             return 0;
         } finally {
@@ -133,46 +161,25 @@ public final class ClientDoor {
         }
     }
 
-    /**
-     * The abort line, chosen off the exception TYPE. "sync failed" gives a player nothing to act on, and the
-     * type is the only thing at this point that knows the difference: a dead carrier is wait-and-see, while
-     * two enabled jars claiming one modid is his own mods folder and the reconciler already refused to move
-     * a byte over it, which is an integrity call and not a network one. Anything unrecognised stays
-     * deliberately vague, because naming a cause we did not identify is where a log line starts lying.
-     */
+    /** Picks a specific abort message from the exception type (network fault, missing release, or
+     *  duplicate modid). Unrecognized exceptions stay generic rather than guessing a cause. */
     static String abortLine(Exception e) {
         if (e instanceof Reconciler.DupeModidAbort) {
             return "integrity: two enabled jars claim one modid, sync aborted";
         }
-        if (networkFault(e)) {
+        if (e instanceof GithubReleases.ReleaseMissing gone) {
+            if (gone.alias) {
+                // Only reachable if tag=latest was hand-written in properties; call out the alias explicitly
+                // instead of telling the user to look for a literal "latest" tag.
+                return "updater: the channel has no published release yet, boot continues";
+            }
+            // Include the missing tag name so the maintainer knows what needs to be published.
+            return "updater: no release named " + gone.tag + " on the channel, boot continues";
+        }
+        if (SyncCore.networkFault(e)) {
             return "updater: repository unreachable, boot continues";
         }
         return "updater: sync aborted, boot continues";
-    }
-
-    /** True when the network stack is what threw. The CAUSE CHAIN, not the top type: HttpClient reports a
-     *  refused connect as an IOException wrapping a java.net one, and a bare `instanceof IOException` would
-     *  read a full disk mid-write as an unreachable repository, which is the opposite of actionable. The
-     *  bounded walk is not decoration, a cause chain CAN cycle and this runs on the boot path. */
-    private static boolean networkFault(Throwable t) {
-        Throwable c = t;
-        for (int depth = 0; c != null && depth < 8; depth++) {
-            String pkg = c.getClass().getPackageName();
-            if ((pkg.equals("java.net") || pkg.equals("java.net.http") || pkg.equals("javax.net.ssl"))
-                    && !badUrlString(c)) {
-                return true;
-            }
-            c = c.getCause();
-        }
-        return false;
-    }
-
-    /** The two java.net members that mean a bad STRING and not a dead carrier. A player hand-editing
-     *  `repo=SixxHands/bamfos pack` reaches URI.create in the fetcher, which throws IllegalArgumentException
-     *  caused by URISyntaxException, and by package alone that reads as "repository unreachable" and sends him
-     *  hunting a network problem he does not have while his config file is the bug. */
-    private static boolean badUrlString(Throwable c) {
-        return c instanceof java.net.URISyntaxException || c instanceof java.net.MalformedURLException;
     }
 
     /** Records whether this boot changed anything (quarantine or pack version). If nothing changed and

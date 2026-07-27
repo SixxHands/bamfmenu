@@ -44,15 +44,35 @@ public final class GithubReleases implements Reconciler.Fetcher {
         return override != null && !override.isBlank() ? override : "https://api.github.com";
     }
 
+    // Tag 404s immediately instead of retrying, since only publishing the release fixes a missing tag.
+    public static final class ReleaseMissing extends HttpFetcher.HttpStatusError {
+        public final String repo;
+        public final String tag;
+        public final boolean alias;
+
+        public ReleaseMissing(String repo, String tag, String url) {
+            super(404, url);
+            this.repo = repo;
+            this.tag = tag;
+            this.alias = "latest".equals(tag);
+        }
+    }
+
     /** The release JSON for a tag ("latest" = the /releases/latest endpoint, server door only). */
     public Map<?, ?> release(String tag) throws IOException, InterruptedException {
         String url = baseUrl + "/repos/" + repo + "/releases/"
                 + ("latest".equals(tag) ? "latest" : "tags/" + tag);
-        // getBody, NEVER readAllBytes off the stream: HttpRequest.timeout stops covering the exchange once
-        // the headers land, so a host that answers and then stalls parks this read with no deadline at all,
-        // and on the client it parks inside FML discovery
-        Object parsed = MiniJson.parse(new String(
-                http.getBody(url, token, "application/vnd.github+json"), StandardCharsets.UTF_8));
+        byte[] json;
+        try {
+            // use getBody instead of readAllBytes: HttpRequest.timeout only covers response headers, so a server
+            // that stalls mid-body would hang forever (blocking FML discovery on the client)
+            json = http.getBody(url, token, "application/vnd.github+json");
+        } catch (HttpFetcher.HttpStatusError status) {
+            // Throw ReleaseMissing here while we still know the requested tag, and only for the target tag
+            // (a 404 on a backref release is a broken entry source, not a missing release channel).
+            throw status.code == 404 && tag.equals(this.tag) ? new ReleaseMissing(repo, tag, url) : status;
+        }
+        Object parsed = MiniJson.parse(new String(json, StandardCharsets.UTF_8));
         if (!(parsed instanceof Map<?, ?> m)) {
             throw new IOException("release response is not an object");
         }

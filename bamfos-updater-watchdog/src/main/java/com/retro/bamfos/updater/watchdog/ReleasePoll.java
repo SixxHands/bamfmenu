@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.watchdog;
 
+import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 
@@ -21,6 +22,7 @@ final class ReleasePoll {
             .followRedirects(HttpClient.Redirect.NEVER)
             .connectTimeout(Duration.ofSeconds(15))
             .build();
+    final String apiBase;
     private final String repo;
     private final String token;
     private String etag;
@@ -28,8 +30,22 @@ final class ReleasePoll {
     boolean tokenDead;
     int deadCode; // actual HTTP status from GitHub so the warning logs the code we received
     boolean rateLimited;
+    /** True when /releases/latest returned 404 (no published release), kept separate from empty Optional
+     *  so operators don't mistake an unpublished channel for being offline. */
+    boolean noRelease;
 
     ReleasePoll(String repo, String token) {
+        this(GithubReleases.realApi(), repo, token);
+    }
+
+    /** The same test/integration seam the fetcher has, on purpose through the SAME resolver: realApi
+     *  honors BAMFOS_API_BASE only when the env var is set, so a shipped run is byte-identical, and a
+     *  local fixture can play github for the in-session poll instead of that path only ever being
+     *  provable against the real thing. Reused rather than re-read here, because two copies of one env-var
+     *  contract drift, and then the door and the watchdog stop agreeing on what "latest" is, which is
+     *  the exact thrash the class header warns about. */
+    ReleasePoll(String apiBase, String repo, String token) {
+        this.apiBase = apiBase;
         this.repo = repo;
         this.token = token;
     }
@@ -44,7 +60,7 @@ final class ReleasePoll {
     Optional<String> latestTag() {
         try {
             HttpRequest.Builder rq = HttpRequest.newBuilder(URI.create(
-                            "https://api.github.com/repos/" + repo + "/releases/latest"))
+                            apiBase + "/repos/" + repo + "/releases/latest"))
                     .timeout(Duration.ofSeconds(30))
                     .header("Accept", "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28");
@@ -55,6 +71,9 @@ final class ReleasePoll {
             if (etag != null) {
                 rq.header("If-None-Match", etag);
             }
+            // cleared here rather than on each branch below, because a 404 followed by any other answer must not
+            // leave the operator reading "no published release" about a channel that has one now
+            noRelease = false;
             HttpResponse<InputStream> resp = client.send(rq.build(), HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream in = resp.body()) {
                 if (resp.statusCode() == 304) {
@@ -74,6 +93,12 @@ final class ReleasePoll {
                     rateLimited = resp.statusCode() == 403 && HttpFetcher.rateLimited(resp);
                     tokenDead = tokenDeadFrom(resp.statusCode(), auth, rateLimited);
                     deadCode = resp.statusCode();
+                    return Optional.empty();
+                }
+                if (resp.statusCode() == 404) {
+                    // /releases/latest 404s when only drafts/prereleases exist; flag it so operators don't see a network error.
+                    noRelease = true;
+                    rateLimited = false;
                     return Optional.empty();
                 }
                 if (resp.statusCode() != 200) {

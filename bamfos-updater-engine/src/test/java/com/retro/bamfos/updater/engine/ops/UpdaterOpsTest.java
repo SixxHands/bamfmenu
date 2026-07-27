@@ -335,6 +335,165 @@ class UpdaterOpsTest {
         }
     }
 
+    /**
+     * Server `/bamfos sync` targets the pin or literal "latest" (matching the pre-JVM door), never client-style
+     * ping resolution. Verified via the GitHub URL requested.
+     */
+    @Test
+    void serverSyncNow_asksForLatest_orForThePinWhenThereIsOne() throws IOException {
+        java.util.List<String> asked = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/", ex -> {
+            asked.add(ex.getRequestURI().getPath());
+            ex.sendResponseHeaders(404, -1); // no such release, whichever one was asked for
+            ex.close();
+        });
+        gh.start();
+        try {
+            String api = "http://127.0.0.1:" + gh.getAddress().getPort();
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+
+            assertEquals(1, new UpdaterOps(dir, api).serverSyncNow());
+            assertEquals("/repos/o/r/releases/latest", asked.get(0));
+
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties",
+                    "repo=o/r\ngithub_token=tok\ntag=v0.2.2\n".getBytes());
+            assertEquals(1, new UpdaterOps(dir, api).serverSyncNow());
+            assertEquals("/repos/o/r/releases/tags/v0.2.2", asked.get(1));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    /**
+     * Verifies `/bamfos sync` targets side=server and writes server-sync.log. Jars stay staged in the journal
+     * until next boot because FML keeps mods/ open.
+     */
+    @Test
+    void serverSyncNow_syncsTheServerSide_andStagesItForTheNextBoot() throws IOException {
+        byte[] jar = Fx.jar("srv");
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("path", "mods/serveronly.jar");
+        entry.put("sha256", com.retro.bamfos.updater.engine.util.HashUtils.sha256(jar));
+        entry.put("size", (long) jar.length);
+        entry.put("side", "server");
+        entry.put("policy", "managed");
+        entry.put("source", Map.of("type", "release-asset", "asset", "serveronly.jar"));
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("schema_version", 1L);
+        m.put("pack", new java.util.LinkedHashMap<>(Map.of("id", "bamfos", "version", "vS",
+                "mc", "1.21.1", "neoforge", "21.1.235", "updater_abi", 1L)));
+        m.put("requires_relaunch", false);
+        m.put("removed_modids", List.of());
+        m.put("files", List.of(entry));
+        byte[] manifest = com.retro.bamfos.updater.engine.json.JsonWriter.write(m)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/latest", ex -> body(ex,
+                ("{\"tag_name\":\"vS\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1},"
+                        + "{\"name\":\"serveronly.jar\",\"id\":2}]}")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        gh.createContext("/repos/o/r/releases/assets/", ex -> body(ex,
+                ex.getRequestURI().getPath().endsWith("/1") ? manifest : jar));
+        gh.start();
+        try {
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+            assertEquals(0, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
+
+            Path serverLog = dir.resolve(".bamfos-updater").resolve("server-sync.log");
+            assertTrue(Files.isRegularFile(serverLog));
+            String log = Files.readString(serverLog);
+            assertTrue(log.contains("server synced to vS"), String.valueOf(log));
+            assertTrue(log.contains("staged files apply on the next boot"), log);
+            assertFalse(Files.exists(dir.resolve("mods/serveronly.jar")));
+            assertTrue(Files.isRegularFile(
+                            com.retro.bamfos.updater.engine.journal.Journal.pathIn(dir)));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    /**
+     * `/bamfos sync` runs the mod's bundled engine rather than the promoted one, so it must NOT clear engine
+     * probation or EngineGuard won't roll back a broken promoted engine on next boot (ServerDoorTest covers
+     * real door clearance).
+     */
+    @Test
+    void serverSyncNow_leavesEngineProbationArmed_cuzTheWatchdogIsNotThePromotedEngine() throws IOException {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("schema_version", 1L);
+        m.put("pack", new java.util.LinkedHashMap<>(Map.of("id", "bamfos", "version", "vP",
+                "mc", "1.21.1", "neoforge", "21.1.235", "updater_abi", 1L)));
+        m.put("requires_relaunch", false);
+        m.put("removed_modids", List.of());
+        m.put("files", List.of()); // Nothing to move; the flag is cleared during parse, not apply.
+        byte[] manifest = com.retro.bamfos.updater.engine.json.JsonWriter.write(m)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/latest", ex -> body(ex,
+                "{\"tag_name\":\"vP\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1}]}"
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        gh.createContext("/repos/o/r/releases/assets/", ex -> body(ex, manifest));
+        gh.start();
+        try {
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+            Path probation = dir.resolve(".bamfos-updater").resolve("engine").resolve("engine-probation");
+            Files.createDirectories(probation.getParent());
+            Files.writeString(probation, "a promoted sha the shim wrote");
+
+            assertEquals(0, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
+            assertTrue(Files.isRegularFile(probation));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    private static void body(com.sun.net.httpserver.HttpExchange ex, byte[] b) throws IOException {
+        ex.sendResponseHeaders(200, b.length);
+        try (java.io.OutputStream out = ex.getResponseBody()) {
+            out.write(b);
+        }
+    }
+
+    /** Return code 1 ("no target") on a 404 tag instead of code 2 ("sync failed"), since the release isn't up. */
+    @Test
+    void aMissingReleaseIsNoTargetToSyncTo_notAFailedSync() throws IOException {
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/tags/v9.9", ex -> {
+            ex.sendResponseHeaders(404, -1);
+            ex.close();
+        });
+        gh.start();
+        try {
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+            assertEquals(1, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).syncTo("v9.9"));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    /**
+     * Lets an operator clear the dead-token marker after fixing the token instead of waiting for a manifest
+     * parse; returns 1 when no marker was present.
+     */
+    @Test
+    void clearTokenDead_retiresTheMarker_andReportsAnHonestNoOp() throws IOException {
+        assertEquals(1, ops().clearTokenDead());
+
+        Fx.write(dir, ".bamfos-updater/token-dead", "401".getBytes());
+        assertEquals(Boolean.TRUE, ops().status().get("token_dead"));
+        assertEquals(0, ops().clearTokenDead());
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve("token-dead")));
+        assertEquals(Boolean.FALSE, ops().status().get("token_dead"));
+        assertEquals(1, ops().clearTokenDead());
+    }
+
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> rows(Map<String, Object> listReleases) {
         return (List<Map<String, Object>>) listReleases.get("releases");

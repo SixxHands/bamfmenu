@@ -1,8 +1,12 @@
 package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
+import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
+import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
+import com.retro.bamfos.updater.engine.ping.PortHold;
+import com.retro.bamfos.updater.engine.ping.UpdatingNotice;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 
 import java.nio.file.Path;
@@ -21,16 +25,37 @@ public final class ServerDoor {
         this.apiBase = apiBase;
     }
 
+    /** Runs the server sync while owning the server port. Acquires PortHold before loading config and
+     *  releases it in finally so the port is free before the wrapper launches the server JVM. */
     public int run(Path dir, String tagOverride, boolean repair) {
+        PortHold hold = PortHold.open(dir, UpdatingNotice.target(UpdatingNotice.lastTarget(dir),
+                ClientDoor.localVersion(dir).orElse("")));
+        try {
+            return sync(dir, tagOverride, repair);
+        } finally {
+            String trouble = hold.release();
+            if (!trouble.isEmpty()) {
+                SyncCore.loud(dir, trouble);
+            }
+        }
+    }
+
+    private int sync(Path dir, String tagOverride, boolean repair) {
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             Optional<InstanceLock> lock = InstanceLock.acquire(dir);
             if (lock.isEmpty()) {
                 System.out.println("[updater] another sync is running, skipping");
-                return 0;
+                return EngineHealth.proven(dir, 0); // another instance is already running sync
             }
             try (InstanceLock ignored = lock.get()) {
                 SyncCore.stepZero(dir);
+                if (repair) {
+                    // --repair is the operator saying "re-derive this box", so it is also the way back from a
+                    // false-positive engine refusal: nothing else ever clears that memory, and a box pinned to
+                    // an older engine by one unlucky boot would otherwise wait for a new engine release
+                    EngineHealth.forgiveRejectedEngines(dir);
+                }
                 String tag = !tagOverride.isEmpty() ? tagOverride
                         : !cfg.tagPin().isEmpty() ? cfg.tagPin()
                         : "latest";
@@ -39,14 +64,42 @@ public final class ServerDoor {
         } catch (HttpFetcher.RateLimited limited) {
             // Catch RateLimited before TokenDead and never write the token-dead marker. Log loudly so
             // server-sync.log closes cleanly after "updating server X -> Y" instead of looking hung.
-            SyncCore.loud(dir, "github rate limited (" + limited.code
-                    + "), launching on the current version, the next cycle retries");
-            return 0;
+            String why = "github rate limited (" + limited.code
+                    + "), launching on the current version, the next cycle retries";
+            SyncCore.loud(dir, why);
+            // Write `limited` to last-sync.json so the watchdog doesn't echo the previous boot's "synced"
+            // summary into logs/latest.log on a cycle that skipped.
+            SyncCore.recordFailure(dir, "limited", why);
+            return EngineHealth.proven(dir, 0); // rate limit still means github responded, so the engine ran fine
         } catch (HttpFetcher.TokenDead dead) {
             SyncCore.tokenDead(dir, dead);
-            return 0;
+            return EngineHealth.proven(dir, 0); // A revoked credential is a token issue, not an engine failure.
+        } catch (GithubReleases.ReleaseMissing gone) {
+            // Log and record the missing tag (or explain the "latest" alias 404 when only drafts/prereleases
+            // exist) so both server-sync.log and the watchdog summary name what needs to be published.
+            String why = gone.alias
+                    ? "nothing to sync to, the " + gone.repo + " channel has no published release yet "
+                            + "(a draft and a prerelease both count as no release here), "
+                            + "launching on the current version"
+                    : "nothing to sync to, no release named \"" + gone.tag + "\" on " + gone.repo
+                            + " (or the token cannot see it), launching on the current version";
+            SyncCore.loud(dir, why);
+            SyncCore.recordFailure(dir, "no-release", why);
+            return EngineHealth.proven(dir, 0); // github responded, so mark the engine healthy
         } catch (Exception e) {
-            System.out.println("[updater] sync skipped: " + e); // the server must still boot
+            // Record offline vs failed in server-sync.log and last-sync.json so stale "ok" results aren't
+            // echoed after broken boots, while keeping transient network drops distinct from real failures.
+            boolean world = SyncCore.networkFault(e);
+            String why = world
+                    ? "github unreachable (" + e + "), launching on the current version, the next cycle retries"
+                    : "sync FAILED (" + e + "), launching on the current version, the next cycle retries";
+            SyncCore.loud(dir, why);
+            SyncCore.recordFailure(dir, world ? "offline" : "failed", why);
+            if (EngineHealth.attributable(e)) {
+                // server has no pre-sync ping, so offline boots land here; don't treat network errors as a broken
+                // engine or a router outage would trigger a rollback
+                EngineHealth.proven(dir);
+            }
             return 0;
         }
     }

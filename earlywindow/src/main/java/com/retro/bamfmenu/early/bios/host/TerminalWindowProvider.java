@@ -72,6 +72,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
+import java.util.function.IntUnaryOperator;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -229,8 +230,15 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private RichFont font;
     private SimpleBufferBuilder buffer;
     private TerminalCanvas canvas; // the GL text facade screens draw through (built in initRender)
+    /* Placeholders until the font bakes in initRender, which sets both from RichFont (lineSpacing(), and
+       stringWidth("0") for the pitch). NOT the terminal's real grid: gohufont@24 measures 28 and 13, and an
+       offline renderer that copied the 14 from HERE drew a release worth of approved screenshots on a grid
+       the game never uses, which hid a box that collided with the control bar on ultrawides. */
     private int lineSpacing = 28;
     private int charWidth = 14;
+    /* Held rather than passed as a method reference per call: SetupSizing asks for the header height a few
+       times per frame, and the early window draws frames for minutes. */
+    private final IntUnaryOperator headerBottom = this::headerBottomBodyY;
     /* Offscreen framebuffer we render into, then blit to the window flipping Y (FML's text shader maps
        screen-y=0 to the bottom of clip space, so direct-to-window rendering comes out upside down). */
     private int offscreenFbo;
@@ -1267,30 +1275,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         return (int) (bottomLogo * bodyW / bw);
     }
 
-    /* The logical canvas width for a header + option box + bottom legend of `rows` rows. Locked to LOGICAL_W
-       like every other screen, except at a wide/short window (maximized) where the shorter logical height
-       crowds the box into the legend: there we widen the canvas a little (-> a slightly smaller font) just
-       enough to restore a one-row gap. A window that already fits keeps the unified width, so the layout
-       stays locked.
-       ONE owner on purpose. drawSetup and the UPDATE AND REPAIR window both size off this, and the two
-       screens hand off to each other, so a second copy of the formula means walking into the window and
-       back visibly changes the font size the first time somebody tunes one of the fudge terms. */
+    /* The logical canvas width for a header + option box + bottom legend of `rows` rows. The rule itself
+       lives in SetupSizing, which is the ONE owner: drawSetup and the UPDATE AND REPAIR window both size off
+       this, and the two screens hand off to each other, so a second copy of the formula means walking into
+       the window and back visibly changes the font size the first time somebody tunes one of the terms. */
     private int setupBodyWidth(int rows) {
-        if (fbWidth <= 0 || fbHeight <= 0) {
-            return LOGICAL_W;
-        }
-        int defH = LOGICAL_W * fbHeight / fbWidth;
-        int boxBottom = headerBottomBodyY(LOGICAL_W) + (rows + 3) * lineSpacing;
-        if (boxBottom <= defH - 2 * lineSpacing) {
-            return LOGICAL_W;
-        }
-        double a = (double) fbHeight / fbWidth;
-        double c = (double) headerBottomBodyY(LOGICAL_W) / LOGICAL_W; // header fraction of body width
-        if (a <= c) {
-            return LOGICAL_W;
-        }
-        double wNeed = (rows + 5) * (double) lineSpacing / (a - c);
-        return (int) Math.max(LOGICAL_W, Math.ceil(wNeed));
+        return SetupSizing.bodyWidth(LOGICAL_W, fbWidth, fbHeight, rows, lineSpacing, headerBottom);
     }
 
     /* A full-width terminal rule drawn under the header (a real box-drawing horizontal; every bundled face
@@ -2077,6 +2067,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
 
         @Override
+        public int biosControlBarY(int logicalW) {
+            return SetupSizing.legendBodyY(logicalW, LOGICAL_W, fbWidth, fbHeight, lineSpacing);
+        }
+
+        @Override
         public boolean updaterSyncActive() {
             return updaterSyncActive;
         }
@@ -2456,7 +2451,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        Sized for ~16:9; very short windows may clip the lower rows. */
     private void drawSetup() {
         int logicalW = setupBodyWidth(SETUP_OPTIONS.length);
-        int logicalH = Math.max(1, logicalW * fbHeight / Math.max(1, fbWidth));
+        int logicalH = SetupSizing.bodyHeight(logicalW, fbWidth, fbHeight);
         int maxChars = Math.max(40, logicalW / charWidth - 1);
 
         canvas.beginFrameShader(logicalW, logicalH);
@@ -2485,8 +2480,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
            list uses ALL of it, so a long list fills the whole right column instead of only the top `rows`
            lines. The left option column still has only SETUP_OPTIONS.length entries; interior rows below
            them are blank on the left side. */
-        int legendY = logicalH - lineSpacing;
-        int capacity = Math.max(rows, (legendY - lineSpacing - boxTop) / lineSpacing - 1);
+        /* NOT logicalH - lineSpacing: drawControlBar owns the legend and draws it in the LOGICAL_W canvas, so
+           on a widened body that expression sits below the bar's real row and the interior helps itself to a
+           row that the bar is already using. */
+        int legendY = SetupSizing.legendBodyY(logicalW, LOGICAL_W, fbWidth, fbHeight, lineSpacing);
+        int capacity = SetupSizing.boxCapacity(rows, boxTop, legendY, lineSpacing);
         String hbarTop = "┌" + "─".repeat(leftInner) + "┬" + "─".repeat(rightInner) + "┐";
         String hbarBot = "└" + "─".repeat(leftInner) + "┴" + "─".repeat(rightInner) + "┘";
 

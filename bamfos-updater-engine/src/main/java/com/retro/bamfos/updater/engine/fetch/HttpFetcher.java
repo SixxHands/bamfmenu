@@ -46,14 +46,27 @@ public final class HttpFetcher {
         }
     }
 
-    /** A definite HTTP status failure, typed so download() can tell "this resume offset is bad"
-     *  (416 and friends) apart from a wire hiccup worth resuming from. */
-    public static final class HttpStatusError extends IOException {
+    /** Non-2xx HTTP response, allowing download() to distinguish bad resume offsets (e.g., 416) from
+     *  retryable wire drops. Non-final so ReleaseMissing extends it and EngineHealth treats it as external. */
+    public static class HttpStatusError extends IOException {
         public final int code;
 
         public HttpStatusError(int code, String url) {
             super("HTTP " + code + " from " + url);
             this.code = code;
+        }
+    }
+
+    /** Wraps all socket/transport failures (stalls, bad redirects, oversized bodies, and plain java.io
+     *  errors from java.net.http like EOFException or connection resets that have no java.net cause).
+     *  Lets EngineHealth and doors separate network drops from local disk or engine bugs. */
+    public static final class TransportFault extends IOException {
+        public TransportFault(String msg) {
+            super(msg);
+        }
+
+        public TransportFault(String msg, Throwable cause) {
+            super(msg, cause);
         }
     }
 
@@ -96,6 +109,10 @@ public final class HttpFetcher {
                 waited = true;
                 Thread.sleep(limited.retryAfterMs);
             } catch (IOException e) {
+                if (e instanceof HttpStatusError status && status.code == 404) {
+                    // Don't retry 404s, the file isn't there and waiting three seconds won't make it appear.
+                    throw status;
+                }
                 last = e;
                 if (attempt == 2) {
                     break; // don't waste 4s backing off right before rethrowing
@@ -177,12 +194,19 @@ public final class HttpFetcher {
             if (auth && bearer != null && !bearer.isEmpty()) {
                 rq.header("Authorization", "Bearer " + bearer);
             }
-            HttpResponse<InputStream> resp = client.send(rq.build(), HttpResponse.BodyHandlers.ofInputStream());
+            HttpResponse<InputStream> resp;
+            try {
+                resp = client.send(rq.build(), HttpResponse.BodyHandlers.ofInputStream());
+            } catch (IOException wire) {
+                // Only wrap the send call: URI.create throws on a malformed repo URL (handled by SyncCore.badUrlString),
+                // and HTTP responses below already map to specific exception types.
+                throw new TransportFault("the request died on the wire (" + wire + ")", wire);
+            }
             int code = resp.statusCode();
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                 resp.body().close();
                 current = resp.headers().firstValue("Location")
-                        .orElseThrow(() -> new IOException("redirect without Location"));
+                        .orElseThrow(() -> new TransportFault("redirect without Location"));
                 auth = false; // Never forward Authorization when redirecting off the API host.
                 continue;
             }
@@ -209,7 +233,7 @@ public final class HttpFetcher {
             }
             return resp;
         }
-        throw new IOException("too many redirects from " + url);
+        throw new TransportFault("too many redirects from " + url);
     }
 
     /** Streams a GET to dest via a .dl sibling and atomic move (caller verifies hash). Retries mid-body
@@ -298,16 +322,25 @@ public final class HttpFetcher {
             Future<?> copy = pump.submit(() -> {
                 byte[] chunk = new byte[64 * 1024];
                 long total = 0;
-                int n;
-                while ((n = in.read(chunk)) != -1) {
+                while (true) {
+                    int n;
+                    try {
+                        n = in.read(chunk);
+                    } catch (IOException wire) {
+                        // Wrap socket read errors as TransportFault, leaving out.write untyped so local disk errors
+                        // aren't misread as "github unreachable" and don't clear engine probation.
+                        throw new TransportFault("the body died mid-transfer (" + wire + ")", wire);
+                    }
+                    if (n == -1) {
+                        return null;
+                    }
                     total += n;
                     if (maxBytes >= 0 && total > maxBytes) {
-                        throw new IOException("response body is longer than the " + maxBytes + " byte cap");
+                        throw new TransportFault("response body is longer than the " + maxBytes + " byte cap");
                     }
                     out.write(chunk, 0, n);
                     lastProgress.set(System.nanoTime());
                 }
-                return null;
             });
             while (true) {
                 try {
@@ -317,7 +350,7 @@ public final class HttpFetcher {
                     if (System.nanoTime() - lastProgress.get() > stallMs * 1_000_000L) {
                         in.close(); // Closing the stream is the only way to unblock the read; cancel(true) won't.
                         copy.cancel(true);
-                        throw new IOException("the download stalled, no bytes for " + stallMs + "ms");
+                        throw new TransportFault("the download stalled, no bytes for " + stallMs + "ms");
                     }
                 } catch (ExecutionException failed) {
                     throw failed.getCause() instanceof IOException io ? io

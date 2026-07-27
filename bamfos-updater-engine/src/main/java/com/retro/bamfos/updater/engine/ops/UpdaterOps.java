@@ -5,6 +5,7 @@ import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.door.Doors;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
+import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
@@ -22,10 +23,13 @@ import java.util.Optional;
 
 /**
  * The BIOS-facing surface. The BIOS is a view, THIS is the single writer, menu code
- * never touches manifests, ledgers, or files, it calls here. By menu time jars are loaded and
- * locked, so every sync is STAGED: journal written, applies next boot, "changes staged" is always
- * the honest answer. Return codes over exceptions because callers sit across a reflective boundary:
- * 0 ok/staged, 1 no target to sync to, 2 failed, 3 another sync holds the lock, 4 token dead,
+ * never touches manifests, ledgers, or files, it calls here. The server's /bamfos op commands share
+ * it (serverSyncNow, clearTokenDead, status), because by then the jars are locked on BOTH sides. By menu
+ * time jars are loaded and locked, so every sync is STAGED: journal written, applies next boot,
+ * "changes staged" is always the honest answer. Return codes over exceptions because callers sit across a
+ * reflective boundary: 0 ok/staged, 1 no target to sync to (nothing resolved locally, or github 404s
+ * the target tag, because to a caller those are one thing: there is nothing to converge to), 2 failed,
+ * 3 another sync holds the lock, 4 token dead,
  * 5 github rate limited, try again later. 5 has its own code so the repair page cannot render a
  * throttle as "Sync failed. See the log.", because a limit clears itself inside the hour and is not a
  * failure. unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
@@ -53,7 +57,7 @@ public final class UpdaterOps {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             out.put("version", Doors.localVersion(dir).orElse(ledger.installedVersion));
             out.put("pinned", cfg.tagPin());
-            out.put("token_dead", Files.exists(dir.resolve(".bamfos-updater").resolve("token-dead")));
+            out.put("token_dead", Doors.tokenDead(dir));
             long disabled = ledger.files.values().stream().filter(e -> e.disabled && !e.quarantined).count();
             long quarantined = ledger.files.values().stream().filter(e -> e.quarantined).count();
             out.put("disabled_count", disabled);
@@ -78,7 +82,30 @@ public final class UpdaterOps {
             if (tag.isEmpty()) {
                 return 1;
             }
-            return stagedSync(cfg, tag, false);
+            return stagedSync(cfg, tag, false, false);
+        } catch (IOException e) {
+            return 2;
+        }
+    }
+
+    /**
+     * Server sync (/bamfos sync). Uses the pin if set, else "latest" (no ping), matching the pre-JVM
+     * server door so the next boot doesn't undo what this staged.
+     */
+    public int serverSyncNow() {
+        try {
+            UpdaterConfig cfg = UpdaterConfig.load(dir);
+            return stagedSync(cfg, cfg.tagPin().isEmpty() ? "latest" : cfg.tagPin(), false, true);
+        } catch (IOException e) {
+            return 2;
+        }
+    }
+
+    /** Clears the persistent token-dead marker after the credential is fixed. Returns 0 if removed, 1 if
+     *  no marker existed, or 2 if deleting it failed (matching unpin). */
+    public int clearTokenDead() {
+        try {
+            return Doors.clearTokenDead(dir) ? 0 : 1;
         } catch (IOException e) {
             return 2;
         }
@@ -88,7 +115,7 @@ public final class UpdaterOps {
     public int syncTo(String tag) {
         try {
             writePin(tag);
-            return stagedSync(UpdaterConfig.load(dir), tag, false);
+            return stagedSync(UpdaterConfig.load(dir), tag, false, false);
         } catch (IOException e) {
             return 2;
         }
@@ -194,7 +221,10 @@ public final class UpdaterOps {
             if (tag.isEmpty()) {
                 return 1;
             }
-            return stagedSync(cfg, tag, true);
+            // Clear rejected-engine strikes on repair so a false-positive probation failure doesn't pin this
+            // install to an older engine until a new build ships.
+            EngineHealth.forgiveRejectedEngines(dir);
+            return stagedSync(cfg, tag, true, false);
         } catch (IOException e) {
             return 2;
         }
@@ -292,7 +322,7 @@ public final class UpdaterOps {
         return "";
     }
 
-    private int stagedSync(UpdaterConfig cfg, String tag, boolean repair) {
+    private int stagedSync(UpdaterConfig cfg, String tag, boolean repair, boolean server) {
         Optional<InstanceLock> lock;
         try {
             lock = InstanceLock.acquire(dir);
@@ -308,7 +338,9 @@ public final class UpdaterOps {
         String end = "fail";
         try (InstanceLock ignored = lock.get()) {
             String from = Doors.localVersion(dir).orElse("");
-            int code = Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, bus);
+            int code = server
+                    ? Doors.stagedServerSync(dir, cfg, tag, from, repair, apiBase, bus)
+                    : Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, bus);
             end = "ok";
             return code;
         } catch (HttpFetcher.RateLimited limited) {
@@ -317,6 +349,12 @@ public final class UpdaterOps {
             return 5;
         } catch (HttpFetcher.TokenDead dead) {
             return 4;
+        } catch (GithubReleases.ReleaseMissing gone) {
+            // 1 is "no target to sync to" and that is exactly what a 404 on the target tag means, so folding
+            // it into 2 had the page answer "Sync failed. See the log." for the one state where the log says
+            // nothing is wrong with this box: the release is not there. Only the host can fix that, by
+            // publishing it, and a player told the sync failed goes hunting his own machine instead
+            return 1;
         } catch (Exception e) {
             return 2;
         } finally {

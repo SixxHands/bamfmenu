@@ -63,6 +63,21 @@ class UpdaterConfigTest {
         assertTrue(cfg.autoRestart());
     }
 
+    /** toString() must redact githubToken so debug logs pasted into chat cannot leak the shared embedded PAT. */
+    @Test
+    void toString_saysWhetherThereIsATokenAndNeverWhatItIs() throws IOException {
+        // Assemble the fake token at runtime so TokenLeakGateTest does not flag a PAT-shaped literal in source.
+        String secret = "ghp_" + "x".repeat(40);
+        write("github_token=" + secret + "\nrepo=o/r\ntag=v0.2.2\n");
+        String drawn = UpdaterConfig.load(dir).toString();
+        assertFalse(drawn.contains(secret), String.valueOf(drawn));
+        assertTrue(drawn.contains("githubToken=<set>"), drawn);
+        assertTrue(drawn.contains("o/r") && drawn.contains("v0.2.2"), String.valueOf(drawn));
+
+        write("repo=o/r\n");
+        assertTrue(UpdaterConfig.load(dir).toString().contains("githubToken=<none>"));
+    }
+
     /** The watchdog reads its keys from the same file via rawProps, so the fallback needs to keep them
      * or a bad line resets the poll interval without warning. */
     @Test

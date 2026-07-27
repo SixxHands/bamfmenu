@@ -136,6 +136,9 @@ public interface BiosContext {
     /** The logical canvas width SETUP itself would use for a box of `rows` options. */
     int biosBodyWidth(int rows); // one owner for the short-window widen rule, else the two screens pick different font sizes
 
+    /** Where the shared bottom control bar's row lands inside a `logicalW` canvas. */
+    int biosControlBarY(int logicalW); // the bar draws in its OWN canvas, so logicalH - lineSpacing is NOT it
+
     /** True while the updater engine is writing files, the boot lockout's own signal. */
     boolean updaterSyncActive(); // a BIOS page that touches files has to refuse for as long as this holds
 

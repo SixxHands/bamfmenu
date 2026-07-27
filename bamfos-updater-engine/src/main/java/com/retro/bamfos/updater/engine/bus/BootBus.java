@@ -104,13 +104,16 @@ public final class BootBus {
         }
     }
 
-    /** Sync over: ok | skip | limited | fail. The renderer unlocks DEL and reverts the footer on this, only
-     *  `fail` earns an abort why-line (the other three already said their piece), and anything but `ok` gets
-     *  a closing row so the POST block terminates instead of spinning for the rest of the boot.
-     *  The reader is UpdaterFeed.event's END arm, in the earlywindow module, and it matches these four
-     *  strings by literal. Named here on purpose: renaming a state on one side of a filesystem bus
-     *  compiles fine and just renders two rows contradicting each other, so this is the search term that
-     *  finds both halves. */
+    /** Sync over: ok | skip | limited | no-release | fail. The renderer unlocks DEL and reverts the footer on
+     *  this, only `fail` earns an abort why-line (the other four already said their piece), and anything but
+     *  `ok` gets a closing row so the POST block terminates instead of spinning for the rest of the boot.
+     *  `limited` and `no-release` exist for exactly that reason: both are the WORLD refusing, not this box
+     *  breaking, and either one reported as `fail` stacks "sync aborted" under a line that already said the
+     *  honest thing.
+     *  The reader is UpdaterFeed.event's END arm, in the earlywindow module, and it matches these strings
+     *  by literal. Named here on purpose: renaming a state on one side of a filesystem bus compiles fine
+     *  and just renders two rows contradicting each other, so this is the search term that finds both
+     *  halves. */
     public void end(String state) {
         emit("END", state);
     }

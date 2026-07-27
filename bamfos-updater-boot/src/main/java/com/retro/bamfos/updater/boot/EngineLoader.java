@@ -17,7 +17,8 @@ import java.util.function.Supplier;
  * ABI in UpdaterAbi. The guard. Parent is the PLATFORM classloader: the engine sees the JDK
  * and nothing else -- not the shim's classes, not FML, not any mod. A broken on-disk engine falls
  * back to the embedded baseline once, then loads that, and a staged engine.jar.new that
- * cannot be swapped in never costs the engine already on disk.
+ * cannot be swapped in never costs the engine already on disk. A promoted engine that LOADS and then does
+ * not WORK is a different failure that this path cannot see at all, so EngineGuard judges that one.
  */
 public final class EngineLoader {
 
@@ -34,6 +35,9 @@ public final class EngineLoader {
      * baseline re-extract before giving up -- the baseline then self-updates via the normal sync.
      */
     public static Engine ensureAndLoad(Path enginePath, Supplier<InputStream> baseline) throws IOException {
+        // FIRST, before anything else touches the slot: the last boot's engine gets judged on its own record,
+        // never on a promotion this boot is about to make (EngineGuard)
+        EngineGuard.rollbackUnproven(enginePath, baseline);
         promoteStaged(enginePath);
         if (!Files.isRegularFile(enginePath)) {
             extract(enginePath, baseline); // no engine at all IS fatal, there is nothing to fall back to
@@ -41,7 +45,12 @@ public final class EngineLoader {
         try {
             return load(enginePath);
         } catch (ReflectiveOperationException | IOException | LinkageError first) {
-            // corrupt on-disk engine: re-extract the baseline once and retry; a second failure is real
+            // corrupt on-disk engine: re-extract the baseline once and retry; a second failure is real.
+            // Strike the bytes BEFORE the re-extract, because extract disarms probation (the baseline is not on
+            // trial) and without a record of this the same asset gets re-downloaded, re-promoted and
+            // re-rejected on every single boot for the life of that release: a release naming an engine built
+            // for a newer Java throws LinkageError here every time
+            EngineGuard.strike(enginePath, EngineGuard.sha256(enginePath));
             extract(enginePath, baseline);
             try {
                 return load(enginePath);
@@ -65,9 +74,15 @@ public final class EngineLoader {
         if (!Files.isRegularFile(staged)) {
             return;
         }
+        String sha = EngineGuard.sha256(staged);
+        if (EngineGuard.rejectedBefore(enginePath, sha)) {
+            return; // these exact bytes already had their one probation and bricked the sync
+        }
         try {
             Files.createDirectories(enginePath.getParent());
+            EngineGuard.keepKnownGood(enginePath); // BEFORE the move: the displaced jar IS the rollback image
             Files.move(staged, enginePath, StandardCopyOption.REPLACE_EXISTING);
+            EngineGuard.arm(enginePath, sha); // and the new one runs ON PROBATION until it says otherwise
         } catch (IOException held) {
             System.out.println("[updater] staged engine could not be swapped in, "
                     + "running the one on disk: " + held);
@@ -96,7 +111,7 @@ public final class EngineLoader {
     }
 
     /** Atomic extract: temp file beside the target, then move -- a crash never leaves a half jar. */
-    private static void extract(Path target, Supplier<InputStream> baseline) throws IOException {
+    static void extract(Path target, Supplier<InputStream> baseline) throws IOException {
         Files.createDirectories(target.getParent());
         Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
         try (InputStream in = baseline.get()) {
@@ -106,6 +121,9 @@ public final class EngineLoader {
             Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
         }
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        // the baseline is the shim's own twin, so it is known good by shipping and never inherits the verdict
+        // that was hanging over the jar it just replaced
+        EngineGuard.disarm(target);
     }
 
     /** The shim jar's own embedded baseline (packed by the build, see build.gradle). */

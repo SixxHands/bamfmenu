@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine.fetch;
 
+import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +35,9 @@ class FixtureServerTest {
     private static final byte[] INNER = "config bytes".getBytes(StandardCharsets.UTF_8);
     private volatile boolean s3SawAuth;
     private volatile int briefLimitHits;
+    /** Counted, not timed: elapsed time cannot tell "asked once" from "asked three times fast". */
+    private final java.util.concurrent.atomic.AtomicInteger goneHits = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger brokenHits = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.CountDownLatch stallRelease = new java.util.concurrent.CountDownLatch(1);
 
     @BeforeEach
@@ -106,7 +110,17 @@ class FixtureServerTest {
             }
             out.close();
         });
-        server.createContext("/broken/", ex -> ex.sendResponseHeaders(500, -1));
+        // Missing release tag (404 shouldn't be retried).
+        server.createContext("/gone/repos/o/r/releases/tags/v2", ex -> {
+            goneHits.incrementAndGet();
+            ex.sendResponseHeaders(404, -1);
+        });
+        server.createContext("/broken/", ex -> {
+            brokenHits.incrementAndGet();
+            ex.sendResponseHeaders(500, -1);
+        });
+        // Accept-then-silent peer: java.net.http throws without a java.net cause, so send() must type it.
+        server.createContext("/hangup/", com.sun.net.httpserver.HttpExchange::close);
         // 200 response that sends a few bytes and stalls without closing (like a dropped connection),
         // which used to hang FML discovery or the server wrapper indefinitely.
         server.createContext("/stalledbody/", ex -> {
@@ -363,6 +377,68 @@ class FixtureServerTest {
                 return java.net.http.HttpClient.Version.HTTP_1_1;
             }
         };
+    }
+
+    /** A 404 for a missing release tag must throw ReleaseMissing immediately without retrying, while
+     * 500s still ride the retry ladder. */
+    @Test
+    void a404OnTagResolution_isTypedAndAskedOnce_while5xxStillRidesTheLadder() {
+        GithubReleases gh = new GithubReleases(base + "/gone", "o/r", "alive", "v2", tmp);
+        IOException e = assertThrows(IOException.class, () -> gh.release("v2"));
+        assertInstanceOf(GithubReleases.ReleaseMissing.class, e, "the doors name this state, so it needs a type");
+        assertEquals("v2", ((GithubReleases.ReleaseMissing) e).tag);
+        assertEquals("o/r", ((GithubReleases.ReleaseMissing) e).repo);
+        // Check request count instead of elapsed time so slow CI or a cold HttpClient doesn't cause flaky failures.
+        assertEquals(1, goneHits.get());
+
+        HttpFetcher f = new HttpFetcher();
+        assertThrows(IOException.class, () -> f.get(base + "/broken/x", "tok", "application/json"));
+        assertEquals(3, brokenHits.get());
+    }
+
+    /** A 404 on an incremental backref release must not throw ReleaseMissing (which logs "nothing to
+     * sync to" after the target release already resolved). */
+    @Test
+    void a404OnABackrefRelease_isNotTheTargetGoingMissing() {
+        GithubReleases gh = new GithubReleases(base, "o/r", "tok", "v2", tmp);
+        IOException e = assertThrows(IOException.class,
+                () -> gh.fetch(entry("mods/old.jar", "old.jar", "vDEAD", null), tmp.resolve("old.jar")));
+        assertInstanceOf(HttpFetcher.HttpStatusError.class, e, "still a status answer github gave us");
+        assertFalse(e instanceof GithubReleases.ReleaseMissing);
+        assertTrue(e.getMessage().contains("vDEAD"), String.valueOf(e.getMessage()));
+    }
+
+    /** Wrap bare java.io network errors from java.net.http as TransportFault so EngineHealth does not
+     * blame a flaky connection on the engine and roll it back. */
+    @Test
+    void aHostThatAnswersNothing_arrivesTypedAsTheWorldsFault() {
+        HttpFetcher f = new HttpFetcher();
+        IOException e = assertThrows(IOException.class,
+                () -> f.getBody(base + "/hangup/x", "tok", "application/json"));
+        assertInstanceOf(HttpFetcher.TransportFault.class, e,
+                "it came off the socket, so it is the world's fault by construction: " + e);
+        assertTrue(EngineHealth.attributable(e));
+    }
+
+    /** Wrap mid-transfer read failures as TransportFault, while leaving local out.write untyped so a
+     * full disk never reads as a network outage or clears probation. */
+    @Test
+    void aBodyThatDiesMidTransfer_isTypedAtTheSource() {
+        java.io.InputStream cut = new java.io.InputStream() {
+            int left = 8;
+
+            @Override
+            public int read() throws IOException {
+                if (left-- > 0) {
+                    return 'x';
+                }
+                throw new IOException("Connection reset by peer");
+            }
+        };
+        IOException e = assertThrows(IOException.class, () -> HttpFetcher.readAllBounded(cut, 4096, 4000));
+        assertInstanceOf(HttpFetcher.TransportFault.class, e, "a dead path, not our bookkeeping: " + e);
+        assertTrue(EngineHealth.attributable(e));
+        assertEquals("Connection reset by peer", e.getCause().getMessage());
     }
 
     @Test

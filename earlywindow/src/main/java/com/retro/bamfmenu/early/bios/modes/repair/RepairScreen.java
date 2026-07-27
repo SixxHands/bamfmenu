@@ -2,6 +2,7 @@ package com.retro.bamfmenu.early.bios.modes.repair;
 
 import com.retro.bamfmenu.early.bios.gfx.TerminalCanvas;
 import com.retro.bamfmenu.early.bios.host.Mode;
+import com.retro.bamfmenu.early.bios.host.SetupSizing;
 import com.retro.bamfmenu.early.bios.screen.BiosContext;
 import com.retro.bamfmenu.early.bios.screen.Screen;
 import com.retro.bamfmenu.early.core.asset.Art;
@@ -188,7 +189,7 @@ public final class RepairScreen implements Screen, RepairContext {
         // SETUP's own canvas width for a box this tall, asked rather than re-derived: the two screens hand
         // off to each other, so one owner for the widen rule is what keeps the font from jumping on the way
         int logicalW = ctx.biosBodyWidth(reservedRows);
-        int logicalH = Math.max(1, logicalW * c.fbHeight() / Math.max(1, c.fbWidth()));
+        int logicalH = SetupSizing.bodyHeight(logicalW, c.fbWidth(), c.fbHeight());
         int maxChars = Math.max(40, logicalW / c.charWidth() - 1);
         int lineSpacing = c.lineSpacing();
         int charWidth = c.charWidth();
@@ -200,8 +201,11 @@ public final class RepairScreen implements Screen, RepairContext {
         y += lineSpacing;
 
         int boxTop = y + lineSpacing;
-        int legendY = logicalH - lineSpacing;
-        int capacity = Math.max(reservedRows, (legendY - lineSpacing - boxTop) / lineSpacing - 1);
+        /* Asked, not assumed: this box GROWS to fill the space, and the control bar draws in its own locked
+           canvas, so on a widened body logicalH - lineSpacing sits BELOW the bar's real row and this box
+           earned itself an extra interior row that landed on top of the legend (5120x1440). */
+        int legendY = ctx.biosControlBarY(logicalW);
+        int capacity = SetupSizing.boxCapacity(reservedRows, boxTop, legendY, lineSpacing);
         RepairFrame frame = s.frame(maxChars, capacity, ctx.frame());
         c.text(TerminalCanvas.MARGIN, y, TerminalCanvas.clip(frame.title(), maxChars), c.cBright());
 

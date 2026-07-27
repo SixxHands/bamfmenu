@@ -19,6 +19,10 @@ public final class Slp {
 
     public static final int BUDGET_MS = 2500;
 
+    /** 1.21.1 version and protocol, shared with PortHold so updating notices don't show as INCOMPATIBLE. */
+    public static final int PROTOCOL = 767;
+    public static final String MC_VERSION = "1.21.1";
+
     public static String status(String host, int port) throws IOException {
         return status(host, port, InetAddress::getByName);
     }
@@ -36,7 +40,7 @@ public final class Slp {
 
             ByteArrayOutputStream hs = new ByteArrayOutputStream();
             writeVarInt(hs, 0);                       // packet id: handshake
-            writeVarInt(hs, 767);                     // protocol 1.21.1
+            writeVarInt(hs, PROTOCOL);
             byte[] hostB = host.getBytes(StandardCharsets.UTF_8);
             writeVarInt(hs, hostB.length);
             hs.write(hostB);

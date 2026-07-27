@@ -4,6 +4,7 @@ import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
+import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
@@ -31,10 +32,15 @@ import java.util.Optional;
  * The sync both doors share: step 0, resolve+reconcile+apply, and the self-divert for the two
  * files a running updater can never replace in place, the shim and the loaded engine. The engine's
  * .new is promoted by the shim before it loads it, and the shim's own .new is swapped by the wrapper
- * SERVER-side. There is NO client-side promoter for the shim: EngineLoader.promoteStaged is hardcoded
- * to the engine slot, so a client shim update stages mods/bamfos-updater-boot.jar.new and waits for a
- * manual replace. Say so plainly rather than let the next editor assume delivery works, because that .new
- * is inert to FML (it only picks up *.jar) and every sync re-stages it.
+ * SERVER-side. The client shim gets NO promoter, by decision: self-replacing the one
+ * thing that fetches updates is too volatile to be worth it, and the shim is deliberately near-static
+ * (its own build file says target churn ~never), so a client shim change rides a pack re-ship instead.
+ * EngineLoader.promoteStaged is hardcoded to the engine slot and stays that way. So the client stages
+ * mods/bamfos-updater-boot.jar.new ONCE and then leaves it alone: a later sync that finds the right bytes
+ * already sitting there fetches nothing and only re-prints the waiting line, because the alternative is
+ * re-downloading the same asset on every sync for the life of that box. A waiting client shim also never
+ * counts as `pending`, because pending is what makes the terminal promise REBOOT TO APPLY and no reboot
+ * applies this one. Either way that .new is inert to FML, it only picks up *.jar.
  * Doors differ ONLY in how they pick the tag and side.
  * Everything the boot display or the BIOS later needs is cached beside the ledger on the way
  * through: release notes, the manifest itself, the last-sync result.
@@ -116,19 +122,27 @@ final class SyncCore {
         return String.join(", ", shown) + (ops.size() > shown.size() ? ", ..." : "");
     }
 
+    /** Runs sync from a door; doors always run the promoted engine, so provesEngine=true below. */
     static int sync(Path dir, UpdaterConfig cfg, String tag, boolean repair, Reconciler.Side side,
                     String apiBase) throws Exception {
         String from = Ledger.load(Ledger.pathIn(dir)).installedVersion;
-        return sync(dir, cfg, tag, from, repair, false, side, apiBase, BootBus.headless());
+        return sync(dir, cfg, tag, from, repair, false, side, apiBase, BootBus.headless(), true);
     }
 
     static int sync(Path dir, UpdaterConfig cfg, String tag, String fromVersion, boolean repair,
-                    boolean staged, Reconciler.Side side, String apiBase, BootBus bus) throws Exception {
+                    boolean staged, Reconciler.Side side, String apiBase, BootBus bus,
+                    boolean provesEngine) throws Exception {
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
         GithubReleases gh = new GithubReleases(apiBase, cfg.repo(), cfg.githubToken(), tag, staging);
         String manifestJson = gh.manifestJson();
         Manifest manifest = ManifestParser.parse(manifestJson);
+        // Clear engine probation once the manifest parses cleanly (earlier would let an incompatible engine
+        // pass; later failures are local disk/lock issues). Only clear when provesEngine is true so
+        // /bamfos sync (running the watchdog's jar-in-jar copy) can't disarm rollback for a promoted engine.
+        if (provesEngine) {
+            EngineHealth.proven(dir);
+        }
         clearTokenDead(dir);
         bus.syncBegin(cfg.repo(), fromVersion.isEmpty() ? "?" : fromVersion, manifest.pack().version());
         bus.manifest(manifest.files().size());
@@ -170,20 +184,40 @@ final class SyncCore {
         rec.apply(plan, filtered, ledger, feed, bus::applying, staged);
 
         boolean pendingSelf = false;
+        List<String> refusedEngines = EngineHealth.rejectedEngines(dir);
         for (FileEntry e : self) {
             Path current = dir.resolve(e.path());
             boolean same = Files.isRegularFile(current) && HashUtils.sha256(current).equals(e.sha256());
-            if (!same) {
-                Path part = staging.resolve(e.sha256() + ".part");
-                bus.fileStart(fileName(e.path()));
-                gh.fetch(e, part);
-                if (!HashUtils.sha256(part).equals(e.sha256())) {
-                    throw new IOException(e.path() + " download failed hash verification");
-                }
-                Path stagedNew = dir.resolve(e.path() + ".new");
-                Files.createDirectories(stagedNew.getParent()); // EngineLoader usually creates this dir, but make sure it exists
-                Files.move(part, stagedNew, StandardCopyOption.REPLACE_EXISTING);
-                bus.fileDone(fileName(e.path()));
+            if (same) {
+                continue;
+            }
+            if (e.path().equals(ENGINE_PATH) && refusedEngines.contains(e.sha256())) {
+                // Skip staging an engine sha the shim already rejected, otherwise every boot re-downloads it and
+                // sets pendingSelf (promising a reboot that applies nothing).
+                engineRefused(e.sha256());
+                continue;
+            }
+            Path stagedNew = dir.resolve(e.path() + ".new");
+            // Nothing on the client auto-promotes the shim, so skip re-downloading if the existing .new already
+            // has the exact manifest bytes.
+            boolean clientShim = side == Reconciler.Side.CLIENT && e.path().equals(SHIM_CLIENT_PATH);
+            if (clientShim && Files.isRegularFile(stagedNew)
+                    && HashUtils.sha256(stagedNew).equals(e.sha256())) {
+                shimWaiting(e.path());
+                continue;
+            }
+            Path part = staging.resolve(e.sha256() + ".part");
+            bus.fileStart(fileName(e.path()));
+            gh.fetch(e, part);
+            if (!HashUtils.sha256(part).equals(e.sha256())) {
+                throw new IOException(e.path() + " download failed hash verification");
+            }
+            Files.createDirectories(stagedNew.getParent()); // EngineLoader usually creates this dir, but make sure it exists
+            Files.move(part, stagedNew, StandardCopyOption.REPLACE_EXISTING);
+            bus.fileDone(fileName(e.path()));
+            if (clientShim) {
+                shimWaiting(e.path()); // NOT pendingSelf: see the class header, no reboot applies this one
+            } else {
                 pendingSelf = true;
                 System.out.println("[updater] " + e.path() + ".new staged (swapped in before the next run)");
             }
@@ -216,8 +250,26 @@ final class SyncCore {
                         + (pending ? " (staged files apply on the next boot)" : "") + ", launching");
             }
         }
-        lastSync(dir, manifest.pack().version(), staged ? "staged" : "ok", summary);
+        // `pending` and not `ok` for a sync that did not converge: the summary two lines up already says
+        // ", some apply on next boot", but UpdaterState.lastSyncCell renders the RESULT WORD only, so the BIOS
+        // UPDATE AND REPAIR row read "ok, just now" on every boot of a box the engine itself knows is holding a
+        // row back (a player marking a managed jar read only yields AccessDeniedException forever)
+        lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary);
         return 0;
+    }
+
+    /** Logs one line whenever a sync stages a newer client shim, explaining how to apply it since the
+     *  client can't self-promote. Kept out of the boot bus since its event set is fixed. */
+    private static void shimWaiting(String path) {
+        System.out.println("[updater] " + path + ".new is staged and waiting, nothing on the client swaps it in: "
+                + "replace the jar by hand or take it with the next pack re-ship");
+    }
+
+    /** Logs why a manifest-listed engine was skipped after prior rejections, naming both ways out:
+     *  shipping a new engine build or running manual repair. */
+    private static void engineRefused(String sha) {
+        System.out.println("[updater] engine " + sha.substring(0, Math.min(12, sha.length()))
+                + " already failed probation, skipping download (publish a new engine or run BIOS repair to retry)");
     }
 
     /** The doors' way onto the loud channel. sync() already announced "updating server X -> Y" there before
@@ -227,6 +279,38 @@ final class SyncCore {
      *  hung updater is exactly the conclusion says this state must never produce. */
     static void loud(Path dir, String msg) {
         serverLog(dir, msg);
+    }
+
+    /** Writes a non-converged outcome (offline | failed | no-release) to last-sync.json so BIOS status
+     *  and watchdog startup logs don't keep showing a stale "ok" from an earlier boot.
+     *  Omits the tag since sync never reached a manifest. */
+    static void recordFailure(Path dir, String result, String summary) {
+        lastSync(dir, "", result, summary);
+    }
+
+    /** Returns true when a failure came from the network (TransportFault or java.net/ssl in the cause
+     *  chain) rather than local I/O like a full disk, so both doors distinguish `offline` from `failed`.
+     *  Bounds the cause-chain walk to protect the boot path against cyclic causes. */
+    static boolean networkFault(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 8; depth++) {
+            if (c instanceof HttpFetcher.TransportFault) {
+                return true;
+            }
+            String pkg = c.getClass().getPackageName();
+            if ((pkg.equals("java.net") || pkg.equals("java.net.http") || pkg.equals("javax.net.ssl"))
+                    && !badUrlString(c)) {
+                return true;
+            }
+            c = c.getCause();
+        }
+        return false;
+    }
+
+    /** Excludes URISyntaxException and MalformedURLException from networkFault so a typo in the repo
+     *  config reports a config error instead of "repository unreachable". */
+    private static boolean badUrlString(Throwable c) {
+        return c instanceof java.net.URISyntaxException || c instanceof java.net.MalformedURLException;
     }
 
     // Token death is a persistent state so it never looks like a temporary wifi blip.
@@ -291,7 +375,9 @@ final class SyncCore {
             root.put("summary", summary); // the human one-liner the watchdog echoes into logs/latest.log
             Files.writeString(dir.resolve(".bamfos-updater").resolve("last-sync.json"),
                     JsonWriter.write(root), StandardCharsets.UTF_8);
-        } catch (IOException ignored) {
+        } catch (IOException | RuntimeException ignored) {
+            // catch RuntimeException too since recordFailure runs inside a catch block and shouldn't escape
+            // and crash boot
         }
     }
 

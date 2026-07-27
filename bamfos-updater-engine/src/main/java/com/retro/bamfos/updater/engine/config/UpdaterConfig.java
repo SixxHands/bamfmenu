@@ -9,10 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 
-/**
- * bamfos-updater.properties: per-machine settings + the token. Never managed, never
- * committed; ships in seed zips. Absent file = all defaults (the updater still boots the game).
- */
+// Per-machine settings in bamfos-updater.properties (never managed or committed). Missing file just uses defaults.
 public record UpdaterConfig(
         String githubToken,
         String repo,
@@ -21,6 +18,15 @@ public record UpdaterConfig(
         List<String> pins,
         String tagPin,
         boolean autoRestart) {
+
+    /** Redacts the token so accidental logging of UpdaterConfig never leaks the shared PAT
+     *  into logs/latest.log. */
+    @Override
+    public String toString() {
+        return "UpdaterConfig[githubToken=" + (githubToken == null || githubToken.isEmpty() ? "<none>" : "<set>")
+                + ", repo=" + repo + ", serverHost=" + serverHost + ", serverPort=" + serverPort
+                + ", pins=" + pins + ", tagPin=" + tagPin + ", autoRestart=" + autoRestart + "]";
+    }
 
     /** Still declares IOException even though it doesn't throw anymore, because UpdaterOps catches it
      *  around every load call. */
@@ -34,13 +40,19 @@ public record UpdaterConfig(
             }
         }
         return new UpdaterConfig(
-                props.getProperty("github_token", ""),
+                token(props, instanceDir),
                 props.getProperty("repo", "SixxHands/bamfos-pack"),
                 props.getProperty("server_host", ""),
                 port(props.getProperty("server_port", "25565")),
                 List.copyOf(pins),
                 props.getProperty("tag", ""),
                 !"false".equalsIgnoreCase(props.getProperty("auto_restart", "true")));
+    }
+
+    // Properties file token overrides the shim's embedded token so operators can swap a dead token without waiting for a new shim jar.
+    private static String token(Properties props, Path instanceDir) {
+        String fromFile = props.getProperty("github_token", "").trim();
+        return fromFile.isEmpty() ? EmbeddedToken.read(instanceDir) : fromFile;
     }
 
     /** Parses every valid line even if the file has bad encoding or malformed unicode escapes.

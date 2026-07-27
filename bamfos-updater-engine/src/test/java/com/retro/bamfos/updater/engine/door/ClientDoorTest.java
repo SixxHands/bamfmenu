@@ -2,9 +2,12 @@ package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.EngineEntry;
 import com.retro.bamfos.updater.engine.Fx;
+import com.retro.bamfos.updater.engine.fetch.GithubReleases;
+import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
+import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.util.HashUtils;
@@ -43,6 +46,14 @@ class ClientDoorTest {
     private ServerSocket slp;
     private int slpPort;
     private volatile String statusJson;
+    /** Asset 5 is the shim. Count requests to prove we skipped the fetch, since the bytes on disk look
+     * the same either way. */
+    private final java.util.concurrent.atomic.AtomicInteger shimFetches = new java.util.concurrent.atomic.AtomicInteger();
+    /** Same idea for a missing tag: one 404 vs three retries saves ~3.4s per boot. */
+    private final java.util.concurrent.atomic.AtomicInteger goneHits = new java.util.concurrent.atomic.AtomicInteger();
+    /** Asset 6 is the engine. Count requests to make sure a rejected engine isn't re-downloaded into an
+     * unused .new file. */
+    private final java.util.concurrent.atomic.AtomicInteger engineFetches = new java.util.concurrent.atomic.AtomicInteger();
 
     private static final byte[] CM = Fx.jar("cm");
     private static final byte[] SRV = Fx.jar("srv");
@@ -98,7 +109,14 @@ class ClientDoorTest {
             ex.sendResponseHeaders(302, -1);
         });
         http.createContext("/s3/", ex -> {
-            byte[] body = switch (ex.getRequestURI().getPath().substring(4)) {
+            String asset = ex.getRequestURI().getPath().substring(4);
+            if (asset.equals("5")) {
+                shimFetches.incrementAndGet();
+            }
+            if (asset.equals("6")) {
+                engineFetches.incrementAndGet();
+            }
+            byte[] body = switch (asset) {
                 case "1" -> manifest;
                 case "2" -> BCC_NEW;
                 case "3" -> CM;
@@ -112,6 +130,14 @@ class ClientDoorTest {
                 out.write(body);
             }
         });
+        // Channel with no release for the broadcast tag; counted so we verify the 404 is not retried.
+        http.createContext("/gone/repos/", ex -> {
+            goneHits.incrementAndGet();
+            ex.sendResponseHeaders(404, -1);
+        });
+        // Valid release with no manifest.json attached (bad release metadata, not a network error).
+        http.createContext("/nomanifest/repos/", ex -> json(ex,
+                "{\"tag_name\":\"vNEW\",\"assets\":[{\"name\":\"cm.jar\",\"id\":3}]}"));
         // Simulated GitHub rate limit: 403 response with rate-limit headers.
         http.createContext("/limited/repos/o/r/releases/tags/vNEW", ex -> {
             ex.getResponseHeaders().add("x-ratelimit-remaining", "0");
@@ -206,6 +232,7 @@ class ClientDoorTest {
         // "updated vOLD -> vNEW" to last-sync.json even though installed_version stayed at vOLD.
         assertTrue(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
                         .contains("some apply on next boot"));
+        assertEquals("pending", lastSync().get("result"));
         assertArrayEquals(theirBuild, Files.readAllBytes(dir.resolve("mods/cm.jar")));
         assertEquals("vOLD", Ledger.load(Ledger.pathIn(dir)).installedVersion);
         assertFalse(Files.exists(dir.resolve(".bamfos-updater/journal.json")));
@@ -222,6 +249,7 @@ class ClientDoorTest {
                         .contains("last sync left rows unapplied"));
         assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
                         .contains("some apply on next boot"));
+        assertEquals("ok", lastSync().get("result"));
     }
 
     /** Log the failing path for both stuck and abandoned ops so unrecoverable targets can be diagnosed
@@ -337,6 +365,37 @@ class ClientDoorTest {
         assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
     }
 
+    /** The client shim does not self-promote, so a second sync must skip re-downloading identical shim .new
+     * bytes and must not set pendingSelf (which prints REBOOT TO APPLY). */
+    @Test
+    void aWaitingClientShim_isNotReFetched_andNeverPromisesAReboot() throws IOException {
+        bcc("vOLD");
+        Files.createDirectories(dir.resolve("mods"));
+        Files.writeString(dir.resolve(SyncCore.SHIM_CLIENT_PATH), "old shim on disk");
+        // the engine already current, so ONLY the shim is stale: an engine .new keeps pendingSelf true on its
+        // own and it earns that, the shim promotes it before the next load
+        Fx.write(dir, SyncCore.ENGINE_PATH, ENGINE_NEW);
+
+        String first = captureOut(() -> assertEquals(0, new ClientDoor(base).run(dir)));
+
+        assertArrayEquals(SHIM_NEW, Files.readAllBytes(dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new")));
+        assertEquals(1, shimFetches.get());
+        assertTrue(first.contains("nothing on the client swaps it in"), String.valueOf(first));
+        assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
+                        .contains("some apply on next boot"));
+
+        // Missing managed mod forces a full sync even when the version matches.
+        // Regression test: this case used to re-download the shim unnecessarily.
+        Files.delete(dir.resolve("mods/cm.jar"));
+        String second = captureOut(() -> assertEquals(0, new ClientDoor(base).run(dir)));
+
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertEquals(1, shimFetches.get());
+        assertArrayEquals(SHIM_NEW, Files.readAllBytes(dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new")));
+        assertEquals("old shim on disk", Files.readString(dir.resolve(SyncCore.SHIM_CLIENT_PATH)));
+        assertTrue(second.contains("nothing on the client swaps it in"), String.valueOf(second));
+    }
+
     /** The anti-loop guard escalates to the blue screen after no-op cycles. A boot with no carrier never
      * ran a sync, so it shouldn't count toward that limit and break the next retry. */
     @Test
@@ -396,6 +455,131 @@ class ClientDoorTest {
         // "sync aborted" right below the rate-limited line, which contradicts it.
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
         assertEquals("END\tlimited", bus.get(bus.size() - 1));
+        assertEquals("limited", lastSync().get("result"));
+    }
+
+    /**
+     * THE STATE THE OWNER'S PACK WAS IN when this landed: the server
+     * broadcasts a version the repo has no release for, so every real client resolves a tag github 404s. All
+     * three halves of that bug on one boot. The player used to read exactly one line, "updater: sync aborted,
+     * boot continues", which is abortLine's deliberately vague catch-all, so he could not tell this from real
+     * breakage and the only person who could fix it got no signal at all. The END state used to be the literal
+     * "fail" for a box where the ping worked, the token worked and the engine worked. And the 404 rode the
+     * transient-failure retry ladder, which is 3.4s of every boot spent on an answer no retry can change.
+     */
+    @Test
+    void aBroadcastTagWithNoRelease_isNamed_getsItsOwnEndState_andIsAskedOnce() throws IOException {
+        bcc("vOLD"); // the broadcast is vNEW, and this channel has no release for it
+        onProbation(); // Engine was also just promoted, since both conditions can happen on the same boot.
+        assertEquals(0, new ClientDoor(base + "/gone").run(dir));
+
+        assertFalse(Files.exists(probation()));
+
+        assertEquals(1, goneHits.get());
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("LOG\tupdater: no release named vNEW on the channel, boot continues"), String.valueOf(bus));
+        assertEquals("END\tno-release", bus.get(bus.size() - 1));
+        assertEquals("no-release", lastSync().get("result"));
+        assertFalse(Files.exists(dir.resolve("mods")));
+    }
+
+    /** Client offline and failure paths must overwrite last-sync.json; runs a success first to prove a
+     * stale "ok" record cannot outlive later failures. */
+    @Test
+    void aFailedClientSync_stopsTheBiosRowFromReportingTheLastGoodSync() throws IOException {
+        bcc("vOLD");
+        // Shim and engine already match so the setup run finishes cleanly with ok instead of staging.
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW);
+        Fx.write(dir, SyncCore.ENGINE_PATH, ENGINE_NEW);
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertEquals("ok", lastSync().get("result"));
+
+        bcc("vOLD"); // Bump the broadcast version so the next boot attempts a sync.
+        assertEquals(0, new ClientDoor(base + "/nomanifest").run(dir));
+
+        assertEquals("failed", lastSync().get("result"));
+        String summary = (String) lastSync().get("summary");
+        assertTrue(summary.contains("manifest.json"), String.valueOf(summary));
+        assertFalse(summary.contains("updated vOLD -> vNEW"), String.valueOf(summary));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertEquals("END\tfail", bus.get(bus.size() - 1));
+    }
+
+    /** A refused engine sha must not be re-downloaded or re-staged as engine.jar.new on later syncs, and
+     * must not trigger REBOOT TO APPLY. */
+    @Test
+    void aRefusedEngine_isNotReDownloaded_andNeverPromisesAReboot() throws IOException {
+        bcc("vOLD");
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW); // Shim is already current, so only the engine could be pending.
+        Fx.write(dir, SyncCore.ENGINE_PATH, "the engine that still works".getBytes(StandardCharsets.UTF_8));
+        // Matches what EngineGuard writes after the second strike (the rejected sha and timestamp).
+        Fx.write(dir, ".bamfos-updater/engine/engine-rejected",
+                (HashUtils.sha256(ENGINE_NEW) + "\t1700000000000" + System.lineSeparator())
+                        .getBytes(StandardCharsets.UTF_8));
+
+        String first = captureOut(() -> assertEquals(0, new ClientDoor(base).run(dir)));
+
+        assertEquals(0, engineFetches.get());
+        assertFalse(Files.exists(dir.resolve(SyncCore.ENGINE_PATH + ".new")));
+        assertTrue(first.contains("already failed probation"), String.valueOf(first));
+        assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
+                        .contains("some apply on next boot"));
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertFalse(bus.contains("PENDING"));
+
+        Files.delete(dir.resolve("mods/cm.jar")); // deleting a managed mod forces the full sync to run again
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertEquals(0, engineFetches.get());
+    }
+
+    /** Check that the file exists first so a missing log fails with a clear assertion instead of a
+     *  NoSuchFileException. */
+    private Map<?, ?> lastSync() throws IOException {
+        Path f = dir.resolve(".bamfos-updater").resolve("last-sync.json");
+        assertTrue(Files.isRegularFile(f));
+        return (Map<?, ?>) MiniJson.parse(Files.readString(f, StandardCharsets.UTF_8));
+    }
+
+    /** Both offline (no-carrier) and packages-current boots must clear engine probation so the shim does
+     * not roll back a working engine. */
+    @Test
+    void noCarrierAndPackagesCurrent_bothClearEngineProbation() throws IOException {
+        onProbation();
+        props("server_host=127.0.0.1\nserver_port=1\n"); // closed port: no broadcast to converge to
+        bcc("vOLD");
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertFalse(Files.exists(probation()));
+
+        onProbation();
+        props("server_host=127.0.0.1\nserver_port=" + slpPort + "\n");
+        bcc("vNEW"); // Matches the broadcast version, with the caches and ledger from a completed sync.
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8));
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.save(Ledger.pathIn(dir));
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertFalse(Files.exists(probation()));
+    }
+
+    /** ClientDoor must pass clearProbation=true into SyncCore (unlike /bamfos sync, which runs a separate
+     * jar-in-jar engine) so a normal sync clears probation. */
+    @Test
+    void aRealSyncClearsEngineProbation_cuzThisIsThePromotedEngineDoingIt() throws IOException {
+        onProbation();
+        bcc("vOLD"); // Behind the broadcast version, so this boot runs a full sync instead of short-circuiting.
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(CM, Files.readAllBytes(dir.resolve("mods/cm.jar")));
+        assertFalse(Files.exists(probation()));
+    }
+
+    private Path probation() {
+        return dir.resolve(".bamfos-updater").resolve("engine").resolve("engine-probation");
+    }
+
+    private void onProbation() throws IOException {
+        Files.createDirectories(probation().getParent());
+        Files.writeString(probation(), "a promoted sha the shim wrote");
     }
 
     @Test
@@ -525,6 +709,14 @@ class ClientDoorTest {
                 ClientDoor.abortLine(new java.net.UnknownHostException("api.github.com")));
         assertEquals("updater: repository unreachable, boot continues",
                 ClientDoor.abortLine(new IOException("wrapped", new java.net.ConnectException("refused"))));
+        assertEquals("updater: repository unreachable, boot continues",
+                ClientDoor.abortLine(new HttpFetcher.TransportFault("the download stalled, no bytes for 30000ms")));
+        assertEquals("updater: no release named v0.2.4 on the channel, boot continues",
+                ClientDoor.abortLine(new GithubReleases.ReleaseMissing("SixxHands/bamfos-pack", "v0.2.4",
+                        "https://api.github.com/repos/SixxHands/bamfos-pack/releases/tags/v0.2.4")));
+        assertEquals("updater: the channel has no published release yet, boot continues",
+                ClientDoor.abortLine(new GithubReleases.ReleaseMissing("SixxHands/bamfos-pack", "latest",
+                        "https://api.github.com/repos/SixxHands/bamfos-pack/releases/latest")));
         assertEquals("updater: sync aborted, boot continues",
                 ClientDoor.abortLine(new IOException("There is not enough space on the disk")));
         assertEquals("updater: sync aborted, boot continues",

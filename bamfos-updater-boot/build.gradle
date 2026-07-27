@@ -39,6 +39,9 @@ dependencies {
     // IModFileCandidateLocator lives inside FML's loader jar in 4.x; provided by NeoForge at runtime.
     compileOnly 'net.neoforged.fancymodloader:loader:4.0.42'
 
+    // Test-only: the shipped stub must never link the engine, but EmbeddedTokenJarTest verifies encode/decode end-to-end.
+    testImplementation project(':bamfos-updater-engine')
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -60,6 +63,56 @@ tasks.named('processResources') {
     dependsOn 'copyBaseline'
 }
 
+// Optional build-time GitHub token from env or gitignored bamfos-token.local (never tracked).
+// Builds cleanly with neither and falls back to .bamfos-updater/bamfos-updater.properties at runtime.
+def embeddedToken = providers.environmentVariable('BAMFOS_GITHUB_TOKEN')
+        .orElse(providers.fileContents(rootProject.layout.projectDirectory.file('bamfos-token.local')).asText)
+        .map { it.trim() }
+        .orElse('')
+
+def tokenDir = layout.buildDirectory.dir('generated-token')
+
+tasks.register('embedToken') {
+    // Pass the digest, never the raw token, because Gradle writes inputs.property values in plaintext into .gradle/executionHistory.
+    inputs.property('token', embeddedToken.map {
+        it.isEmpty() ? '' : java.security.MessageDigest.getInstance('SHA-256')
+                .digest(it.getBytes('ISO-8859-1')).encodeHex().toString()
+    })
+    outputs.dir(tokenDir)
+    def outDir = tokenDir
+    def value = embeddedToken
+    doLast {
+        File root = outDir.get().asFile
+        root.deleteDir()
+        root.mkdirs()
+        String token = value.get()
+        if (token.isEmpty()) {
+            // No token configured; skip embedding and don't leave an empty baseline/idx/ folder in the jar.
+            return
+        }
+        File shards = new File(root, 'baseline/idx')
+        shards.mkdirs()
+        // XOR mask -> base64 -> split into 3 shards (must stay in sync with EmbeddedToken.fromJar).
+        byte[] mask = '7c1f9a4d3e60b285'.getBytes('ISO-8859-1')
+        byte[] raw = token.getBytes('ISO-8859-1')
+        for (int i = 0; i < raw.length; i++) {
+            raw[i] = (byte) (raw[i] ^ mask[i % mask.length])
+        }
+        String b64 = raw.encodeBase64().toString()
+        int a = (int) (b64.length() / 3)
+        int b = (int) (2 * b64.length() / 3)
+        [b64.substring(0, a), b64.substring(a, b), b64.substring(b)].eachWithIndex { part, i ->
+            new File(shards, String.valueOf(i)).setText(part, 'ISO-8859-1')
+        }
+    }
+}
+
+sourceSets.main.resources.srcDir(tokenDir)
+
+tasks.named('processResources') {
+    dependsOn 'embedToken'
+}
+
 // Keep package README.md files out of the shipped jar.
 tasks.withType(ProcessResources).configureEach {
     exclude '**/*.md'
@@ -68,8 +121,16 @@ tasks.named('jar') {
     exclude '**/*.md'
 }
 
+// Pass the built jar path to EmbeddedTokenJarTest (never pass the token via systemProperty; the test reads env/file directly).
+def shimJar = tasks.named('jar').flatMap { it.archiveFile }
+
 tasks.named('test') {
     useJUnitPlatform()
+    dependsOn tasks.named('jar')
+    def jarFile = shimJar
+    doFirst {
+        systemProperty 'bamfos.test.shimJar', jarFile.get().asFile.absolutePath
+    }
 }
 
 tasks.named('jar') {

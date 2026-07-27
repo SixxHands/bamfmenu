@@ -43,6 +43,7 @@ class ServerDoorTest {
     private static final byte[] SHIM_NEW = "brand new shim".getBytes(StandardCharsets.UTF_8);
     private static final byte[] ENGINE_NEW = "brand new engine".getBytes(StandardCharsets.UTF_8);
     private byte[] zip;
+    private final java.util.concurrent.atomic.AtomicInteger goneHits = new java.util.concurrent.atomic.AtomicInteger();
 
     @BeforeEach
     void start() throws IOException {
@@ -57,10 +58,14 @@ class ServerDoorTest {
         byte[] manifestT = manifest("vT", entryZip(), entryJar("mods/m1.jar", "m1.jar", M1, "m1"), entryShim(), entryEngine());
         byte[] manifestT2 = manifest("vT2", entryZip(), entryJar("mods/m1.jar", "m1.jar", M1, "m1"),
                 entryJar("mods/m2.jar", "m2.jar", M2, "m2"), entryShim(), entryEngine());
+        // Incremental manifest where one entry references a deleted source release.
+        byte[] manifestT3 = manifest("vT3", entryBackref());
         server.createContext("/repos/o/r/releases/tags/vT", ex -> json(ex,
                 "{\"tag_name\":\"vT\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1},{\"name\":\"data.zip\",\"id\":2},{\"name\":\"m1.jar\",\"id\":3},{\"name\":\"shim.jar\",\"id\":4},{\"name\":\"engine.jar\",\"id\":7}]}"));
         server.createContext("/repos/o/r/releases/tags/vT2", ex -> json(ex,
                 "{\"tag_name\":\"vT2\",\"assets\":[{\"name\":\"manifest.json\",\"id\":5},{\"name\":\"data.zip\",\"id\":2},{\"name\":\"m1.jar\",\"id\":3},{\"name\":\"m2.jar\",\"id\":6},{\"name\":\"shim.jar\",\"id\":4},{\"name\":\"engine.jar\",\"id\":7}]}"));
+        server.createContext("/repos/o/r/releases/tags/vT3", ex -> json(ex,
+                "{\"tag_name\":\"vT3\",\"assets\":[{\"name\":\"manifest.json\",\"id\":8},{\"name\":\"old.jar\",\"id\":3}]}"));
         server.createContext("/repos/o/r/releases/assets/", ex -> {
             String id = ex.getRequestURI().getPath().substring("/repos/o/r/releases/assets/".length());
             ex.getResponseHeaders().add("Location", base + "/s3/" + id);
@@ -79,6 +84,8 @@ class ServerDoorTest {
                 case "5" -> manifestT2;
                 case "6" -> M2;
                 case "7" -> ENGINE_NEW;
+                case "8" -> manifestT3;
+                case "9" -> "{ this is not a manifest".getBytes(StandardCharsets.UTF_8);
                 default -> new byte[0];
             };
             ex.sendResponseHeaders(200, body.length);
@@ -87,6 +94,23 @@ class ServerDoorTest {
             }
         });
         server.createContext("/dead/repos/", ex -> ex.sendResponseHeaders(401, -1));
+        // Valid release missing manifest.json: this is a release/engine error (not a network outage) and must NOT
+        // clear engine probation.
+        server.createContext("/nomanifest/repos/", ex -> json(ex,
+                "{\"tag_name\":\"vT\",\"assets\":[{\"name\":\"data.zip\",\"id\":2}]}"));
+        // Release with an unreadable/newer manifest schema; not a network error.
+        server.createContext("/badmanifest/repos/o/r/releases/tags/vT", ex -> json(ex,
+                "{\"tag_name\":\"vT\",\"assets\":[{\"name\":\"manifest.json\",\"id\":9}]}"));
+        server.createContext("/badmanifest/repos/o/r/releases/assets/", ex -> {
+            String id = ex.getRequestURI().getPath().substring("/badmanifest/repos/o/r/releases/assets/".length());
+            ex.getResponseHeaders().add("Location", base + "/s3/" + id);
+            ex.sendResponseHeaders(302, -1);
+        });
+        // Tag with no GitHub release; counted to confirm a permanent 404 skips the retry ladder.
+        server.createContext("/gone/repos/", ex -> {
+            goneHits.incrementAndGet();
+            ex.sendResponseHeaders(404, -1);
+        });
         // Simulated GitHub rate limit: 403 with rate-limit headers (distinct from /dead/ auth failures).
         server.createContext("/limited/repos/", ex -> {
             ex.getResponseHeaders().add("x-ratelimit-remaining", "0");
@@ -189,6 +213,7 @@ class ServerDoorTest {
                 StandardCharsets.UTF_8);
         assertTrue(log.contains("github rate limited (403)"), String.valueOf(log));
         assertTrue(log.contains("launching"), String.valueOf(log));
+        assertEquals("limited", lastSync().get("result"));
     }
 
     @Test
@@ -214,6 +239,179 @@ class ServerDoorTest {
         assertTrue(Files.exists(dir.resolve("config/a.toml.bak-vT")));
     }
 
+    /** A valid manifest clears engine probation on the server door; an engine-side fault leaves it armed
+     * so the shim rolls back on the next boot. */
+    @Test
+    void aSyncThatReachedTheManifest_clearsEngineProbation() throws IOException {
+        onProbation();
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        assertFalse(Files.exists(probation()));
+    }
+
+    @Test
+    void aFaultTheEngineCanOnlyPinOnItself_leavesTheEngineOnProbation() throws IOException {
+        onProbation();
+        assertEquals(0, new ServerDoor(base + "/nomanifest").run(dir, "vT", false));
+        assertTrue(Files.isRegularFile(probation()));
+    }
+
+    /** External faults (offline, rate-limit, revoked token, active lock) must clear probation so a
+     * network blip never rolls back a healthy engine. */
+    @Test
+    void offline_throttled_tokenDead_andALockedInstance_allClearEngineProbation() throws IOException {
+        onProbation();
+        assertEquals(0, new ServerDoor("http://127.0.0.1:1").run(dir, "vT", false)); // closed port
+        assertFalse(Files.exists(probation()));
+
+        onProbation();
+        assertEquals(0, new ServerDoor(base + "/limited").run(dir, "vT", false));
+        assertFalse(Files.exists(probation()));
+
+        onProbation();
+        assertEquals(0, new ServerDoor(base + "/dead").run(dir, "vT", false));
+        assertFalse(Files.exists(probation()));
+
+        onProbation();
+        long other = ProcessHandle.allProcesses()
+                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive())
+                .findFirst().orElseThrow().pid();
+        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other));
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        assertFalse(Files.exists(probation()));
+    }
+
+    /** Server sync failures must log to server-sync.log and overwrite last-sync.json; runs a success
+     * first to prove a stale "ok" does not survive later failures. */
+    @Test
+    void aFailedSync_leavesADurableLine_andStopsReportingTheOldSuccess() throws IOException {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        assertEquals("ok", lastSync().get("result"));
+        int linesBefore = Files.readAllLines(serverLogPath(), StandardCharsets.UTF_8).size();
+
+        assertEquals(0, new ServerDoor(base + "/nomanifest").run(dir, "vT", false));
+
+        List<String> log = Files.readAllLines(serverLogPath(), StandardCharsets.UTF_8);
+        assertTrue(log.size() > linesBefore);
+        String line = log.get(log.size() - 1);
+        assertTrue(line.contains("sync FAILED"), line);
+        assertTrue(line.contains("manifest.json"), String.valueOf(line));
+        assertTrue(line.contains("launching"), String.valueOf(line));
+        String summary = (String) lastSync().get("summary");
+        assertEquals("failed", lastSync().get("result"));
+        assertTrue(summary.contains("sync FAILED"), summary);
+        assertFalse(summary.contains("updated ? -> vT"), String.valueOf(summary));
+    }
+
+    /** Unreachable network must record "offline" and note the upcoming retry rather than logging a hard
+     * failure. */
+    @Test
+    void offline_isRecordedAsOffline_neverAsAFailure() throws IOException {
+        assertEquals(0, new ServerDoor("http://127.0.0.1:1").run(dir, "vT", false)); // closed port
+        String line = lastLoudLine();
+        assertTrue(line.contains("github unreachable"), line);
+        assertTrue(line.contains("the next cycle retries"), String.valueOf(line));
+        assertFalse(line.contains("FAILED"), String.valueOf(line));
+        assertEquals("offline", lastSync().get("result"));
+    }
+
+    /** A missing-release 404 must log both tag and channel (since private-repo access errors also 404)
+     * and stop after one request without retrying. */
+    @Test
+    void aTagWithNoRelease_isNamedInTheDurableLog_andAskedExactlyOnce() throws IOException {
+        onProbation(); // Test both conditions together: an engine was just promoted and the channel has no matching tag.
+        assertEquals(0, new ServerDoor(base + "/gone").run(dir, "vT", false));
+        assertFalse(Files.exists(probation()));
+        assertEquals(1, goneHits.get());
+        String line = lastLoudLine();
+        assertTrue(line.contains("no release named \"vT\""), line);
+        assertTrue(line.contains("o/r"), String.valueOf(line));
+        assertEquals("no-release", lastSync().get("result"));
+        assertFalse(Files.exists(dir.resolve("mods")));
+    }
+
+    /** Clear probation only after ManifestParser.parse succeeds, so an older engine that cannot parse a
+     * newer schema rolls back instead of wedging on every boot. */
+    @Test
+    void aManifestThisEngineCannotREAD_leavesTheEngineOnProbation() throws IOException {
+        onProbation();
+        assertEquals(0, new ServerDoor(base + "/badmanifest").run(dir, "vT", false));
+        assertTrue(Files.isRegularFile(probation()));
+        assertEquals("failed", lastSync().get("result"));
+    }
+
+    /** GitHub 404s the "latest" alias when only prereleases exist; error text must reflect that rather
+     * than claiming a literal tag named "latest" is missing. */
+    @Test
+    void aChannelWithNoPublishedRelease_isNotReportedAsAMissingTagNamedLatest() throws IOException {
+        assertEquals(0, new ServerDoor(base + "/gone").run(dir, "", false));
+        String line = lastLoudLine();
+        assertTrue(line.contains("has no published release yet"), line);
+        assertFalse(line.contains("no release named"), String.valueOf(line));
+        assertTrue(line.contains("o/r"), String.valueOf(line));
+        assertEquals("no-release", lastSync().get("result"));
+    }
+
+    /** A 404 on an incremental backref source release must not log "nothing to sync to" or record
+     * "no-release" after the target release already resolved. */
+    @Test
+    void aDeadBackrefRelease_readsAsAFailedSync_neverAsAChannelWithNothingOnIt() throws IOException {
+        assertEquals(0, new ServerDoor(base).run(dir, "vT3", false));
+        List<String> log = Files.readAllLines(serverLogPath(), StandardCharsets.UTF_8);
+        String line = log.get(log.size() - 1);
+        assertTrue(line.contains("sync FAILED"), line);
+        assertTrue(line.contains("vDEAD"), String.valueOf(line));
+        assertFalse(line.contains("nothing to sync to"), String.valueOf(line));
+        assertTrue(log.stream().anyMatch(l -> l.contains("updating server ? -> vT3")), String.valueOf(log));
+        assertEquals("failed", lastSync().get("result"));
+    }
+
+    /** Explicit repair mode clears refused-engine strikes so operators can recover from transient false
+     * positives; genuinely broken bytes re-earn refusal in two boots. */
+    @Test
+    void repair_forgetsARefusedEngine_soThoseBytesGetAnotherChance() throws IOException {
+        Path engineDir = dir.resolve(".bamfos-updater").resolve("engine");
+        Files.createDirectories(engineDir);
+        Files.writeString(engineDir.resolve("engine-rejected"), "abc123\t1700000000000" + System.lineSeparator());
+        Files.writeString(engineDir.resolve("engine-strikes"), "def456\t1" + System.lineSeparator());
+
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", true));
+
+        assertFalse(Files.exists(engineDir.resolve("engine-rejected")));
+        assertFalse(Files.exists(engineDir.resolve("engine-strikes")));
+    }
+
+    private Path serverLogPath() {
+        return dir.resolve(".bamfos-updater").resolve("server-sync.log");
+    }
+
+    /** Reads the last line of the error log. Fails with an assertion if the file wasn't created instead
+     * of throwing a raw NoSuchFileException. */
+    private String lastLoudLine() throws IOException {
+        assertTrue(Files.isRegularFile(serverLogPath()));
+        List<String> lines = Files.readAllLines(serverLogPath(), StandardCharsets.UTF_8);
+        return lines.get(lines.size() - 1);
+    }
+
+    private Map<?, ?> lastSync() throws IOException {
+        Path f = dir.resolve(".bamfos-updater").resolve("last-sync.json");
+        assertTrue(Files.isRegularFile(f));
+        return (Map<?, ?>) MiniJson.parse(Files.readString(f, StandardCharsets.UTF_8));
+    }
+
+    private Path probation() {
+        return dir.resolve(".bamfos-updater").resolve("engine").resolve("engine-probation");
+    }
+
+    /** Creates the promotion marker file written by the shim. The engine only deletes it and never reads
+     * its contents, so placeholder bytes are fine. */
+    private void onProbation() throws IOException {
+        Files.createDirectories(probation().getParent());
+        Files.writeString(probation(), "a promoted sha the shim wrote");
+    }
+
     // Fixture builders that emit manifest JSON matching the real parser format.
 
     private Map<String, Object> entryZip() {
@@ -226,6 +424,12 @@ class ServerDoorTest {
                 Map.of("type", "release-asset", "asset", asset), null);
         e.put("modids", List.of(modid));
         return e;
+    }
+
+    /** Builds an entry pointing at a deleted release (missing asset failure, not an empty channel). */
+    private Map<String, Object> entryBackref() {
+        return entry("mods/old.jar", HashUtils.sha256(M1), M1.length, "server",
+                Map.of("type", "release-asset", "asset", "old.jar", "release", "vDEAD"), null);
     }
 
     private Map<String, Object> entryShim() {

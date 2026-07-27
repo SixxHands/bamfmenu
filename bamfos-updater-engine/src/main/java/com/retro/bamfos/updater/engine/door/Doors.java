@@ -7,6 +7,8 @@ import com.retro.bamfos.updater.engine.ping.ServersDat;
 import com.retro.bamfos.updater.engine.ping.Slp;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 
@@ -47,10 +49,34 @@ public final class Doors {
         }
     }
 
-    /** In-session sync: everything lands via staging + journal, applies next boot. */
+    /** In-session sync: stages all changes to apply on the next boot. Also clears engine probation since
+     *  the BIOS invokes the promoted engine jar via UpdaterBridge, so completing a sync proves it works. */
     public static int stagedClientSync(Path dir, UpdaterConfig cfg, String tag, String from,
                                        boolean repair, String apiBase, BootBus bus) throws Exception {
-        return SyncCore.sync(dir, cfg, tag, from, repair, true, Reconciler.Side.CLIENT, apiBase, bus);
+        return SyncCore.sync(dir, cfg, tag, from, repair, true, Reconciler.Side.CLIENT, apiBase, bus, true);
+    }
+
+    /** Stages an in-session server sync for /bamfos sync (applied on next wrapper boot since FML keeps
+     *  mods/ open). Passes provesEngine=false because this runs from the watchdog's jar-in-jar copy,
+     *  not the shim-promoted engine, so clearing probation here would disarm rollback on a broken engine. */
+    public static int stagedServerSync(Path dir, UpdaterConfig cfg, String tag, String from,
+                                       boolean repair, String apiBase, BootBus bus) throws Exception {
+        return SyncCore.sync(dir, cfg, tag, from, repair, true, Reconciler.Side.SERVER, apiBase, bus, false);
+    }
+
+    // Checks if the persistent token-dead marker exists (shared name between doors and ops).
+    public static boolean tokenDead(Path dir) {
+        return Files.exists(marker(dir));
+    }
+
+    /** Clears the token-dead marker after credentials are updated, returning true if one existed.
+     *  Without this, surfaces keep showing TOKEN DEAD until the next sync parses a manifest. */
+    public static boolean clearTokenDead(Path dir) throws IOException {
+        return Files.deleteIfExists(marker(dir));
+    }
+
+    private static Path marker(Path dir) {
+        return dir.resolve(".bamfos-updater").resolve(SyncCore.TOKEN_DEAD_MARKER);
     }
 
     private Doors() {

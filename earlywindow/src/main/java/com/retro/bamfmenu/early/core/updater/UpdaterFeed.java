@@ -142,7 +142,8 @@ public final class UpdaterFeed {
                 // the block has to TERMINATE, not just stop being fed. postBlock() rebuilds from sawSync
                 // every frame for the rest of the boot, so a spinner row left standing spins forever and a
                 // screen of "file ... ok" rows reads as a finished update, either one contradicting the
-                // honest skip line the engine printed underneath (BootBus.end: ok | skip | limited | fail)
+                // honest skip line the engine printed underneath
+                // (BootBus.end: ok | skip | limited | no-release | fail)
                 String state = f.length > 1 ? f[1] : "";
                 currentFile = "";
                 if (sawSync && !"ok".equals(state)) {
@@ -150,8 +151,8 @@ public final class UpdaterFeed {
                             ? "Update paused ........ RATE LIMITED"
                             : "Update stopped ....... FAILED";
                 }
-                // only a real "fail" earns the why-line. A rate-limited END already printed its own honest
-                // line, and stacking "sync aborted" under it renders two rows that contradict each other
+                // Match "fail" literally: `limited` and `no-release` print their own lines,
+                // and unknown future states should stay on the generic FAILED row without contradicting it.
                 if (sawSync && "fail".equals(state)) {
                     // Tell the user boot continues: updater failures never block game launch.
                     pendingLog.add("updater: sync aborted, boot continues");
