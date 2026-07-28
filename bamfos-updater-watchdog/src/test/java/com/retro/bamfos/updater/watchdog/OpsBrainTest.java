@@ -187,8 +187,13 @@ class OpsBrainTest {
         assertTrue(OpsBrain.stopReply(true, true).lines().get(0).contains("stays down"));
 
         // Without a wrapper there is no relaunch loop, so the halt succeeds regardless of the sentinel file.
+        String noLoop = OpsBrain.stopReply(false, false).lines().get(0);
         assertFalse(OpsBrain.stopReply(false, false).failed());
-        assertTrue(OpsBrain.stopReply(false, false).lines().get(0).contains("no wrapper loop"));
+        assertTrue(noLoop.contains("relaunches this server automatically"), noLoop);
+        // Panel hosts run the shim in panel mode without writing a marker, so don't claim
+        // the updater never ran.
+        assertFalse(noLoop.contains("Nothing ran the updater"), String.valueOf(noLoop));
+        assertTrue(noLoop.contains("panel"), String.valueOf(noLoop));
     }
 
     /**

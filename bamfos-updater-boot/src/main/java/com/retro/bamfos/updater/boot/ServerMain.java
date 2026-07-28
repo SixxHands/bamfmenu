@@ -3,13 +3,9 @@ package com.retro.bamfos.updater.boot;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-/**
- * The server door: java -jar bamfos-updater-boot.jar --server --dir . [--tag v] [--repair]
- * Runs before the server JVM, so nothing is locked and no locator is involved. rules the exit
- * code: it is ALWAYS 0, the wrapper does not branch on it and must always reach the launch line.
- * Do not invent a non-zero return here, teaching the wrapper to read one is how the updater becomes
- * the reason a server does not boot.
- */
+/* Server entry point: java -jar bamfos-updater-boot.jar --server --dir . [--tag v] [--repair] [--panel].
+ * Runs before the Minecraft JVM starts. Always exits 0 so a broken updater never blocks the server from
+ * booting. --panel skips writing the wrapper mark (for hosts like Pterodactyl that manage restarts). */
 public final class ServerMain {
 
     public static void main(String[] args) {
@@ -20,7 +16,13 @@ public final class ServerMain {
                     dir = Paths.get(args[i + 1]);
                 }
             }
-            markPreJvmRun(dir);
+            if (panelMode(args)) {
+                // log this so operators know auto-restart is off without guessing from silence
+                System.out.println("[updater] panel mode: something else owns restarts, so the watchdog will "
+                        + "announce an update and wait for you instead of stopping the server for it");
+            } else {
+                markPreJvmRun(dir);
+            }
             clearStaleStop(dir);
             Path engineJar = dir.resolve(".bamfos-updater").resolve("engine").resolve("bamfos-updater-engine.jar");
             EngineLoader.Engine engine = EngineLoader.ensureAndLoad(engineJar, EngineLoader.embeddedBaseline());
@@ -33,6 +35,16 @@ public final class ServerMain {
 
     /** Marker file name checked by the watchdog. Keep in sync with WatchdogState.wrapperRan. */
     static final String WRAPPER_MARK = "wrapper-run";
+
+    /** Accepts the flag anywhere in args so startup commands pasted in any order still work. */
+    static boolean panelMode(String[] args) {
+        for (String a : args) {
+            if (a.equals("--panel")) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // Writes a timestamp proving a wrapper ran before the JVM, so the watchdog knows a restart loop will bring the server back.
     static void markPreJvmRun(Path dir) {

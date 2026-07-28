@@ -184,9 +184,11 @@ final class OpsBrain {
         }
         return Reply.ok(wrapperPresent
                 ? "stopping. The wrapper loop reads .bamfos-updater/stop and exits instead of relaunching, "
-                        + "so the box stays down until you start it again."
-                : "stopping. Nothing ran the updater before this JVM, so there is no wrapper loop to relaunch "
-                        + "this box anyway and it stays down.");
+                        + "so the server stays down until you start it again."
+                // Don't say the updater didn't run: in panel mode the shim runs without leaving a wrapper mark.
+                // Either way, no wrapper loop here will relaunch the server.
+                : "stopping. Nothing here relaunches this server automatically, so it stays down until you "
+                        + "start it again (from your host's panel if you use one).");
     }
 
     /**

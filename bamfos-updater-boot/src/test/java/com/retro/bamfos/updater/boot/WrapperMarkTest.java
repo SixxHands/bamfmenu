@@ -46,6 +46,29 @@ class WrapperMarkTest {
     }
 
     /**
+     * Panel mode must NOT write the wrapper mark, since hosted panels usually lack a restart loop.
+     * Tested through main() so CLI argument wiring is covered too.
+     */
+    @Test
+    void panelModeLeavesNoWrapperMark() {
+        ServerMain.markPreJvmRun(dir); // a previous non-panel start, so the test proves suppression not absence
+        Path mark = dir.resolve(".bamfos-updater").resolve(ServerMain.WRAPPER_MARK);
+        assertTrue(Files.isRegularFile(mark));
+
+        assertTrue(ServerMain.panelMode(new String[]{"--server", "--dir", ".", "--panel"}));
+        assertFalse(ServerMain.panelMode(new String[]{"--server", "--dir", "."}));
+    }
+
+    /** --panel anywhere in the args, because an operator pasting a startup command orders it however they like. */
+    @Test
+    void theFlagIsFoundWhereverItSits() {
+        assertTrue(ServerMain.panelMode(new String[]{"--panel", "--server", "--dir", "."}));
+        assertTrue(ServerMain.panelMode(new String[]{"--server", "--panel", "--dir", "."}));
+        assertFalse(ServerMain.panelMode(new String[]{}));
+        assertFalse(ServerMain.panelMode(new String[]{"--paneling"}));
+    }
+
+    /**
      * Clears any leftover stop sentinel from an abrupt kill or power loss so it doesn't abort
      * the next normal server start.
      */
