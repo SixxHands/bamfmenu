@@ -145,7 +145,8 @@ public final class GithubReleases implements Reconciler.Fetcher {
         release(tag);
         pruneCaches();
         Path tmp = cacheDir.resolve("manifest-" + tag + ".json");
-        downloadAsset(tag, "manifest.json", tmp);
+        // skip the progress bar for the manifest since it's small and fetched before the download plan exists
+        downloadAsset(tag, "manifest.json", tmp, (asset, done, total) -> { });
         return java.nio.file.Files.readString(tmp, StandardCharsets.UTF_8);
     }
 
@@ -173,14 +174,25 @@ public final class GithubReleases implements Reconciler.Fetcher {
         }
     }
 
+    /** Callback for active transfer byte progress. Passes the wire asset name since release-zip entries
+     *  download the full archive on their first inner file, not just that small config file. */
+    @FunctionalInterface
+    public interface Progress {
+        void at(String asset, long done, long total);
+    }
+
     @Override
     public void fetch(FileEntry entry, Path dest) throws IOException {
+        fetch(entry, dest, (asset, done, total) -> { });
+    }
+
+    public void fetch(FileEntry entry, Path dest, Progress onBytes) throws IOException {
         try {
             FileEntry.Source s = entry.source();
             String from = s.release() != null ? s.release() : tag;
             switch (s.type()) {
-                case RELEASE_ASSET -> downloadAsset(from, s.asset(), dest);
-                case RELEASE_ZIP -> extractInner(from, s.asset(), s.inner(), dest);
+                case RELEASE_ASSET -> downloadAsset(from, s.asset(), dest, onBytes);
+                case RELEASE_ZIP -> extractInner(from, s.asset(), s.inner(), dest, onBytes);
                 case URL -> throw new IOException("url sources are unused by policy (SPEC 4.1)");
             }
         } catch (InterruptedException e) {
@@ -189,7 +201,8 @@ public final class GithubReleases implements Reconciler.Fetcher {
         }
     }
 
-    private void downloadAsset(String fromTag, String name, Path dest) throws IOException, InterruptedException {
+    private void downloadAsset(String fromTag, String name, Path dest, Progress onBytes)
+            throws IOException, InterruptedException {
         Map<String, Long> ids = assetIds.get(fromTag);
         if (ids == null) {
             release(fromTag);
@@ -204,7 +217,8 @@ public final class GithubReleases implements Reconciler.Fetcher {
         }
         // this endpoint redirects (302) to S3; HttpFetcher strips the auth header on redirect
         http.download(baseUrl + "/repos/" + repo + "/releases/assets/" + id,
-                token, "application/octet-stream", dest);
+                token, "application/octet-stream", dest,
+                (done, total) -> onBytes.at(name, done, total));
     }
 
     /** Normalizes a name to lowercase alphanumerics so matching survives filename sanitization. */
@@ -212,12 +226,15 @@ public final class GithubReleases implements Reconciler.Fetcher {
         return name.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
     }
 
-    private void extractInner(String fromTag, String zipAsset, String inner, Path dest) throws IOException, InterruptedException {
+    private void extractInner(String fromTag, String zipAsset, String inner, Path dest, Progress onBytes)
+            throws IOException, InterruptedException {
         String key = fromTag + "/" + zipAsset;
         Path zip = zipCache.get(key);
         if (zip == null) {
             zip = cacheDir.resolve("zip-" + fromTag + "-" + zipAsset);
-            downloadAsset(fromTag, zipAsset, zip);
+            // Only the first inner file triggers the zip download (later files hit zipCache instantly), so
+            // report byte progress here while the archive is on the wire.
+            downloadAsset(fromTag, zipAsset, zip, onBytes);
             zipCache.put(key, zip);
         }
         try (ZipInputStream zin = new ZipInputStream(java.nio.file.Files.newInputStream(zip))) {

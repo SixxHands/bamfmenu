@@ -81,6 +81,12 @@ public final class HttpFetcher {
 
     private final long stallMs;
 
+    /** Byte progress callback for an active download (`total` is -1 when Content-Length is absent). */
+    @FunctionalInterface
+    public interface Bytes {
+        void at(long done, long total);
+    }
+
     public HttpFetcher() {
         this(STALL_MS);
     }
@@ -239,6 +245,14 @@ public final class HttpFetcher {
     /** Streams a GET to dest via a .dl sibling and atomic move (caller verifies hash). Retries mid-body
      *  drops using HTTP Range (206 appends, 200 restarts from byte 0). */
     public void download(String url, String bearer, String accept, Path dest) throws IOException, InterruptedException {
+        download(url, bearer, accept, dest, (done, total) -> { });
+    }
+
+    /** Streams a GET to dest with ~250ms byte progress callbacks (`onBytes`) from the stall poll.
+     *  On 206 resumes, offsets both `done` and `total` by existing `have` bytes so progress bars stay
+     *  accurate; reports total -1 when Content-Length is absent. */
+    public void download(String url, String bearer, String accept, Path dest, Bytes onBytes)
+            throws IOException, InterruptedException {
         Files.createDirectories(dest.getParent());
         Path part = dest.resolveSibling(dest.getFileName() + ".dl");
         IOException last = null;
@@ -247,13 +261,16 @@ public final class HttpFetcher {
                 long have = Files.isRegularFile(part) ? Files.size(part) : 0;
                 HttpResponse<InputStream> resp = follow(url, bearer, accept, have);
                 boolean append = resp.statusCode() == 206 && have > 0;
+                long tail = resp.headers().firstValueAsLong("content-length").orElse(-1L);
+                long base = append ? have : 0;
+                long total = tail < 0 ? -1 : base + tail;
                 try (InputStream in = resp.body();
                      java.io.OutputStream out = Files.newOutputStream(part,
                              java.nio.file.StandardOpenOption.CREATE,
                              java.nio.file.StandardOpenOption.WRITE,
                              append ? java.nio.file.StandardOpenOption.APPEND
                                     : java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
-                    copyBounded(in, out, stallMs, -1);
+                    copyBounded(in, out, stallMs, -1, copied -> onBytes.at(base + copied, total));
                 }
                 Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
                 return;
@@ -294,7 +311,7 @@ public final class HttpFetcher {
      *  don't hang boot/watchdog polling and oversized responses can't OOM the process. */
     static byte[] readAllBounded(InputStream in, int maxBytes, long stallMs) throws IOException, InterruptedException {
         java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
-        copyBounded(in, buf, stallMs, maxBytes);
+        copyBounded(in, buf, stallMs, maxBytes, copied -> { });
         return buf.toByteArray();
     }
 
@@ -310,9 +327,14 @@ public final class HttpFetcher {
      * wedged socket read ignores interrupt. maxBytes < 0 means no size cap (a payload's size is the
      * manifest's business and the caller's hash check is what judges the bytes).
      */
-    private static void copyBounded(InputStream in, java.io.OutputStream out, long stallMs, long maxBytes)
+    private static void copyBounded(InputStream in, java.io.OutputStream out, long stallMs, long maxBytes,
+                                    java.util.function.LongConsumer onCopied)
             throws IOException, InterruptedException {
         AtomicLong lastProgress = new AtomicLong(System.nanoTime());
+        // read by the poll loop below, written by the pump: the count has to cross threads, so it cannot
+        // stay the plain local it was. The POLL is the throttle, reporting from inside the read loop
+        // would fire on every 64KB chunk, hundreds of times a second, for a bar 38 cells wide.
+        AtomicLong copied = new AtomicLong();
         ExecutorService pump = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "bamfos-updater-body");
             t.setDaemon(true);
@@ -339,6 +361,7 @@ public final class HttpFetcher {
                         throw new TransportFault("response body is longer than the " + maxBytes + " byte cap");
                     }
                     out.write(chunk, 0, n);
+                    copied.set(total); // Update progress after writing so the bar never counts unwritten bytes.
                     lastProgress.set(System.nanoTime());
                 }
             });
@@ -347,6 +370,7 @@ public final class HttpFetcher {
                     copy.get(250, TimeUnit.MILLISECONDS);
                     return;
                 } catch (TimeoutException stillGoing) {
+                    onCopied.accept(copied.get()); // ~4Hz, and only while the transfer is genuinely running
                     if (System.nanoTime() - lastProgress.get() > stallMs * 1_000_000L) {
                         in.close(); // Closing the stream is the only way to unblock the read; cancel(true) won't.
                         copy.cancel(true);

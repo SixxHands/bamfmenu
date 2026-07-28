@@ -16,11 +16,22 @@ import java.util.stream.Stream;
 // Tails .bamfos-updater/bus.log and turns updater events into the POST screen status lines (file-based so a missing or broken updater never breaks earlywindow).
 public final class UpdaterFeed {
 
-    /** One rendered row of the updater POST block; bright marks the pack's CAPS finale lines. */
-    public record Line(String text, boolean bright) {
+    /**
+     * One rendered row of the updater POST block; bright marks the pack's CAPS finale lines. `fill` is the
+     * download bar's green prefix length, 0 on every other row, and the renderer paints those chars a second
+     * time in green over the dim row.
+     */
+    public record Line(String text, boolean bright, int fill) {
+        /** Non-bar row (`fill = -1`, since `0` is a valid 0% bar that still draws a dim track). */
+        public Line(String text, boolean bright) {
+            this(text, bright, -1);
+        }
     }
 
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
+    /** Aligns the progress bar under the value column of "Fetching         : " (19 chars). */
+    private static final int BAR_INDENT = 19;
+    private static final int BAR_WIDTH = 38;
     /** Reused from the hardware block so the updater row matches Display Adapter while probing. */
     private static final String DETECTING = "Detecting ...";
     // Keep the status block at a fixed height and scroll new lines instead of pushing the layout down.
@@ -41,6 +52,8 @@ public final class UpdaterFeed {
     private int manifestEntries;
     private int planned; // File count from PLAN, used to format the final repair summary.
     private String currentFile = "";
+    private long progDone;   // Bytes transferred for the current file (0 when no bar should be drawn).
+    private long progTotal;  // expected byte length; 0 when unknown, which hides the progress bar
     private final List<String> doneFiles = new ArrayList<>();
     private boolean applying;
     private boolean ended;
@@ -139,9 +152,19 @@ public final class UpdaterFeed {
             case "NOTE" -> note = f.length > 1 ? f[1] : "";
             case "MANIFEST" -> manifestEntries = parseInt(f, 1);
             case "PLAN" -> planned = parseInt(f, 1);
-            case "FILE" -> currentFile = f.length > 1 ? f[1] : "";
+            case "FILE" -> {
+                currentFile = f.length > 1 ? f[1] : "";
+                progDone = 0;
+                progTotal = 0; // Reset progress until the first FPROG arrives for the new file.
+            }
+            case "FPROG" -> {
+                progDone = parseLong(f, 2);
+                progTotal = parseLong(f, 3);
+            }
             case "FDONE" -> {
                 currentFile = "";
+                progDone = 0;
+                progTotal = 0;
                 if (f.length > 1) {
                     doneFiles.add(f[1]);
                     while (doneFiles.size() > DONE_KEPT) {
@@ -258,6 +281,12 @@ public final class UpdaterFeed {
         if (!currentFile.isEmpty()) {
             char spin = SPINNER[(frame / 3) % SPINNER.length];
             out.add(new Line("Fetching         : " + currentFile + "  " + spin, false));
+            // Show the progress bar indented under the value column when total size is known;
+            // omit when unknown so we don't draw a fake bar.
+            ProgressBar.Row bar = ProgressBar.of(BAR_INDENT, BAR_WIDTH, progDone, progTotal);
+            if (bar != null) {
+                out.add(new Line(bar.text(), false, bar.fill()));
+            }
         }
         for (String f : doneFiles) {
             out.add(new Line("  " + dotted(f), false));
@@ -299,6 +328,15 @@ public final class UpdaterFeed {
     private static int parseInt(String[] f, int i) {
         try {
             return f.length > i ? Integer.parseInt(f[i]) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** Parse as long because multi-gigabyte releases overflow int and break the progress bar. */
+    private static long parseLong(String[] f, int i) {
+        try {
+            return f.length > i ? Long.parseLong(f[i]) : 0;
         } catch (NumberFormatException e) {
             return 0;
         }

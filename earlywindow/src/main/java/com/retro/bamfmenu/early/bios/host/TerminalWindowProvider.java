@@ -138,6 +138,8 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private static final int FG_BRIGHT = 0xFFFFFFFF; // active line / spinner
     private static final int FG_DIM = 0xFF6E6E6E; // header / older lines
     private static final int FG_GOLD = 0xFF00D7FF; // gold accent (ABGR) for the "OS" in the wordmark
+    /** The download bar's filled cells, over a cDim() track. ABGR, so green is the MIDDLE byte. */
+    private static final int FG_BAR = 0xFF00C853;
     private static final char[] SPINNER = { '|', '/', '-', '\\' };
     private static final int MAX_LOG = 256;
     private static final int MEM_FRAMES = 40; // ~2s memory-count animation at 20fps
@@ -1171,8 +1173,17 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 for (int i = 0; i < shown; i++) {
                     // newest rows win when the budget can't hold the block, same scroll rule as the feed's cap
                     var line = upd.get(upd.size() - shown + i);
-                    drawText(MARGIN, updTop + i * lineSpacing, clip(line.text(), maxChars),
-                            line.bright() ? cBright() : cFg());
+                    String txt = clip(line.text(), maxChars);
+                    int y = updTop + i * lineSpacing;
+                    boolean bar = line.fill() >= 0;
+                    // a bar's whole row is the unfilled TRACK, so it starts dim and green is added on top
+                    drawText(MARGIN, y, txt, bar ? cDim() : line.bright() ? cBright() : cFg());
+                    if (line.fill() > 0) {
+                        // The download bar's filled part, painted a SECOND time in green over the track it
+                        // already drew. Same string, same origin, monospace, so every green cell lands
+                        // exactly on the '#' beneath it and the two passes cannot drift apart.
+                        drawText(MARGIN, y, txt.substring(0, Math.min(line.fill(), txt.length())), FG_BAR);
+                    }
                 }
                 updRows = shown + 1;
             }

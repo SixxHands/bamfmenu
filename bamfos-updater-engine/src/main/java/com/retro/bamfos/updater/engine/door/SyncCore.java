@@ -2,6 +2,7 @@ package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
+import com.retro.bamfos.updater.engine.console.ConsoleBar;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
@@ -183,9 +184,17 @@ final class SyncCore {
                         + manifest.pack().version() + " before the server opens");
             }
         }
+        // Progress updates go to both the client boot bus and the server console bar through the same
+        // callback; each output throttles itself.
+        ConsoleBar consoleBar = serverSide ? ConsoleBar.forThisProcess() : ConsoleBar.silent();
+        GithubReleases.Progress onBytes = (asset, done, total) -> {
+            bus.fileProgress(asset, done, total);
+            consoleBar.at(asset, done, total);
+        };
         Reconciler.Fetcher feed = (e, dest) -> {
             bus.fileStart(fileName(e.path()));
-            gh.fetch(e, dest);
+            gh.fetch(e, dest, onBytes);
+            consoleBar.finish();
             bus.fileDone(fileName(e.path()));
         };
         rec.apply(plan, filtered, ledger, feed, bus::applying, staged);
@@ -222,7 +231,8 @@ final class SyncCore {
             }
             Path part = staging.resolve(e.sha256() + ".part");
             bus.fileStart(fileName(e.path()));
-            gh.fetch(e, part);
+            gh.fetch(e, part, onBytes);
+            consoleBar.finish();
             if (!HashUtils.sha256(part).equals(e.sha256())) {
                 throw new IOException(e.path() + " download failed hash verification");
             }

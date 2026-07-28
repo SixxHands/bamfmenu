@@ -42,6 +42,46 @@ class UpdaterFeedTest {
         return new UpdaterFeed(dir.toString());
     }
 
+    /**
+     * Cross-module wire format: BootBus writes literal "FPROG" and earlywindow matches it without
+     * a shared constant, so this pins the exact tab-separated line by hand.
+     */
+    @Test
+    void aProgressEventDrawsABarUnderTheFetchingRow() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "FILE\tcobblemon-1.6.1.jar",
+                "FPROG\tcobblemon-1.6.1.jar\t25165824\t50331648"); // 24 of 48 MB
+        List<UpdaterFeed.Line> rows = feed.postBlock(0);
+        int fetching = -1;
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i).text().startsWith("Fetching")) {
+                fetching = i;
+            }
+        }
+        assertTrue(fetching >= 0, String.valueOf(rows));
+        assertTrue(fetching + 1 < rows.size());
+        UpdaterFeed.Line bar = rows.get(fetching + 1);
+        assertTrue(bar.text().contains("[###"), bar.text());
+        assertTrue(bar.text().contains(" 50%"), bar.text());
+        assertTrue(bar.text().endsWith("24.0/48.0 MB"), bar.text());
+        assertTrue(bar.fill() > 0);
+    }
+
+    /** FDONE clears the progress bar so the next file doesn't show stale progress before its first byte. */
+    @Test
+    void theBarDoesNotSurviveTheFileItBelongsTo() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "FILE\tcobblemon-1.6.1.jar",
+                "FPROG\tcobblemon-1.6.1.jar\t25165824\t50331648",
+                "FDONE\tcobblemon-1.6.1.jar",
+                "FILE\tcreate-6.0.4.jar");
+        for (UpdaterFeed.Line l : feed.postBlock(0)) {
+            assertFalse(l.text().contains("[#"), String.valueOf(l.text()));
+        }
+    }
+
     private static String[] midSync(String endState) {
         return new String[]{
                 "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",

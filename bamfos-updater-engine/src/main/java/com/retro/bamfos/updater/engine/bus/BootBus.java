@@ -12,6 +12,7 @@ public final class BootBus {
     public static final String FILE_NAME = "bus.log";
 
     private final Path file; // null = stdout mirror only (server door, tests)
+    private int lastPct = -1; // Throttle for fileProgress, reset on fileDone so each file gets a fresh bar.
 
     private BootBus(Path file) {
         this.file = file;
@@ -91,7 +92,23 @@ public final class BootBus {
     }
 
     public void fileDone(String name) {
+        lastPct = -1; // reset progress state so the next file starts a fresh bar
         emit("FDONE", name);
+    }
+
+    /** Reports byte progress for the active transfer using the actual download length (not the manifest entry
+     *  size, since a release-zip entry downloads the entire archive on its first file). Throttled to one line
+     *  per whole percent to avoid flooding the bus file; backwards percentages (new file or retry) still emit. */
+    public void fileProgress(String name, long done, long total) {
+        if (total <= 0) {
+            return; // skip the progress bar if we don't have a Content-Length or manifest size
+        }
+        int pct = (int) Math.min(100, Math.max(0, done * 100 / total));
+        if (pct == lastPct) {
+            return;
+        }
+        lastPct = pct;
+        emit("FPROG", name, Long.toString(done), Long.toString(total));
     }
 
     public void applying() {
