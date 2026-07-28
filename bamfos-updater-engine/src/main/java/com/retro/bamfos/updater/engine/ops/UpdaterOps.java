@@ -107,6 +107,25 @@ public final class UpdaterOps {
         }
     }
 
+    /**
+     * Server repair (/bamfos repair). Audits the SERVER file set against the installed version (never
+     * "latest", so repair won't upgrade) and skips engine probation since it runs from the watchdog jar.
+     */
+    public int serverRepair() {
+        try {
+            UpdaterConfig cfg = UpdaterConfig.load(dir);
+            String tag = !cfg.tagPin().isEmpty() ? cfg.tagPin()
+                    : Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            if (tag.isEmpty()) {
+                return 1; // never synced, so there is no manifest to audit against and nothing to repair to
+            }
+            EngineHealth.forgiveRejectedEngines(dir); // Same engine-rejection reset as BIOS repair; see repair().
+            return stagedSync(cfg, tag, true, true);
+        } catch (IOException e) {
+            return 2;
+        }
+    }
+
     /** Clears the persistent token-dead marker after the credential is fixed. Returns 0 if removed, 1 if
      *  no marker existed, or 2 if deleting it failed (matching unpin). */
     public int clearTokenDead() {

@@ -27,11 +27,16 @@ final class OpsCommands {
                         .executes(ctx -> later(ctx.getSource(), watchdog, watchdog::opCheck, OpsBrain.CHECK_STARTED)))
                 .then(Commands.literal("sync")
                         .executes(ctx -> later(ctx.getSource(), watchdog, watchdog::opSync, OpsBrain.SYNC_STARTED)))
+                .then(Commands.literal("repair")
+                        .executes(ctx -> later(ctx.getSource(), watchdog, watchdog::opRepair, OpsBrain.REPAIR_STARTED)))
                 .then(Commands.literal("restart")
                         .then(Commands.literal("now")
                                 .executes(ctx -> reply(ctx.getSource(), watchdog.opRestartNow())))
                         .then(Commands.literal("cancel")
                                 .executes(ctx -> reply(ctx.getSource(), watchdog.opRestartCancel()))))
+                // No confirmation step: level 2 ops who type /bamfos stop mean to stop the server.
+                .then(Commands.literal("stop")
+                        .executes(ctx -> reply(ctx.getSource(), watchdog.opStop())))
                 .then(Commands.literal("cleartoken")
                         .executes(ctx -> reply(ctx.getSource(), watchdog.opClearToken()))));
     }

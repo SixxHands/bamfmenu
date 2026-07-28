@@ -151,6 +151,47 @@ class OpsBrainTest {
     }
 
     /**
+     * Verifies repairReply uses repair-specific wording for code 0 (drifted bytes staged) and code 1
+     * (no prior sync manifest), rather than reusing sync wording.
+     */
+    @Test
+    void repairReply_saysRepairThingsAndNotSyncThings() {
+        String staged = OpsBrain.repairReply(0).lines().get(0);
+        assertFalse(OpsBrain.repairReply(0).failed());
+        assertTrue(staged.contains("hash-checked"), String.valueOf(staged));
+        assertTrue(staged.contains("drifted"), staged);
+        assertFalse(staged.contains("release " + "is out"), String.valueOf(staged));
+
+        String never = OpsBrain.repairReply(1).lines().get(0);
+        assertFalse(OpsBrain.repairReply(1).failed());
+        assertTrue(never.contains("never completed a sync"), never);
+        assertTrue(never.contains("/bamfos sync"), String.valueOf(never));
+
+        assertTrue(OpsBrain.repairReply(2).failed());
+        assertFalse(OpsBrain.repairReply(3).failed());
+        assertTrue(OpsBrain.repairReply(4).failed());
+        assertFalse(OpsBrain.repairReply(5).failed());
+        assertTrue(OpsBrain.repairReply(9).failed() && OpsBrain.repairReply(9).lines().get(0).contains("9"));
+    }
+
+    /** Verifies stopReply reports an aborted stop when the sentinel write fails on a wrapped server. */
+    @Test
+    void stopReply_refusesRatherThanPromiseAStopItCannotMake() {
+        OpsBrain.Reply refused = OpsBrain.stopReply(true, false);
+        assertTrue(refused.failed());
+        String line = refused.lines().get(0);
+        assertTrue(line.contains("NOT"), String.valueOf(line));
+        assertTrue(line.contains("console window"), String.valueOf(line));
+
+        assertFalse(OpsBrain.stopReply(true, true).failed());
+        assertTrue(OpsBrain.stopReply(true, true).lines().get(0).contains("stays down"));
+
+        // Without a wrapper there is no relaunch loop, so the halt succeeds regardless of the sentinel file.
+        assertFalse(OpsBrain.stopReply(false, false).failed());
+        assertTrue(OpsBrain.stopReply(false, false).lines().get(0).contains("no wrapper loop"));
+    }
+
+    /**
      * Remind operators on both the help page and /bamfos reload output that reload only updates
      * config, not mods.
      */
@@ -160,6 +201,9 @@ class OpsBrainTest {
         assertTrue(help.contains("FML") && help.contains("mods/"), help);
         assertTrue(help.contains("None of this can swap a mod"));
         assertTrue(help.contains("/bamfos cleartoken") && help.contains("/bamfos reload"));
+        assertTrue(help.contains("/bamfos repair"));
+        assertTrue(help.contains("/bamfos stop"), help);
+        assertTrue(help.contains("plain /stop gets relaunched"), String.valueOf(help));
         assertTrue(String.join(" ", OpsBrain.reloadLines("o/r", "tok", "tok", true, 300, 300, 60, true))
                 .contains("FML"));
     }

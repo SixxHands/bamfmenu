@@ -44,4 +44,28 @@ class WrapperMarkTest {
         Files.writeString(dir.resolve(".bamfos-updater"), "not a folder");
         assertDoesNotThrow(() -> ServerMain.markPreJvmRun(dir));
     }
+
+    /**
+     * Clears any leftover stop sentinel from an abrupt kill or power loss so it doesn't abort
+     * the next normal server start.
+     */
+    @Test
+    void aStaleStopSentinelIsClearedBeforeTheJvm() throws IOException {
+        Path stop = dir.resolve(".bamfos-updater").resolve(ServerMain.STOP_FILE);
+        Files.createDirectories(stop.getParent());
+        Files.writeString(stop, "left over from last week");
+
+        ServerMain.clearStaleStop(dir);
+
+        assertFalse(Files.exists(stop));
+    }
+
+    /** Clean no-op when absent, and non-fatal if the sentinel cannot be deleted. */
+    @Test
+    void clearingWhatIsNotThereIsFineAndSoIsClearingWhatWillNotGo() throws IOException {
+        assertDoesNotThrow(() -> ServerMain.clearStaleStop(dir));
+        Files.createDirectories(dir.resolve(".bamfos-updater").resolve(ServerMain.STOP_FILE).resolve("busy"));
+        assertDoesNotThrow(() -> ServerMain.clearStaleStop(dir),
+                "a non-empty directory in the way costs one confusing exit, never the boot");
+    }
 }

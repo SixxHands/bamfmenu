@@ -34,6 +34,9 @@ final class OpsBrain {
     /** Both acks name the LOG as well as "here", because the answer is deferred and an rcon client is one
      *  request and one response: that operator's connection is gone before the poll thread comes back, so
      *  promising him the answer here and nowhere else is a promise this cannot keep. */
+    static final String REPAIR_STARTED = "repair started, the answer lands here and in logs/latest.log when "
+            + "it finishes. Every managed file gets hashed, so it takes longer than a sync; the server keeps "
+            + "running the whole time.";
     static final String CHECK_STARTED = "polling github now, the answer lands here and in logs/latest.log.";
     static final String SYNC_STARTED = "sync started, the answer lands here and in logs/latest.log when it "
             + "finishes. A full pack takes a while, the server keeps running the whole time.";
@@ -52,10 +55,14 @@ final class OpsBrain {
                 "/bamfos reload ....... re-read .bamfos-updater/bamfos-updater.properties, no restart needed",
                 "/bamfos check ........ poll github now instead of waiting out the interval",
                 "/bamfos sync ......... download the release now, it applies on the next restart",
+                "/bamfos repair ....... hash-check every managed file against the release and restore any "
+                        + "drifted files for the current version",
                 "/bamfos restart now|cancel ... take an armed countdown now, or call it off",
-                "/bamfos cleartoken ... drop the token-dead marker after you fix the credential",
-                "Fixing a dead token is two halves: put the new one in the properties file and /bamfos "
-                        + "reload, then /bamfos cleartoken to retire the memory of the old one.",
+                "/bamfos stop ......... shut the server down and keep it down (plain /stop gets relaunched "
+                        + "by the wrapper loop)",
+                "/bamfos cleartoken ... clear the token-dead marker after updating your token",
+                "To fix a dead token, put the new one in the properties file, run /bamfos reload, then run "
+                        + "/bamfos cleartoken.",
                 HARD_LIMIT);
     }
 
@@ -137,6 +144,49 @@ final class OpsBrain {
             default -> Reply.bad("sync returned unknown code " + code + ". "
                     + "Check .bamfos-updater/server-sync.log.");
         };
+    }
+
+    /**
+     * Formats /bamfos repair exit codes. Shares numeric codes with sync, but code 0 means drifted files
+     * were staged and code 1 means no prior sync manifest exists to audit against.
+     */
+    static Reply repairReply(int code) {
+        return switch (code) {
+            case 0 -> Reply.ok("repair staged. Every managed file was hash-checked against the release and "
+                    + "drifted files were downloaded and journalled for the next restart. "
+                    + "Nothing changed yet because mods/ stays locked while the server runs.");
+            case 1 -> Reply.ok("this server has never completed a sync, so there is no manifest to check "
+                    + "against. Run /bamfos sync first.");
+            case 3 -> Reply.ok("another sync already has the updater lock, so the repair did not start. "
+                    + "Try again in a moment.");
+            case 4 -> Reply.bad("github refused the token, so nothing could be checked. Replace it, then "
+                    + "/bamfos reload and /bamfos cleartoken.");
+            case 5 -> Reply.ok("github is rate limiting this server, so the repair could not read the release. "
+                    + "It clears itself, try again later.");
+            case 2 -> Reply.bad("the repair did not finish. Read .bamfos-updater/server-sync.log for the "
+                    + "reason; the next boot re-derives the install by itself anyway.");
+            default -> Reply.bad("the repair answered " + code + ", which this build has no line for. "
+                    + "Read .bamfos-updater/server-sync.log.");
+        };
+    }
+
+    // ------------------------------------------------------------------ stop
+
+    /**
+     * Formats the /bamfos stop reply before halting. With a wrapper, a failed sentinel write aborts the halt
+     * so the loop does not relaunch the server; without a wrapper, halting alone is enough.
+     */
+    static Reply stopReply(boolean wrapperPresent, boolean sentinelWritten) {
+        if (wrapperPresent && !sentinelWritten) {
+            return Reply.bad("could not write .bamfos-updater/stop, so the server was NOT stopped: the wrapper "
+                    + "loop reads that file and without it the server would come right back up. "
+                    + "Check folder permissions, or close the wrapper console window to stop it.");
+        }
+        return Reply.ok(wrapperPresent
+                ? "stopping. The wrapper loop reads .bamfos-updater/stop and exits instead of relaunching, "
+                        + "so the box stays down until you start it again."
+                : "stopping. Nothing ran the updater before this JVM, so there is no wrapper loop to relaunch "
+                        + "this box anyway and it stays down.");
     }
 
     /**

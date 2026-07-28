@@ -21,6 +21,7 @@ public final class ServerMain {
                 }
             }
             markPreJvmRun(dir);
+            clearStaleStop(dir);
             Path engineJar = dir.resolve(".bamfos-updater").resolve("engine").resolve("bamfos-updater-engine.jar");
             EngineLoader.Engine engine = EngineLoader.ensureAndLoad(engineJar, EngineLoader.embeddedBaseline());
             System.exit(engine.enter(args));
@@ -41,6 +42,18 @@ public final class ServerMain {
             java.nio.file.Files.writeString(f, Long.toString(System.currentTimeMillis()));
         } catch (Throwable unwritable) {
             // if disk is read-only or full, fail safe to announce-only rather than blocking boot
+        }
+    }
+
+    /** The name /bamfos stop writes and the wrapper reads. Spelled here, in the watchdog's StopFile, and in
+     *  both wrapper scripts, because none of those four link to each other. */
+    static final String STOP_FILE = "stop";
+
+    // Clears any leftover stop sentinel from a crashed or killed wrapper cycle so the next manual start doesn't exit right away.
+    static void clearStaleStop(Path dir) {
+        try {
+            java.nio.file.Files.deleteIfExists(dir.resolve(".bamfos-updater").resolve(STOP_FILE));
+        } catch (Throwable stuck) {
         }
     }
 

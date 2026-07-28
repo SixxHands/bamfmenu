@@ -57,6 +57,10 @@ public final class BamfosWatchdog {
     private volatile long tick;
     private volatile long restartAtTick = -1;
     private long warnAtTick = -1;
+    /** Set by /bamfos stop before it arms the countdown, so the ONE halt in onTickPost knows which of the
+     *  two things it is doing. Server thread only, same as warnAtTick, and never cleared: the only exit from
+     *  a stop is the process ending. */
+    private boolean stopping;
     private String pendingTarget = "";
     private String announcedTag = "";
     /**
@@ -314,10 +318,14 @@ public final class BamfosWatchdog {
         }
         if (tick >= restartAtTick) {
             restartAtTick = -1;
-            broadcast("Restarting now - back in a minute");
+            // Single halt path for both stop and restart so they share the same tick, broadcast, and log.
+            // Only the message changes so players aren't told "back in a minute" on a full stop.
+            broadcast(stopping ? "Server going down (not restarting automatically)"
+                    : "Restarting now - back in a minute");
             // target can be empty when running /bamfos restart now with no update pending
-            LOGGER.info("[watchdog] stopping the server{} (the wrapper syncs + relaunches)",
-                    pendingTarget.isEmpty() ? " on an operator's ask" : " for " + pendingTarget);
+            LOGGER.info("[watchdog] stopping the server{} ({})",
+                    pendingTarget.isEmpty() ? " on an operator's ask" : " for " + pendingTarget,
+                    stopping ? "the wrapper reads the stop file and exits" : "the wrapper syncs + relaunches");
             event.getServer().halt(false);
         }
     }
@@ -406,6 +414,11 @@ public final class BamfosWatchdog {
         return OpsBrain.syncReply(new UpdaterOps(dir, poll.apiBase).serverSyncNow());
     }
 
+    /** Poll thread only: fetches and hashes all managed files, so keep it off the server thread. */
+    OpsBrain.Reply opRepair() {
+        return OpsBrain.repairReply(new UpdaterOps(dir, poll.apiBase).serverRepair());
+    }
+
     /** Server thread. Clears the dead-token marker; change the token in properties and run /bamfos reload. */
     OpsBrain.Reply opClearToken() {
         if (down()) {
@@ -426,6 +439,26 @@ public final class BamfosWatchdog {
         warnAtTick = -1; // else a brought-forward countdown could still fire "Restarting in 10s" first
         restartAtTick = tick;
         return OpsBrain.Reply.ok(OpsBrain.restartNowReply(wasArmed));
+    }
+
+    /**
+     * Server thread: stops the server cleanly, bypassing the wrapper's relaunch loop via a stop sentinel.
+     * Writes the sentinel before halting and aborts if the write fails; without a wrapper, just halts.
+     */
+    OpsBrain.Reply opStop() {
+        if (server == null) {
+            return OpsBrain.Reply.bad(OpsBrain.NOT_STARTED);
+        }
+        boolean written = StopFile.write(dir);
+        if (wrapperPresent && !written) {
+            return OpsBrain.stopReply(true, false); // still up, and the reply says why
+        }
+        stopping = true;
+        vetoedTarget = "";
+        warnAtTick = -1;
+        pendingTarget = "";
+        restartAtTick = tick; // use the same onTickPost halt path as restart now
+        return OpsBrain.stopReply(wrapperPresent, written);
     }
 
     /**

@@ -8,6 +8,7 @@ import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
+import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
@@ -303,7 +304,11 @@ final class SyncCore {
         // ", some apply on next boot", but UpdaterState.lastSyncCell renders the RESULT WORD only, so the BIOS
         // UPDATE AND REPAIR row read "ok, just now" on every boot of a box the engine itself knows is holding a
         // row back (a player marking a managed jar read only yields AccessDeniedException forever)
-        lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary);
+        // heldBack OR a journal that outlived replay: the two halves of `pending` that mean bytes on disk do
+        // not match the manifest, as opposed to the two that just mean "the next boot finishes this"
+        boolean heldFiles = heldBack || Files.exists(Journal.pathIn(dir));
+        lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary,
+                heldFiles);
         return 0;
     }
 
@@ -422,13 +427,49 @@ final class SyncCore {
         }
     }
 
+    /** Returns the result field from last-sync.json, or "" if missing or unreadable. */
+    public static String lastSyncResult(Path dir) {
+        return lastSyncField(dir, "result") instanceof String s ? s : "";
+    }
+
+    /** Returns whether last-sync.json recorded stuck files (distinct from a normal `pending` staged update
+     *  or self-entry, which shouldn't trigger a full re-hash). Defaults to false on older records. */
+    public static boolean lastSyncHeldFiles(Path dir) {
+        return Boolean.TRUE.equals(lastSyncField(dir, "held"));
+    }
+
+    /** Returns true if the last sync left disk state suspect (`failed` or held files) and needs a repair
+     *  pass. Pure network errors (`offline`, `limited`, `no-release`, `token-dead`) never touched files. */
+    public static boolean needsRepair(String lastResult, boolean heldFiles) {
+        return heldFiles || "failed".equals(lastResult);
+    }
+
+    private static Object lastSyncField(Path dir, String key) {
+        try {
+            Path f = dir.resolve(".bamfos-updater").resolve("last-sync.json");
+            if (Files.isRegularFile(f)
+                    && MiniJson.parse(Files.readString(f, StandardCharsets.UTF_8)) instanceof Map<?, ?> m) {
+                return m.get(key);
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            // treat an unreadable record as unknown (null) rather than a failed sync so callers don't escalate
+        }
+        return null;
+    }
+
     private static void lastSync(Path dir, String tag, String result, String summary) {
+        lastSync(dir, tag, result, summary, false);
+    }
+
+    private static void lastSync(Path dir, String tag, String result, String summary, boolean held) {
         try {
             Map<String, Object> root = new LinkedHashMap<>();
             root.put("at", System.currentTimeMillis());
             root.put("tag", tag);
             root.put("result", result);
-            root.put("summary", summary); // the human one-liner the watchdog echoes into logs/latest.log
+            root.put("summary", summary); // Short summary line that the watchdog copies into logs/latest.log.
+            // Keep file failures separate from self-update staging so diagnostics can tell them apart.
+            root.put("held", held);
             Files.writeString(dir.resolve(".bamfos-updater").resolve("last-sync.json"),
                     JsonWriter.write(root), StandardCharsets.UTF_8);
         } catch (IOException | RuntimeException ignored) {

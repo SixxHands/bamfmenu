@@ -40,6 +40,28 @@ public final class ServerDoor {
         }
     }
 
+    /**
+     * The box repairing itself after a sync that did not land. A server has no BIOS and nobody watching it,
+     * so without this the honest `pending` in last-sync.json was written and then read by nothing: the box
+     * went on serving a half-applied pack until a human typed /bamfos status, and the only thing that would
+     * ever have re-tried is a restart the watchdog stops granting after two attempts.
+     * It is not extra github traffic. A repair fetches the same manifest an ordinary cycle does and
+     * downloads only the files that actually differ; what it adds is hashing every managed file locally,
+     * which is the work that finds bytes rule A skips. It stops on its own: the moment a cycle converges the
+     * record says ok and the next boot is ordinary again.
+     */
+    private static boolean selfHeal(Path dir) {
+        String last = SyncCore.lastSyncResult(dir);
+        boolean held = SyncCore.lastSyncHeldFiles(dir);
+        if (!SyncCore.needsRepair(last, held)) {
+            return false;
+        }
+        SyncCore.loud(dir, "last sync recorded \"" + last + "\""
+                + (held ? " with blocked files remaining" : "")
+                + ", running a full hash check across managed files instead of trusting the ledger");
+        return true;
+    }
+
     private int sync(Path dir, String tagOverride, boolean repair) {
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
@@ -50,6 +72,7 @@ public final class ServerDoor {
             }
             try (InstanceLock ignored = lock.get()) {
                 SyncCore.stepZero(dir);
+                repair = repair || selfHeal(dir);
                 if (repair) {
                     // --repair is the operator saying "re-derive this box", so it is also the way back from a
                     // false-positive engine refusal: nothing else ever clears that memory, and a box pinned to

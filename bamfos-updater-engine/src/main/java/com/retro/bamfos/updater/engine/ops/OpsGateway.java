@@ -27,6 +27,10 @@ public final class OpsGateway {
                 case "repair" -> o.repair();
                 case "listOptional" -> o.listOptional();
                 case "setDisabled" -> o.setDisabled(String.valueOf(args[0]), Boolean.TRUE.equals(args[1]));
+                // Coerce non-numeric ports to -1 so setServer returns bad-address (2) instead of throwing
+                // ClassCastException, which the panel can't distinguish from a write failure.
+                case "setServer" -> o.setServer(String.valueOf(args[0]),
+                        args[1] instanceof Number n ? n.intValue() : -1);
                 case "releaseNotes" -> o.releaseNotes();
                 default -> "error: unknown op " + op;
             };

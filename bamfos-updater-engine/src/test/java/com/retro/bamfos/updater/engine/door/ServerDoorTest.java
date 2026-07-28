@@ -264,6 +264,61 @@ class ServerDoorTest {
         assertFalse(Files.exists(dir.resolve("mods")));
     }
 
+    /* Write a last-sync record directly instead of trying to lock a file cross-platform.
+       The retry decision only reads this record, so seeding it directly tests that logic. */
+    private void poseLastSync(String result, boolean held) throws IOException {
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("at", System.currentTimeMillis());
+        root.put("tag", "vT");
+        root.put("result", result);
+        root.put("summary", "posed");
+        root.put("held", held);
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("last-sync.json"), JsonWriter.write(root),
+                StandardCharsets.UTF_8);
+    }
+
+    /** Server self-heal: automatically re-derive on the next boot when last-sync recorded held files. */
+    @Test
+    void aRecordSayingFilesWereHeldBack_makesTheNextORDINARYBootRepair() throws IOException {
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+        Files.writeString(dir.resolve("config/a.toml"), "mangled by something");
+        poseLastSync("pending", true);
+
+        // repair=false here: self-heal must trigger automatically without an explicit repair flag.
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertArrayEquals(CONFIG, Files.readAllBytes(dir.resolve("config/a.toml")));
+        assertTrue(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("full hash check"));
+    }
+
+    /** Healthy "pending" states (staged sync or self-update) must not trigger self-heal re-hashing on
+     * the next boot. */
+    @Test
+    void aPendingThatIsJustStagedFiles_leavesTheNextBootORDINARY() throws IOException {
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+        Files.writeString(dir.resolve("config/a.toml"), "mangled by something");
+        poseLastSync("pending", false);
+
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertEquals("mangled by something", Files.readString(dir.resolve("config/a.toml")));
+    }
+
+    /** Network errors shouldn't escalate to repair since the sync never touched local files. */
+    @Test
+    void anOfflineRecordDoesNotBuyARepairPass() throws IOException {
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+        Files.writeString(dir.resolve("config/a.toml"), "mangled by something");
+        poseLastSync("offline", false);
+
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertEquals("mangled by something", Files.readString(dir.resolve("config/a.toml")));
+    }
+
     @Test
     void repair_restoresManuallyCorruptedManagedFile() throws IOException {
         ServerDoor door = new ServerDoor(base);
