@@ -1,0 +1,149 @@
+package com.retro.bamfos.updater.engine.factory;
+
+import com.retro.bamfos.updater.engine.journal.Journal;
+import com.retro.bamfos.updater.engine.manifest.FileEntry;
+import com.retro.bamfos.updater.engine.manifest.Manifest;
+import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.util.HashUtils;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+// Stages a full pack download and writes a single journal to wipe and replace on next boot (nothing gets deleted until the journal saves).
+public final class FactoryReset {
+
+    /** What arming decided, and everything a caller needs to explain itself without asking again. */
+    public record Armed(int deletes, int places, long payloadBytes, String tag, DiskSpace.Room room) {
+    }
+
+    /** Precondition failures that block arming a reset. Returned as readable status messages instead of
+     *  throwing exceptions so the UI can show a clear reason to the player. */
+    public static class Refused extends Exception {
+        public final String why;
+
+        Refused(String why) {
+            super(why);
+            this.why = why;
+        }
+    }
+
+    private FactoryReset() {
+    }
+
+    /** Lists every manifest entry for this side to install cleanly (including seeded configs). Unlike a
+     *  normal reconcile, replay deletes files first so every entry is placed unconditionally. */
+    static List<FileEntry> toPlace(Manifest manifest, Reconciler.Side side) {
+        List<FileEntry> out = new ArrayList<>();
+        for (FileEntry e : manifest.files()) {
+            if (!reaches(e.side(), side) || WipeSet.KEEPERS.contains(e.path())) {
+                continue; // reset never overwrites updater files (see WipeSet.KEEPERS)
+            }
+            out.add(e);
+        }
+        return out;
+    }
+
+    private static boolean reaches(FileEntry.Side entry, Reconciler.Side box) {
+        return entry == FileEntry.Side.BOTH
+                || (box == Reconciler.Side.CLIENT && entry == FileEntry.Side.CLIENT)
+                || (box == Reconciler.Side.SERVER && entry == FileEntry.Side.SERVER);
+    }
+
+    /** Where an entry lands, which for an optional shipped off is its .disabled twin. A reset restores the
+     *  SHIPPED defaults, so a mod the player turned on comes back off and one they turned off comes back on. */
+    static String target(FileEntry e) {
+        return e.installDisabled() ? e.path() + ".disabled" : e.path();
+    }
+
+    /** Fetches missing parts and writes the reset journal, or throws {@link Refused} without touching files.
+     *  @param onFile non-null progress callback invoked before each fetch */
+    public static Armed arm(Path dir, Manifest manifest, Reconciler.Side side, Reconciler.Fetcher fetcher,
+                            String tag, Progress onFile) throws IOException, Refused {
+        WipeSet.Plan wipe = WipeSet.enumerate(dir, side);
+        if (!wipe.safe()) {
+            // Abort if the wipe walk included a protected file; that means a filter rule above is broken and we
+            // shouldn't skip it and continue the reset.
+            throw new Refused("the wipe would have removed files the updater needs (" + wipe.refused()
+                    + "), so nothing was changed. This is a bug, not something you did.");
+        }
+
+        List<FileEntry> place = toPlace(manifest, side);
+        if (place.isEmpty()) {
+            throw new Refused("that release lists no files for this install, so there is nothing to reset to.");
+        }
+        long payload = place.stream().mapToLong(FileEntry::size).sum();
+        DiskSpace.Room room = DiskSpace.check(dir, payload);
+        if (room.blocks()) {
+            throw new Refused("not enough free space: a reset needs about " + DiskSpace.mb(room.needBytes())
+                    + " free to download the whole pack before it removes the old one, and this drive has "
+                    + DiskSpace.mb(room.freeBytes()) + ". Nothing was changed.");
+        }
+
+        Path staging = dir.resolve(".bamfos-updater").resolve("staging");
+        Files.createDirectories(staging);
+        List<Journal.Op> moves = new ArrayList<>();
+        Set<String> targets = new LinkedHashSet<>();
+        int idx = 0;
+        for (FileEntry e : place) {
+            String to = target(e);
+            // unique per TARGET and not per sha, the same trap Reconciler.apply names: two entries with
+            // identical bytes at different paths would share one staged file, and the first move consumes it
+            Path part = staging.resolve(e.sha256() + "-fr" + (idx++) + ".part");
+            onFile.at(to, idx, place.size());
+            fetcher.fetch(e, part);
+            if (!HashUtils.sha256(part).equals(e.sha256())) {
+                // verify before writing the journal so a failure leaves the existing install untouched
+                throw new IOException("staged bytes for " + e.path() + " failed hash verification");
+            }
+            moves.add(new Journal.Op("move", rel(dir, part), to, e.sha256()));
+            targets.add(to);
+        }
+
+        Journal journal = new Journal();
+        journal.targetVersion = manifest.pack().version();
+        // deletes FIRST and in one list with the moves: ops replay in order, so every target is empty by
+        // the time its move runs. A path this journal also PLACES is never deleted, because the move already
+        // replaces it and a delete would only open a window where the file is gone and the move is stuck
+        for (String gone : wipe.delete()) {
+            if (!targets.contains(gone)) {
+                journal.ops.add(new Journal.Op("delete", "", gone, ""));
+            }
+        }
+        journal.ops.addAll(moves);
+
+        assertNoKeeperDeleted(journal);
+        journal.save(Journal.pathIn(dir));
+        return new Armed(journal.ops.size() - moves.size(), moves.size(), payload, tag, room);
+    }
+
+    /** Final check on the finished journal ensuring no keeper file (config, token, shim, etc.) is
+     *  deleted. Intentionally independent of the list-building logic above. */
+    static void assertNoKeeperDeleted(Journal journal) throws Refused {
+        Set<String> bad = new HashSet<>();
+        for (Journal.Op op : journal.ops) {
+            if (op.kind().equals("delete") && WipeSet.KEEPERS.contains(op.to())) {
+                bad.add(op.to());
+            }
+        }
+        if (!bad.isEmpty()) {
+            throw new Refused("refusing to arm a reset that would delete " + bad
+                    + ", which the updater needs to run again. Nothing was changed.");
+        }
+    }
+
+    /** Progress for the fetch half. The delete and place halves are reported by step 0 on the next boot,
+     *  where the boot terminal is already drawing a bar. */
+    public interface Progress {
+        void at(String path, int done, int total);
+    }
+
+    private static String rel(Path dir, Path file) {
+        return dir.relativize(file).toString().replace('\\', '/');
+    }
+}
