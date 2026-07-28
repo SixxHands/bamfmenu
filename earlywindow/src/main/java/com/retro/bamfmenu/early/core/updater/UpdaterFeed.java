@@ -219,7 +219,10 @@ public final class UpdaterFeed {
         return syncActive;
     }
 
-    /** The release-notes headline for the status line, "" until the engine sends one. */
+    /**
+     * Release-notes headline from the engine ("" until sent).
+     * Unused today (kept for a future what's-new display); remove along with the NOTE arm if dropped.
+     */
     public String note() {
         return note;
     }

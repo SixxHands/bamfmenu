@@ -2901,10 +2901,6 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
 
     private String statusLine(int maxChars) {
         char spin = SPINNER[(frame / 3) % SPINNER.length];
-        if (updaterSyncActive && updaterFeed != null && !updaterFeed.note().isEmpty()) {
-            // the notes ARE the notification: headline rides the status line mid-sync
-            return clip("[" + spin + "] " + updaterFeed.note(), maxChars);
-        }
         String step = "loading"; // the no-label fallback, drawn for approximately zero frames
         int pct = -1;
         try {
@@ -2920,6 +2916,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 pct = (int) (pm.progress() * 100.0F);
             }
         } catch (Throwable ignored) {
+        }
+        if (updaterSyncActive) {
+            // One word sync row or something
+            step = "updating"; // lowercase to sit level with "loading", the row's other own-word state
         }
         String bar = asciiBar(pct, 18);
         String pctText = pct >= 0 ? " " + pct + "%" : "";
