@@ -8,7 +8,10 @@ public final class RepairEntry {
     /** SETUP_OPTIONS[0] itself, and the row's identity in every provider equals check. */
     public static final String ROW_KEY = "Roll it back to BAMFOS v1"; // the provider reads this constant, so a rename cannot orphan the window
     /** The host's words for the row once there is an updater behind it. */
-    public static final String LABEL = "UPDATE AND REPAIR";
+    // Cased like the window's own title ("BAMFOS Update and Repair Utility") and like every sibling row in
+    // SETUP_OPTIONS. It was ALL CAPS, which made the one row a player actually needs shout at them from a
+    // menu where nothing else does.
+    public static final String LABEL = "Update and Repair";
     private static final String HELP =
             "Check for updates, verify the install, and roll BAMFOS back if you have to.";
     private static final String STATE = "Press ENTER to open.";

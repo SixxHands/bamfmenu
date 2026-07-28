@@ -22,7 +22,7 @@ class RepairEntryTest {
 
     @Test
     void onceTheUpdaterBindsTheSameRowBecomesTheWindow() {
-        assertEquals("UPDATE AND REPAIR", RepairEntry.label(RepairEntry.ROW_KEY, true));
+        assertEquals("Update and Repair", RepairEntry.label(RepairEntry.ROW_KEY, true));
         assertEquals("Press ENTER to open.", RepairEntry.state(RepairEntry.ROW_KEY, "", true));
         String help = RepairEntry.help(RepairEntry.ROW_KEY, JOKE, true);
         assertFalse(help.equals(JOKE));

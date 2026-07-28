@@ -42,10 +42,9 @@ tasks.named('test') {
 }
 
 configurations {
-    /* DEV-ONLY: a runtime classpath (with Windows natives) for the headless chart generator. The main deps
-       are compileOnly (NeoForge provides LWJGL at game runtime), so the genCharts JavaExec below needs its own
-       LWJGL + STB + their natives to decode/analyze a song outside the game. Not part of the shipped jar. */
+    // Dev-only runtimes (LWJGL + Windows natives) for offline chart generation and screenshot capture.
     chartgen
+    shots
 }
 
 dependencies {
@@ -67,6 +66,19 @@ dependencies {
     chartgen 'org.lwjgl:lwjgl-openal:3.3.3'
     chartgen 'org.lwjgl:lwjgl:3.3.3:natives-windows'
     chartgen 'org.lwjgl:lwjgl-stb:3.3.3:natives-windows'
+
+    // Dev-only screenshot harness runtime (same FML/LWJGL versions NeoForge ships, plus Windows natives).
+    shots 'net.neoforged.fancymodloader:earlydisplay:4.0.42'
+    shots 'net.neoforged.fancymodloader:loader:4.0.42'
+    shots 'org.lwjgl:lwjgl:3.3.3'
+    shots 'org.lwjgl:lwjgl-glfw:3.3.3'
+    shots 'org.lwjgl:lwjgl-opengl:3.3.3'
+    shots 'org.lwjgl:lwjgl-stb:3.3.3'
+    shots 'org.lwjgl:lwjgl-openal:3.3.3'
+    shots 'org.lwjgl:lwjgl:3.3.3:natives-windows'
+    shots 'org.lwjgl:lwjgl-glfw:3.3.3:natives-windows'
+    shots 'org.lwjgl:lwjgl-opengl:3.3.3:natives-windows'
+    shots 'org.lwjgl:lwjgl-stb:3.3.3:natives-windows'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
@@ -157,4 +169,21 @@ tasks.register('genWysi', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'com.retro.bamfmenu.early.core.tools.probe.AsciiImageProbe'
     systemProperty 'java.awt.headless', 'true'
+}
+
+// Dev: print the classpath for tools/shoot.py to compile and run the screenshot harness.
+tasks.register('shotsClasspath') {
+    dependsOn ':bamfos-updater-engine:classes'
+    dependsOn ':bamfos-updater-boot:classes'
+    dependsOn tasks.named('classes')
+    // Resolved at configuration time (inside doLast, sourceSets isn't on the task).
+    // Include updater engine + boot classes so OpsBridge sees UpdaterBridge and renders the real updater SETUP row.
+    def cp = provider {
+        (sourceSets.main.runtimeClasspath + configurations.shots
+                + project(':bamfos-updater-engine').sourceSets.main.output
+                + project(':bamfos-updater-boot').sourceSets.main.output).asPath
+    }
+    doLast {
+        println cp.get()
+    }
 }

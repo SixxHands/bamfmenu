@@ -50,3 +50,4 @@ earlywindow/doom-frame-ingame.txt
 *.wav
 *.png
 !src/main/resources/**/*.png
+!assets/*.png

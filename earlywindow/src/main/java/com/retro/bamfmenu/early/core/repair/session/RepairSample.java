@@ -52,7 +52,9 @@ public final class RepairSample {
                 "ok", NOW - 14 * 60_000L, NOW, "syncing".equals(scenario), 1, 1, false,
                 "Nether rework lands: ash dunes, quartz shelves, and the new seam block.\n"
                         + "Fixes a crash when a contraption crossed a portal mid-assembly.",
-                List.copyOf(mods), null, "198.51.100.10", 25565);
+                // OBVIOUSLY FAKE on purpose. These scenarios get rendered to PNGs that go in the README, so
+                // whatever sits here is published, and the real address used to be right in this line.
+                List.copyOf(mods), null, "super.secret.ip.for.a.server", 25565);
         return switch (scenario) {
             case "rollback" -> base.withReleases(releases(ReleaseList.LIVE, 5));
             case "rollback-offline" -> base.withReleases(releases(ReleaseList.OFFLINE, 1));
