@@ -346,15 +346,20 @@ public final class Reconciler {
         pulse.applying();
         Journal.Result replayed = journal.replay(dir);
         if (!replayed.retryable().isEmpty()) {
-            // pending semantics: the ops survive as the journal for a later step 0. The
-            // ledger commit below SKIPS whatever did not land: this rule stops hashing a path once the
-            // ledger carries the target sha, so an entry for bytes that never arrived is the one write
-            // nothing walks back, the ledger swears the file is current and the old bytes go invisible.
-            // The abandoned ones are dropped: no later boot can finish them, and the ledger gate below
-            // is what makes the next plan re-derive those rows from scratch
+            // Keep retryable ops in the journal (counting this run as an attempt) and drop abandoned ones.
+            // Gate the ledger on the original retryable+abandoned sets so we never record unlanded bytes.
+            Journal.Stuck stuck = Journal.afterAttempt(replayed.retryable());
+            for (Journal.Op op : stuck.gaveUp()) {
+                System.out.println("[updater] gave up on " + op.to() + " after " + Journal.MAX_ATTEMPTS
+                        + " tries, it stays on its old bytes and the next sync re-plans it");
+            }
             journal.ops.clear();
-            journal.ops.addAll(replayed.retryable());
-            journal.save(Journal.pathIn(dir));
+            journal.ops.addAll(stuck.keep());
+            if (stuck.keep().isEmpty()) {
+                Files.deleteIfExists(Journal.pathIn(dir)); // Remove empty journal so the next boot doesn't waste time reading it.
+            } else {
+                journal.save(Journal.pathIn(dir));
+            }
         }
         Set<String> unfinished = new HashSet<>();
         for (Journal.Op op : replayed.retryable()) {

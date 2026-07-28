@@ -110,12 +110,24 @@ final class SyncCore {
             Files.deleteIfExists(Journal.pathIn(dir));
             return;
         }
+        Journal.Stuck stuck = Journal.afterAttempt(replayed.retryable());
+        if (!stuck.gaveUp().isEmpty()) {
+            // Drop ops that exhausted their retry count (permanently locked/read-only files) so they don't loop
+            // forever; the ledger never recorded them, so a later probe or repair can still re-plan them.
+            System.out.println("[updater] gave up on " + stuck.gaveUp().size() + " op(s) after "
+                    + Journal.MAX_ATTEMPTS + " boots, something else is holding them: " + names(stuck.gaveUp())
+                    + " (close any other launcher, then check your antivirus)");
+        }
+        if (stuck.keep().isEmpty()) {
+            Files.deleteIfExists(Journal.pathIn(dir));
+            return;
+        }
         // Keep still-stuck ops in the journal for the next step 0 (and carry them into apply()'s journal)
         // so the sync below doesn't commit a clean ledger while stale files remain.
-        System.out.println("[updater] " + replayed.retryable().size()
-                + " ops still stuck, journal kept for next boot: " + names(replayed.retryable()));
+        System.out.println("[updater] " + stuck.keep().size()
+                + " ops still stuck, journal kept for next boot: " + names(stuck.keep()));
         leftover.ops.clear();
-        leftover.ops.addAll(replayed.retryable());
+        leftover.ops.addAll(stuck.keep());
         leftover.save(Journal.pathIn(dir));
     }
 

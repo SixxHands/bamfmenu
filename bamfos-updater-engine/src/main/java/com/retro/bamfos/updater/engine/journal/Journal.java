@@ -24,7 +24,42 @@ public final class Journal {
      * occupied destination. Plans can sit until the next boot, so refusing kinds stop us from overwriting
      * a config, servers.dat, or .disabled jar the player created in the meantime.
      */
-    public record Op(String kind, String from, String to, String sha256) {
+    public record Op(String kind, String from, String to, String sha256, int attempts) {
+
+        /** Entry written by the planner; retry counts are tracked separately by the journal. */
+        public Op(String kind, String from, String to, String sha256) {
+            this(kind, from, to, sha256, 0);
+        }
+
+        Op tried() {
+            return new Op(kind, from, to, sha256, attempts + 1);
+        }
+    }
+
+    /**
+     * Boots to retry a stuck op before giving up. Three boots clears transient AV or launcher locks;
+     * anything surviving past that is permanently locked.
+     */
+    public static final int MAX_ATTEMPTS = 3;
+
+    /** Split of replay results into ops to retry next boot vs ops that hit the retry cap. Shared by both
+     *  replay call sites so they stay consistent. */
+    public record Stuck(List<Op> keep, List<Op> gaveUp) {
+    }
+
+    /**
+     * Bumps attempt counts on retryable ops and drops any that ran out of tries so a permanently locked
+     * file doesn't retry forever. Dropped ops stay out of the ledger (and still block installed_version
+     * this run), so the next plan re-derives them from disk.
+     */
+    public static Stuck afterAttempt(List<Op> retryable) {
+        List<Op> keep = new ArrayList<>();
+        List<Op> gaveUp = new ArrayList<>();
+        for (Op op : retryable) {
+            Op tried = op.tried();
+            (tried.attempts() >= MAX_ATTEMPTS ? gaveUp : keep).add(tried);
+        }
+        return new Stuck(keep, gaveUp);
     }
 
     /**
@@ -66,7 +101,9 @@ public final class Journal {
             if (m.get("ops") instanceof List<?> list) {
                 for (Object o : list) {
                     if (o instanceof Map<?, ?> om) {
-                        j.ops.add(new Op(str(om.get("kind")), str(om.get("from")), str(om.get("to")), str(om.get("sha256"))));
+                        // Missing attempts defaults to 0 so journals from older engines still load cleanly.
+                        j.ops.add(new Op(str(om.get("kind")), str(om.get("from")), str(om.get("to")),
+                                str(om.get("sha256")), num(om.get("attempts"))));
                     }
                 }
             }
@@ -76,6 +113,11 @@ public final class Journal {
 
     private static String str(Object v) {
         return v instanceof String s ? s : "";
+    }
+
+    /** Parses the attempts count, falling back to 0 if a hand-edited journal has a non-numeric value. */
+    private static int num(Object v) {
+        return v instanceof Number n ? Math.max(0, n.intValue()) : 0;
     }
 
     public void save(Path file) throws IOException {
@@ -88,6 +130,11 @@ public final class Journal {
             om.put("from", op.from());
             om.put("to", op.to());
             om.put("sha256", op.sha256());
+            // Omit attempts when 0 so fresh journals stay clean and match the older format (older engines ignore
+            // unknown keys anyway).
+            if (op.attempts() > 0) {
+                om.put("attempts", (long) op.attempts());
+            }
             list.add(om);
         }
         root.put("ops", list);

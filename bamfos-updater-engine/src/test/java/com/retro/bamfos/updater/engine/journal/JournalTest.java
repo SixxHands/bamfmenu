@@ -43,6 +43,70 @@ class JournalTest {
         assertArrayEquals(NEW, Files.readAllBytes(dir.resolve("mods/new-2.0.jar")));
     }
 
+    /** Drop ops after three failed boots so permanently locked or read-only targets stop looping forever. */
+    @Test
+    void aStuckOpIsGivenUpOnAfterThreeBootsInsteadOfForever() {
+        Journal.Op op = new Journal.Op("delete", "", "mods/held.jar", "");
+        assertEquals(0, op.attempts());
+
+        java.util.List<Journal.Op> carried = java.util.List.of(op);
+        for (int boot = 1; boot < Journal.MAX_ATTEMPTS; boot++) {
+            Journal.Stuck stuck = Journal.afterAttempt(carried);
+            assertTrue(stuck.gaveUp().isEmpty(), String.valueOf(boot));
+            assertEquals(boot, stuck.keep().get(0).attempts());
+            carried = stuck.keep();
+        }
+
+        Journal.Stuck last = Journal.afterAttempt(carried);
+        assertTrue(last.keep().isEmpty());
+        assertEquals("mods/held.jar", last.gaveUp().get(0).to());
+    }
+
+    /** Retry count must survive save/load, otherwise it resets to 0 on every boot. */
+    @Test
+    void theAttemptCountSurvivesSaveAndLoad() throws IOException {
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("delete", "", "mods/held.jar", "", 2));
+        j.ops.add(new Journal.Op("delete", "", "mods/fresh.jar", ""));
+        j.save(Journal.pathIn(dir));
+
+        String raw = Files.readString(Journal.pathIn(dir), StandardCharsets.UTF_8);
+        assertTrue(raw.contains("\"attempts\""), String.valueOf(raw));
+        assertEquals(1, raw.split("\"attempts\"", -1).length - 1, String.valueOf(raw));
+
+        Journal back = Journal.load(Journal.pathIn(dir));
+        assertEquals(2, back.ops.get(0).attempts());
+        assertEquals(0, back.ops.get(1).attempts());
+    }
+
+    /** Keep journal attempt counts forward- and backward-compatible across engine versions by defaulting
+     * missing values to zero. */
+    @Test
+    void aJournalFromAnEngineWithNoCounterReadsAsFresh() throws IOException {
+        Files.createDirectories(Journal.pathIn(dir).getParent());
+        Files.writeString(Journal.pathIn(dir),
+                "{\"target_version\":\"v2\",\"ops\":[{\"kind\":\"delete\",\"from\":\"\",\"to\":\"mods/x.jar\","
+                        + "\"sha256\":\"\"}]}", StandardCharsets.UTF_8);
+
+        Journal back = Journal.load(Journal.pathIn(dir));
+
+        assertEquals(1, back.ops.size());
+        assertEquals(0, back.ops.get(0).attempts());
+    }
+
+    /** Operators sometimes hand-edit the journal when an update gets stuck. */
+    @Test
+    void aNonsenseAttemptValueIsTreatedAsFreshNotAsAThrow() throws IOException {
+        Files.createDirectories(Journal.pathIn(dir).getParent());
+        Files.writeString(Journal.pathIn(dir),
+                "{\"target_version\":\"v2\",\"ops\":[{\"kind\":\"delete\",\"from\":\"\",\"to\":\"mods/x.jar\","
+                        + "\"sha256\":\"\",\"attempts\":\"lots\"}]}", StandardCharsets.UTF_8);
+
+        Journal back = assertDoesNotThrow(() -> Journal.load(Journal.pathIn(dir)));
+
+        assertEquals(0, back.ops.get(0).attempts());
+    }
+
     @Test
     void staleStagedBytes_areNeverPlaced() throws IOException {
         Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
