@@ -19,7 +19,7 @@ public final class RepairSample {
 
     /** Sample screen states in display order for offline rendering. */
     public static final String[] SCENARIOS = {
-            "reading", "idle", "pinned", "syncing", "working", "confirm",
+            "reading", "idle", "pinned", "syncing", "working", "working-file", "confirm",
             "status", "optional", "optional-missing", "notes", "rollback", "rollback-offline",
             "rollback-first", "hostile", "hostile-notes", "editing", "editing-long"};
 
@@ -102,6 +102,13 @@ public final class RepairSample {
                 select(s, quiet, "verify");
                 s.key(RepairIntent.ACTIVATE, quiet); // the prompt
                 s.key(RepairIntent.ACTIVATE, quiet); // yes, and the worker takes it
+            }
+            case "working-file" -> {
+                // Same op a second later once the engine names a file on the bus.
+                select(s, quiet, "verify");
+                s.key(RepairIntent.ACTIVATE, quiet);
+                s.key(RepairIntent.ACTIVATE, quiet);
+                s.activity("create-6.0.4.jar   sha mismatch");
             }
             case "editing" -> {
                 // Open text field on a partial address; taller than confirm dialogs (6 lines vs 3),

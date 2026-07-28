@@ -88,7 +88,17 @@ public final class BootBus {
     }
 
     public void fileStart(String name) {
-        emit("FILE", name);
+        fileStart(name, "");
+    }
+
+    /** Reports the current file and its short reason code (from the reconciler action kind).
+     *  Appended as an extra field so older earlywindow builds read f[1] and ignore the rest. */
+    public void fileStart(String name, String reason) {
+        if (reason == null || reason.isEmpty()) {
+            emit("FILE", name);
+            return;
+        }
+        emit("FILE", name, reason);
     }
 
     public void fileDone(String name) {

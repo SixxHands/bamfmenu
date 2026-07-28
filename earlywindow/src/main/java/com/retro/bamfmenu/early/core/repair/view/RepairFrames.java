@@ -23,7 +23,7 @@ public final class RepairFrames {
 
     /** Snapshot of inputs needed to build a frame without reaching back into session state. */
     public record View(List<RepairItem> items, int sel, UpdaterState state, RepairPage page,
-                       int pageSel, int pageTop, String working, RepairResult last,
+                       int pageSel, int pageTop, String working, String activity, RepairResult last,
                        String hints, String confirm, String editTitle, String editField) {
 
         /** True while a worker action is running, switching the notice slot to a spinner. */
@@ -215,11 +215,12 @@ public final class RepairFrames {
         tone[row] = on ? Tone.BRIGHT : pageRow.tone();
     }
 
-    /* While the worker holds an action the notice slot belongs to it: naming the action plus a live
-       spinner is the only honest thing on screen, since the op gives us no progress to report. */
+    /* While busy, show the live file/reason from the engine in the notice slot once available,
+       falling back to the action label until the first file event arrives. */
     private static String noticeLine(View v, int tick) {
         if (v.busy()) {
-            return v.working() + " ...  " + spin(tick);
+            String live = v.activity() == null ? "" : v.activity();
+            return (live.isEmpty() ? v.working() : live) + " ...  " + spin(tick);
         }
         return v.last() == null ? "" : v.last().message();
     }

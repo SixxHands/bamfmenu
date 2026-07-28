@@ -68,6 +68,34 @@ class UpdaterFeedTest {
         assertTrue(bar.fill() > 0);
     }
 
+    /** Reason is an optional third field on FILE; older two-field engines must still show the filename. */
+    @Test
+    void theActivityLineCarriesTheFileAndItsReason() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "FILE\tcreate-6.0.4.jar\tsha mismatch");
+        assertTrue(feed.activity().contains("create-6.0.4.jar"), feed.activity());
+        assertTrue(feed.activity().contains("sha mismatch"), feed.activity());
+    }
+
+    @Test
+    void anOlderEngineSendsNoReasonAndStillNamesTheFile() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "FILE\tcreate-6.0.4.jar");
+        assertEquals("create-6.0.4.jar", feed.activity());
+    }
+
+    /** Empty when idle so the panel falls back to the selected item help text. */
+    @Test
+    void activityIsBlankBeforeAnyFileAndAfterItFinishes() throws IOException {
+        assertEquals("", feedOn("SYNC\tbamfos-pack\tv0.2.4\tv0.2.6").activity());
+        assertEquals("", feedOn(
+                "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "FILE\tcreate-6.0.4.jar\tsha mismatch",
+                "FDONE\tcreate-6.0.4.jar").activity());
+    }
+
     /** FDONE clears the progress bar so the next file doesn't show stale progress before its first byte. */
     @Test
     void theBarDoesNotSurviveTheFileItBelongsTo() throws IOException {

@@ -30,6 +30,9 @@ joke row and the POST screen says the kmod is missing, once.
   files restored draws BAMFOS REPAIRED n FILES, and a sync that moved only the updater's own jars sends no
   SYNCED at all, so the pending line stands alone.
   `syncActive()` is the mid-sync flag the DEL gate and the repair window's single-writer refusal both read.
+  `activity()` is the file in flight plus WHY it is being touched, which the UPDATE AND REPAIR window shows in
+  its notice slot. The why rides as a THIRD field on the existing FILE event rather than an event of its own,
+  so an engine older than this reader sends two fields and the line simply reads as the filename alone.
   Render thread only.
 - **`OpsBridge`** resolves `UpdaterBridge` + its two methods ONCE in a static initialiser and latches presence
   in a volatile once the door has bound. Absent shim leaves the handles null and `present()` is a field read

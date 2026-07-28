@@ -13,6 +13,7 @@ import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import com.retro.bamfos.updater.engine.reconcile.PinMatcher;
+import com.retro.bamfos.updater.engine.reconcile.Reasons;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.reconcile.SyncPlan;
 import com.retro.bamfos.updater.engine.util.HashUtils;
@@ -191,8 +192,14 @@ final class SyncCore {
             bus.fileProgress(asset, done, total);
             consoleBar.at(asset, done, total);
         };
+        /* Map of path -> reason built from the plan before apply runs. Fetcher only sees the manifest entry,
+           so we keep the reconciler action reason here for the display. */
+        java.util.Map<String, String> why = new java.util.HashMap<>();
+        for (SyncPlan.Action a : plan.downloads()) {
+            why.put(a.path(), Reasons.of(a.kind(), repair));
+        }
         Reconciler.Fetcher feed = (e, dest) -> {
-            bus.fileStart(fileName(e.path()));
+            bus.fileStart(fileName(e.path()), why.getOrDefault(e.path(), ""));
             gh.fetch(e, dest, onBytes);
             consoleBar.finish();
             bus.fileDone(fileName(e.path()));
@@ -230,7 +237,7 @@ final class SyncCore {
                 continue;
             }
             Path part = staging.resolve(e.sha256() + ".part");
-            bus.fileStart(fileName(e.path()));
+            bus.fileStart(fileName(e.path()), Reasons.SELF);
             gh.fetch(e, part, onBytes);
             consoleBar.finish();
             if (!HashUtils.sha256(part).equals(e.sha256())) {

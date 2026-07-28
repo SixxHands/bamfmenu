@@ -47,6 +47,8 @@ public final class RepairSession {
     private TextEntry editing;              // the open field, null when nothing is being typed
     private RepairEffect.Edit editingEffect; // action to run when ENTER submits the active text field
     private String working = "";      // non-empty while the worker keeps an action
+    /* Active file status pushed from the screen's frame loop off the boot bus feed; cleared when the op ends. */
+    private String activity = "";
     private RepairResult last;        // the notice line, null until something has happened
 
     public RepairSession(RepairRegistry registry) {
@@ -78,9 +80,15 @@ public final class RepairSession {
         working = label == null ? "" : label;
     }
 
+    /** Updates the live progress line from the engine bus each frame (empty when idle). */
+    public void activity(String line) {
+        activity = line == null ? "" : line;
+    }
+
     /** Applies the worker result, clears the busy state, and displays the returned status line. */
     public void done(RepairResult result) {
         working = "";
+        activity = ""; // Clear any leftover progress text once the operation finishes.
         last = result;
     }
 
@@ -293,7 +301,7 @@ public final class RepairSession {
     public RepairFrame frame(int maxChars, int interiorRows, int tick) {
         panelWidth = RepairBox.rightInner(maxChars);
         RepairFrames.View view = new RepairFrames.View(items, sel, state, page, pageSel, pageTop,
-                working, last, hints(), prompt(), editTitle(), editField());
+                working, activity, last, hints(), prompt(), editTitle(), editField());
         RepairFrames.Built built = RepairFrames.build(view, maxChars, interiorRows, tick);
         pageSel = built.pageSel();
         pageTop = built.pageTop();

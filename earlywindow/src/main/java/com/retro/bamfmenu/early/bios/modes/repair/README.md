@@ -10,7 +10,7 @@ left box is the row list, the right box is that row's help and state, and a page
 picker, notes, status) takes over the right box exactly the way the jukebox song list does.
 
 ## Components
-- **`RepairEntry`** is the SETUP row-0 swap. `ROW_KEY` holds `"Roll it back to BAMFOS v1"`, and the provider's
+- **`RepairEntry`** is the SETUP row-0 swap. `ROW_KEY` keeps `"Roll it back to BAMFOS v1"`, and the provider's
   `SETUP_OPTIONS[0]` reads that constant, so there is ONE copy of the string every `opt.equals(...)` matches on.
   Only the DRAWN label, help and state line change when `OpsBridge.present()` is true. Nothing is deleted: with
   no shim in `mods/` the row is exactly the joke it always was. Its 2-argument overloads take presence as a
@@ -27,7 +27,7 @@ picker, notes, status) takes over the right box exactly the way the jukebox song
     single-owner and needs no locks.
   - the widen rule is NOT a copy: `ctx.biosBodyWidth(reservedRows)` hands back the width `drawSetup` itself
     sizes off, so the decision flips at the same window shape for both screens and cannot drift. The box
-    COLUMNS are a different story: `RepairBox.LEFT_INNER` is 36 and `drawSetup` still holds its own local 36,
+    COLUMNS are a different story: `RepairBox.LEFT_INNER` is 36 and `drawSetup` still keeps its own local 36,
     so a change to the box shape has to be made in two places until the provider extraction lands.
   - tones map to the live theme, so "You're Blue Now" recolours this window with everything else. ALERT borrows
     the red the SETUP fault panel already uses.
@@ -39,16 +39,20 @@ the worker for a snapshot and calls `ctx.enterMode(Mode.REPAIR)`. From then on `
 steps then draws, `onKey` enqueues raw GLFW codes, and `controlHints` comes from the session.
 
 `step` drains the worker, stamps the live clock plus `ctx.updaterSyncActive()` onto the snapshot (that flag is
-the boot lockout's own signal, reused rather than reinvented), then feeds keys to the session. `leave(notice)`
-drops the session and routes back through `ctx.exitToSetup(0, notice)`, landing on the row the window hangs off.
-While the worker holds an action the session refuses BACK, so ESC cannot hand off to Minecraft with the engine
+the boot lockout's own signal, reused rather than reinvented), then feeds keys to the session. `render` pushes
+`ctx.updaterActivity()` every frame before it builds one, pushed rather than pulled because the session has no clock
+and no idea when the engine moves to the next file, while the provider is already tailing that feed for the boot
+terminal, so both surfaces read the one source. `leave(notice)` drops the session and routes back through
+`ctx.exitToSetup(0, notice)`, landing on the row the window hangs off.
+While the worker keeps an action the session refuses BACK, so ESC cannot hand off to Minecraft with the engine
 still staging files.
 
 ## Dependencies
 - Depends on `bios.screen.Screen` + `BiosContext`, `TerminalCanvas`, `Mode`, `core.asset.Art` (the one red), and
   the whole headless `core.repair` tree. One-way as always: `bios/` may import `core/`, never the reverse.
-- Three `BiosContext` seams exist for this screen: `drawBiosHeader` and `biosBodyWidth` (so the header art and
-  the widen decision are the provider's, not a second copy of the wordmark math) and `updaterSyncActive`.
+- Four `BiosContext` seams exist for this screen: `drawBiosHeader` and `biosBodyWidth` (so the header art and
+  the widen decision are the provider's, not a second copy of the wordmark math), `updaterSyncActive`, and
+  `updaterActivity`.
 - The provider's diff for this whole window is the row-0 swap at its four draw sites, the ENTER dispatch, and
   the per-mode boilerplate every other screen already has (field, queue, start flag, `renderFrame` case, `onKey`
   branch, `controlHints` case). The provider extraction stays a separate job.

@@ -2090,6 +2090,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
 
         @Override
+        public String updaterActivity() {
+            // no feed is an install with no updater, which is a blank line and never a fault
+            return updaterFeed == null ? "" : updaterFeed.activity();
+        }
+
+        @Override
         public boolean updaterSyncActive() {
             return updaterSyncActive;
         }

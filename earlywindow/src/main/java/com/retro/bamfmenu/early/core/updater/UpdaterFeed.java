@@ -52,6 +52,7 @@ public final class UpdaterFeed {
     private int manifestEntries;
     private int planned; // File count from PLAN, used to format the final repair summary.
     private String currentFile = "";
+    private String currentReason = ""; // Short reason from the engine for why this file changed (empty if none).
     private long progDone;   // Bytes transferred for the current file (0 when no bar should be drawn).
     private long progTotal;  // expected byte length; 0 when unknown, which hides the progress bar
     private final List<String> doneFiles = new ArrayList<>();
@@ -154,6 +155,8 @@ public final class UpdaterFeed {
             case "PLAN" -> planned = parseInt(f, 1);
             case "FILE" -> {
                 currentFile = f.length > 1 ? f[1] : "";
+                // Older engines only send two fields without a reason, which is fine.
+                currentReason = f.length > 2 ? f[2] : "";
                 progDone = 0;
                 progTotal = 0; // Reset progress until the first FPROG arrives for the new file.
             }
@@ -163,6 +166,7 @@ public final class UpdaterFeed {
             }
             case "FDONE" -> {
                 currentFile = "";
+                currentReason = "";
                 progDone = 0;
                 progTotal = 0;
                 if (f.length > 1) {
@@ -334,6 +338,17 @@ public final class UpdaterFeed {
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    /**
+     * Live status line for the BIOS window while an op runs (current file and reason, or "" when idle).
+     * Reads the same `BootBus.append` feed as the boot terminal so both stay in sync.
+     */
+    public String activity() {
+        if (currentFile.isEmpty()) {
+            return "";
+        }
+        return currentReason.isEmpty() ? currentFile : currentFile + "   " + currentReason;
     }
 
     /** Parse as long because multi-gigabyte releases overflow int and break the progress bar. */

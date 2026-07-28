@@ -217,6 +217,9 @@ public final class RepairScreen implements Screen, RepairContext {
            earned itself an extra interior row that landed on top of the legend (5120x1440). */
         int legendY = ctx.biosControlBarY(logicalW);
         int capacity = SetupSizing.boxCapacity(reservedRows, boxTop, legendY, lineSpacing);
+        // pushed every frame rather than pulled by the session: the session has no clock, and the host is
+        // already tailing this feed for the boot terminal, so both surfaces read the one source
+        s.activity(ctx.updaterActivity());
         RepairFrame frame = s.frame(maxChars, capacity, ctx.frame());
         c.text(TerminalCanvas.MARGIN, y, TerminalCanvas.clip(frame.title(), maxChars), c.cBright());
 

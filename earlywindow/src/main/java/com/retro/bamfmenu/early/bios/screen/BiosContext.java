@@ -139,6 +139,9 @@ public interface BiosContext {
     /** Where the shared bottom control bar's row lands inside a `logicalW` canvas. */
     int biosControlBarY(int logicalW); // the bar draws in its OWN canvas, so logicalH - lineSpacing is NOT it
 
+    /** The file the engine is touching and why, from the boot bus. "" when nothing is in flight. */
+    String updaterActivity();
+
     /** True while the updater engine is writing files, the boot lockout's own signal. */
     boolean updaterSyncActive(); // a BIOS page that touches files has to refuse for as long as this holds
 
