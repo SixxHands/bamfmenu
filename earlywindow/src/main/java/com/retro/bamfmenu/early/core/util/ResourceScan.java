@@ -57,6 +57,36 @@ public final class ResourceScan {
         }
     }
 
+    /**
+     * EVERY classpath root that carries `dir`, not just the first one.
+     * This is plural for a reason that cost a whole menu. `getResource` answers with ONE root, and a
+     * scan that stops there is a scan whose answer depends on classpath ORDER: put a second folder with the
+     * same package anywhere ahead of the real one and the enumeration reads that instead, finds nothing it
+     * recognises, and returns empty. one test class under a matching package took the
+     * repair menu from eight rows to zero, and the only symptom was a "0 loaded" count nobody reads.
+     * Falls back to the single-URL lookup when the loader hands back nothing, because the FML service layer
+     * is the environment this whole class exists for and its union: URLs are not something to assume about.
+     */
+    private static List<URL> rootsFor(String dir) {
+        List<URL> roots = new ArrayList<>();
+        try {
+            ClassLoader cl = ResourceScan.class.getClassLoader();
+            Enumeration<URL> e = cl != null ? cl.getResources(dir) : ClassLoader.getSystemResources(dir);
+            while (e.hasMoreElements()) {
+                roots.add(e.nextElement());
+            }
+        } catch (Throwable t) {
+            System.err.println("[bamfmenu] classpath roots for " + dir + " failed (falling back): " + t);
+        }
+        if (roots.isEmpty()) {
+            URL one = ResourceScan.class.getResource("/" + dir);
+            if (one != null) {
+                roots.add(one);
+            }
+        }
+        return roots;
+    }
+
     public static File jarFileFromCodeSource() {
         try {
             var cs = ResourceScan.class.getProtectionDomain().getCodeSource();
@@ -97,49 +127,65 @@ public final class ResourceScan {
     public static List<String> listResources(String dir, String regex) {
         Set<String> out = new LinkedHashSet<>();
         java.util.regex.Pattern pat = java.util.regex.Pattern.compile(regex);
-        try {
-            URL url = ResourceScan.class.getResource("/" + dir);
-            if (url != null && "file".equals(url.getProtocol())) {
-                Path d = Paths.get(url.toURI());
-                if (Files.isDirectory(d)) {
-                    try (var stream = Files.newDirectoryStream(d, Files::isRegularFile)) {
-                        for (Path f : stream) {
-                            String fn = f.getFileName().toString();
-                            if (pat.matcher(fn).matches()) {
-                                out.add("/" + dir + "/" + fn);
-                            }
-                        }
-                    }
-                }
-            }
-            if (out.isEmpty()) {
-                File jar = jarFileFromUrl(url);
-                if (jar == null) {
-                    jar = jarFileFromCodeSource();
-                }
-                if (jar != null) {
-                    String prefix = dir + "/";
-                    try (ZipFile zip = new ZipFile(jar)) {
-                        Enumeration<? extends ZipEntry> e = zip.entries();
-                        while (e.hasMoreElements()) {
-                            String n = e.nextElement().getName();
-                            if (n.startsWith(prefix)) {
-                                String rest = n.substring(prefix.length());
-                                if (!rest.isEmpty() && rest.indexOf('/') < 0 && pat.matcher(rest).matches()) {
-                                    out.add("/" + n);
+        Set<String> scannedJars = new LinkedHashSet<>();
+        for (URL url : rootsFor(dir)) {
+            try {
+                if ("file".equals(url.getProtocol())) {
+                    Path d = Paths.get(url.toURI());
+                    if (Files.isDirectory(d)) {
+                        try (var stream = Files.newDirectoryStream(d, Files::isRegularFile)) {
+                            for (Path f : stream) {
+                                String fn = f.getFileName().toString();
+                                if (pat.matcher(fn).matches()) {
+                                    out.add("/" + dir + "/" + fn);
                                 }
                             }
                         }
                     }
+                    continue;
+                }
+                File jar = jarFileFromUrl(url);
+                if (jar != null && scannedJars.add(jar.getPath())) {
+                    scanJarFlat(jar, dir, pat, out);
+                }
+            } catch (Throwable t) {
+                // one unreadable root must never cost the others, which is the whole point of looping
+                System.err.println("[bamfmenu] listResources root failed (" + url + "): " + t);
+            }
+        }
+        if (out.isEmpty()) {
+            File jar = jarFileFromCodeSource();
+            if (jar != null) {
+                try {
+                    scanJarFlat(jar, dir, pat, out);
+                } catch (Throwable t) {
+                    System.err.println("[bamfmenu] listResources code source failed: " + t);
                 }
             }
-        } catch (Throwable t) {
-            System.err.println("[bamfmenu] listResources error: " + t);
         }
         List<String> list = new ArrayList<>(out);
         list.sort(Comparator.naturalOrder());
         return list;
     }
+
+    /* Entries DIRECTLY under dir/ in one jar. */
+    private static void scanJarFlat(File jar, String dir, java.util.regex.Pattern pat, Set<String> out)
+            throws java.io.IOException {
+        String prefix = dir + "/";
+        try (ZipFile zip = new ZipFile(jar)) {
+            Enumeration<? extends ZipEntry> e = zip.entries();
+            while (e.hasMoreElements()) {
+                String n = e.nextElement().getName();
+                if (n.startsWith(prefix)) {
+                    String rest = n.substring(prefix.length());
+                    if (!rest.isEmpty() && rest.indexOf('/') < 0 && pat.matcher(rest).matches()) {
+                        out.add("/" + n);
+                    }
+                }
+            }
+        }
+    }
+
 
     /* Like listResources, but matches `pathRegex` against the RELATIVE PATH under /<dir>/ (subdirectories included),
        not just a filename, so a caller can enumerate a nested layout with a shape-enforcing pattern (e.g. the
@@ -149,12 +195,10 @@ public final class ResourceScan {
     public static List<String> listResourcesDeep(String dir, String pathRegex) {
         Set<String> out = new LinkedHashSet<>();
         java.util.regex.Pattern pat = java.util.regex.Pattern.compile(pathRegex);
-        try {
-            URL url = ResourceScan.class.getResource("/" + dir);
-            if (url != null && "file".equals(url.getProtocol())) {
-                // The file branch gets its OWN guard: a walk failure (unreadable dev dir) must degrade to the jar
-                // fallback below, not abort the whole scan with a partial result.
-                try {
+        Set<String> scannedJars = new LinkedHashSet<>();
+        for (URL url : rootsFor(dir)) {
+            try {
+                if ("file".equals(url.getProtocol())) {
                     Path d = Paths.get(url.toURI());
                     if (Files.isDirectory(d)) {
                         try (var stream = Files.walk(d)) {
@@ -166,36 +210,46 @@ public final class ResourceScan {
                             }
                         }
                     }
-                } catch (Throwable t) {
-                    System.err.println("[bamfmenu] listResourcesDeep dir walk failed (trying jar): " + t);
+                    continue;
                 }
-            }
-            if (out.isEmpty()) {
                 File jar = jarFileFromUrl(url);
-                if (jar == null) {
-                    jar = jarFileFromCodeSource();
+                if (jar != null && scannedJars.add(jar.getPath())) {
+                    scanJarDeep(jar, dir, pat, out);
                 }
-                if (jar != null) {
-                    String prefix = dir + "/";
-                    try (ZipFile zip = new ZipFile(jar)) {
-                        Enumeration<? extends ZipEntry> e = zip.entries();
-                        while (e.hasMoreElements()) {
-                            String n = e.nextElement().getName();
-                            if (n.startsWith(prefix)) {
-                                String rest = n.substring(prefix.length());
-                                if (!rest.isEmpty() && !rest.endsWith("/") && pat.matcher(rest).matches()) {
-                                    out.add("/" + n);
-                                }
-                            }
-                        }
-                    }
+            } catch (Throwable t) {
+                System.err.println("[bamfmenu] listResourcesDeep root failed (" + url + "): " + t);
+            }
+        }
+        if (out.isEmpty()) {
+            File jar = jarFileFromCodeSource();
+            if (jar != null) {
+                try {
+                    scanJarDeep(jar, dir, pat, out);
+                } catch (Throwable t) {
+                    System.err.println("[bamfmenu] listResourcesDeep code source failed: " + t);
                 }
             }
-        } catch (Throwable t) {
-            System.err.println("[bamfmenu] listResourcesDeep error: " + t);
         }
         List<String> list = new ArrayList<>(out);
         list.sort(Comparator.naturalOrder());
         return list;
+    }
+
+    /* Entries at any depth under dir/ in one jar, matched on the RELATIVE path. */
+    private static void scanJarDeep(File jar, String dir, java.util.regex.Pattern pat, Set<String> out)
+            throws java.io.IOException {
+        String prefix = dir + "/";
+        try (ZipFile zip = new ZipFile(jar)) {
+            Enumeration<? extends ZipEntry> e = zip.entries();
+            while (e.hasMoreElements()) {
+                String n = e.nextElement().getName();
+                if (n.startsWith(prefix)) {
+                    String rest = n.substring(prefix.length());
+                    if (!rest.isEmpty() && !rest.endsWith("/") && pat.matcher(rest).matches()) {
+                        out.add("/" + n);
+                    }
+                }
+            }
+        }
     }
 }

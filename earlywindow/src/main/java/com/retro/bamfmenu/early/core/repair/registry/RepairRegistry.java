@@ -67,7 +67,15 @@ public final class RepairRegistry {
         for (Found f : found) {
             out.add(f.item());
         }
-        System.err.println("[bamfmenu] repair items: " + out.size() + " loaded");
+        if (out.isEmpty()) {
+            // Zero items means the scan failed (defs ship in this jar), e.g. a shadowed `items` package;
+            // log the cause clearly so "No repair tools found." doesn't look intentional.
+            System.err.println("[bamfmenu] repair items: NONE FOUND, so the UPDATE AND REPAIR window will be "
+                    + "empty. The defs ship in this jar, so this is a scan fault: something else on the "
+                    + "classpath is very likely shadowing " + ITEMS_DIR);
+        } else {
+            System.err.println("[bamfmenu] repair items: " + out.size() + " loaded");
+        }
         return out;
     }
 }
