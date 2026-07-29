@@ -161,8 +161,11 @@ public final class ManifestParser {
                 } catch (PathGuard.BadPath bp) {
                     throw new ManifestError(at + ".inner: " + bp.getMessage());
                 }
+                // Optional release backref on release-zip (same as release-asset) so unchanged data zips aren't
+                // re-uploaded. This reader must ship before release.py emits the field (via engine_schema_support).
+                String release = s.containsKey("release") ? str(s.get("release"), at + ".release") : null;
                 return new FileEntry.Source(FileEntry.Source.Type.RELEASE_ZIP,
-                        reqStr(s, "asset", at), inner, null, null, null);
+                        reqStr(s, "asset", at), inner, release, null, null);
             }
             case "release-asset" -> {
                 String release = s.containsKey("release") ? str(s.get("release"), at + ".release") : null;

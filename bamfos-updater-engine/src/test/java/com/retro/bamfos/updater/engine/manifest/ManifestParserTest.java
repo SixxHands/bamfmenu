@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,6 +37,7 @@ class ManifestParserTest {
         FileEntry zip = m.files().get(0);
         assertEquals(FileEntry.Source.Type.RELEASE_ZIP, zip.source().type());
         assertEquals("config/bcc-common.toml", zip.source().inner());
+        assertNull(zip.source().release());
 
         FileEntry thisRelease = m.files().get(1);
         assertNull(thisRelease.source().release()); // absent backref = asset on THIS release
@@ -54,6 +56,24 @@ class ManifestParserTest {
         FileEntry url = m.files().get(5);
         assertEquals(FileEntry.Source.Type.URL, url.source().type());
         assertEquals(FileEntry.Clazz.RELAUNCH, url.clazz());
+    }
+
+    /**
+     * Pins parsing of the data-zip release backref so carried-forward configs fetch from the referenced
+     * release instead of looking for a missing asset on the current tag.
+     */
+    @Test
+    void aDataZipCanNameAnOlderReleaseThatStillCarriesIt() throws IOException {
+        String carried = example().replaceFirst(
+                "\"type\": \"release-zip\",",
+                "\"type\": \"release-zip\", \"release\": \"v0.2.4\",");
+        assertNotEquals(example(), carried);
+
+        FileEntry zip = ManifestParser.parse(carried).files().get(0);
+
+        assertEquals(FileEntry.Source.Type.RELEASE_ZIP, zip.source().type());
+        assertEquals("v0.2.4", zip.source().release());
+        assertEquals("data-common.zip", zip.source().asset());
     }
 
     @Test
