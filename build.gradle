@@ -74,6 +74,37 @@ tasks.named('jar') {
     exclude '**/*.md'
 }
 
+/* Reproducible archives, for every module at once. A jar is supposed to be a pure function of its content,
+   and Gradle's defaults quietly make it a function of the CLOCK instead.
+   THE GAP. preserveFileTimestamps defaults to TRUE, so every entry carries the wall-clock mtime of its copy
+   in the build tree, and the synthesized META-INF/ directory entry gets stamped with the moment the jar task
+   ran. a back to back re-jar of the 77MB early window, with compileJava UP-TO-DATE,
+   changed exactly TWO bytes, the DOS mod-time of that one directory entry in the local header and again in
+   the central directory, and came back with a completely different sha256. release.py decides "unchanged, do
+   not upload" by sha256 alone, so the five jars we build went up the wire on every single release, 77MB of
+   early window included, on releases where the only edit was somewhere else entirely. The 269 third party
+   jars were never affected and always carried: they are static files sitting in drop/ that nothing rebuilds,
+   which is exactly why this went unnoticed, the upload count looked reasonable. The cascade made our five
+   worse: the shim carries the engine jar as a resource and the watchdog carries it again under
+   META-INF/jarjar, so one engine re-jar moved three artifacts.
+   THE GUARD. preserveFileTimestamps = false pins every entry to Gradle's constant 1980 stamp, so only real
+   content can move the hash. reproducibleFileOrder = true sorts the entries too: the order was whatever the
+   filesystem walk handed back, which happened to be stable on this NTFS volume every time we looked, and is
+   not a thing to bet a release on.
+   IMPORTANT: allprojects, NOT a bare tasks.withType up here. `tasks` in a build script means THIS project's
+   tasks, so the bare form configures the root jar and silently misses all four subprojects, which is every
+   jar that actually ships, and it looks completely correct while doing it. The watchdog's jarJar is a
+   DefaultTask rather than an archive task so this never reaches it, and it does not need to: jarJar emits a
+   directory that the ordinary jar task then packs, and the jar task is reached.
+   Proof it is working is two clean builds in a row hashing the same, which is what tools/repro-check.ps1
+   does. Run it after touching anything in here. */
+allprojects {
+    tasks.withType(AbstractArchiveTask).configureEach {
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+}
+
 tasks.withType(ProcessResources).configureEach {
     var replaceProperties = [
             minecraft_version      : minecraft_version,
