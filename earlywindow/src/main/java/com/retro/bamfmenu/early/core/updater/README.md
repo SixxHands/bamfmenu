@@ -29,7 +29,16 @@ joke row and the POST screen says the kmod is missing, once.
   a shim ran however it got loaded. The CAPS finale answers to whether the VERSION moved: same version with
   files restored draws BAMFOS REPAIRED n FILES, and a sync that moved only the updater's own jars sends no
   SYNCED at all, so the pending line stands alone.
-  `syncActive()` is the mid-sync flag the DEL gate and the repair window's single-writer refusal both read.
+  The block draws TWO stories, and the second one has no download in it: `APPLY`/`ASTEP`/`ADONE` is step 0
+  working through a leftover journal, which for a factory reset is the whole pack going back down from bytes
+  fetched before the game closed. It used to key entirely off `SYNC`, so that boot showed an empty terminal for
+  as long as the moves took. Three rows, one per phase (`remove`, `install`, `verify`), and they STAY once they
+  finish rather than one row renaming itself, because did-it-really-delete-my-stuff is the question that screen
+  answers. `ProgressBar.count` draws its bar instead of `ProgressBar.of`, since the bytes are already local and
+  what a player is waiting on is a count of files (the byte bar would print `879 B` for it). A phase word this
+  build has never heard of leaves the counts alone, the same degrade rule the unknown-EVENT arm runs on.
+  `syncActive()` is the mid-sync flag the DEL gate and the repair window's single-writer refusal both read, and
+  an apply raises it too: files are moving either way.
   `activity()` is the file in flight plus WHY it is being touched, which the UPDATE AND REPAIR window shows in
   its notice slot. The why rides as a THIRD field on the existing FILE event rather than an event of its own,
   so an engine older than this reader sends two fields and the line simply reads as the filename alone.

@@ -31,6 +31,8 @@ public final class UpdaterFeed {
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
     /** Aligns the progress bar under the value column of "Fetching         : " (19 chars). */
     private static final int BAR_INDENT = 19;
+    /** Aligns the apply progress bar 4 chars further right to match its dotted label rows. */
+    private static final int APPLY_BAR_INDENT = 23;
     private static final int BAR_WIDTH = 38;
     /** Reused from the hardware block so the updater row matches Display Adapter while probing. */
     private static final String DETECTING = "Detecting ...";
@@ -66,6 +68,20 @@ public final class UpdaterFeed {
     private boolean identified; // True once we get IDENT with the channel name.
     private String identChannel = "";
     private String channelState = ""; // Channel status from the updater (empty until reported).
+
+    /* Step 0 apply state (BootBus.applyBegin / applyStep / applyEnd). Kept separate from the sync
+       fields above since both can run in one boot and an apply shouldn't look like a download. */
+    private boolean sawApply;
+    private String applyVersion = "";
+    private String applyPhase = ""; // remove | install | verify, "" once it is over
+    private String applyPath = "";
+    private int removeDone;
+    private int removeTotal;
+    private int placeDone;
+    private int placeTotal;
+    private int verifyDone;
+    private int verifyTotal;
+    private String applyState = ""; // ok | partial, "" while it is still running
 
     public UpdaterFeed(String gameDir) {
         busFile = Paths.get(gameDir, ".bamfos-updater", "bus.log");
@@ -176,6 +192,43 @@ public final class UpdaterFeed {
                     }
                 }
             }
+            case "APPLY" -> {
+                sawApply = true;
+                // Block opening the BIOS with DEL while files are being moved, same as during sync.
+                syncActive = true;
+                applyVersion = f.length > 1 ? f[1] : "";
+                removeTotal = parseInt(f, 2);
+                placeTotal = parseInt(f, 3);
+            }
+            case "ASTEP" -> {
+                applyPhase = f.length > 1 ? f[1] : "";
+                applyPath = f.length > 2 ? f[2] : "";
+                int done = parseInt(f, 3);
+                int total = parseInt(f, 4);
+                switch (applyPhase) {
+                    case "remove" -> {
+                        removeDone = done;
+                        removeTotal = total;
+                    }
+                    case "install" -> {
+                        placeDone = done;
+                        placeTotal = total;
+                    }
+                    case "verify" -> {
+                        verifyDone = done;
+                        verifyTotal = total;
+                    }
+                    default -> {
+                        // Ignore unknown phases from newer engines instead of guessing a row name.
+                    }
+                }
+            }
+            case "ADONE" -> {
+                applyState = f.length > 1 ? f[1] : "";
+                applyPhase = ""; // Clear the bar and spinner to mark the block finished.
+                applyPath = "";
+                syncActive = false;
+            }
             case "PHASE" -> applying = true;
             case "SYNCED" -> {
                 syncedFrom = f.length > 1 ? f[1] : "";
@@ -274,10 +327,16 @@ public final class UpdaterFeed {
 
     /** The Award-style updater POST block, rebuilt per frame like every other terminal string. */
     public List<Line> postBlock(int frame) {
-        if (!sawSync) {
+        if (!sawSync && !sawApply) {
             return List.of();
         }
         List<Line> out = new ArrayList<>();
+        if (sawApply) {
+            applyRows(out, frame);
+        }
+        if (!sawSync) {
+            return out.size() <= MAX_ROWS ? out : out.subList(out.size() - MAX_ROWS, out.size());
+        }
         out.add(new Line("Updating BAMFOS", false));
         out.add(new Line("Update Channel   : " + repo, false));
         out.add(new Line("Installed        : " + from, false));
@@ -313,6 +372,66 @@ public final class UpdaterFeed {
         }
         // Keep the newest rows visible by trimming from the top.
         return out.size() <= MAX_ROWS ? out : out.subList(out.size() - MAX_ROWS, out.size());
+    }
+
+    /**
+     * Renders step 0 journal apply progress (e.g. factory reset).
+     * Keeps one row per phase instead of overwriting so removals stay visible once installs begin.
+     */
+    private void applyRows(List<Line> out, int frame) {
+        out.add(new Line("Applying BAMFOS", false));
+        if (!applyVersion.isEmpty()) {
+            out.add(new Line("Target           : " + applyVersion, false));
+        }
+        if (removeTotal > 0) {
+            out.add(new Line(phaseRow("Removing", removeDone, removeTotal), false));
+        }
+        if (placeTotal > 0) {
+            out.add(new Line(phaseRow("Installing", placeDone, placeTotal), false));
+        }
+        if (verifyTotal > 0) {
+            out.add(new Line(phaseRow("Verifying", verifyDone, verifyTotal), false));
+        }
+        if (!applyPhase.isEmpty()) {
+            // Track only the active phase in the progress bar; combining all three phases makes the bar
+            // stall and jump because their sizes vary wildly.
+            ProgressBar.Row bar = ProgressBar.count(APPLY_BAR_INDENT, BAR_WIDTH, phaseDone(), phaseTotal());
+            if (bar != null) {
+                out.add(new Line(bar.text(), false, bar.fill()));
+            }
+            out.add(new Line("  " + applyPath + "  " + SPINNER[(frame / 3) % SPINNER.length], false));
+        }
+        if ("partial".equals(applyState)) {
+            // Highlight non-ok end states like the sync summary row (skip `ok` since each phase already shows OK).
+            out.add(new Line("Apply stopped ........ INCOMPLETE", true));
+        }
+    }
+
+    private int phaseDone() {
+        return switch (applyPhase) {
+            case "remove" -> removeDone;
+            case "install" -> placeDone;
+            default -> verifyDone;
+        };
+    }
+
+    private int phaseTotal() {
+        return switch (applyPhase) {
+            case "remove" -> removeTotal;
+            case "install" -> placeTotal;
+            default -> verifyTotal;
+        };
+    }
+
+    /**
+     * Formats a phase row with dot padding aligned to the sync Verifying/Applying rows.
+     * Appends OK only when all items in the phase are done.
+     */
+    private static String phaseRow(String label, int done, int total) {
+        String value = done >= total
+                ? total + (total == 1 ? " file  OK" : " files  OK")
+                : done + " of " + total;
+        return label + " " + ".".repeat(Math.max(3, 21 - label.length())) + " " + value;
     }
 
     /** The pack host's CAPS finale, worded off whether the VERSION actually moved. A converged box runs a whole

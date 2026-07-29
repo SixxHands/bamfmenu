@@ -5,6 +5,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.HashMap;
+import java.util.Map;
 
 // One-way tab-separated event log (.bamfos-updater/bus.log) tailed by earlywindow to render boot sync status.
 public final class BootBus {
@@ -13,6 +15,7 @@ public final class BootBus {
 
     private final Path file; // null = stdout mirror only (server door, tests)
     private int lastPct = -1; // Throttle for fileProgress, reset on fileDone so each file gets a fresh bar.
+    private final Map<String, Integer> lastApplyPct = new HashMap<>(); // per-phase throttle for applyStep
 
     private BootBus(Path file) {
         this.file = file;
@@ -123,6 +126,34 @@ public final class BootBus {
 
     public void applying() {
         emit("PHASE", "Applying");
+    }
+
+    /** Announces step-0 journal replay with remove/install counts for the boot screen.
+     *  Not mirrored to stdout because SyncCore already logs the console summary. */
+    public void applyBegin(String version, int removals, int placements) {
+        emit("APPLY", version, Integer.toString(removals), Integer.toString(placements));
+    }
+
+    /** Reports per-phase journal replay progress: remove | install | verify (each phase tracks separate
+     *  done/total counts since journals interleave deletes and moves). Throttled per phase to one line
+     *  per whole percent; matched by literal in UpdaterFeed.event (ASTEP). */
+    public void applyStep(String phase, String path, int done, int total) {
+        if (total <= 0) {
+            return;
+        }
+        int pct = (int) Math.min(100, Math.max(0, (long) done * 100 / total));
+        Integer last = lastApplyPct.get(phase);
+        if (last != null && last == pct) {
+            return;
+        }
+        lastApplyPct.put(phase, pct);
+        emit("ASTEP", phase, path, Integer.toString(done), Integer.toString(total));
+    }
+
+    /** Marks journal apply done: ok | partial (`partial` means stuck files or failed verification).
+     *  Boot continues either way; updater failures must never block game startup. */
+    public void applyEnd(String state) {
+        emit("ADONE", state);
     }
 
     /**

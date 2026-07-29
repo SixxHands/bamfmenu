@@ -12,9 +12,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 // Crash-safe apply journal written after all downloads verify and before any file moves, so an interrupted apply finishes offline on next boot.
 public final class Journal {
@@ -72,6 +74,14 @@ public final class Journal {
             return retryable.isEmpty() && abandoned.isEmpty();
         }
     }
+
+    /** Progress callback invoked right before each op starts (`done` is 1-based, starting at 1 of n). */
+    public interface Watcher {
+        void at(Op op, int done, int total);
+    }
+
+    private static final Watcher QUIET = (op, done, total) -> {
+    };
 
     public String targetVersion = "";
     public final List<Op> ops = new ArrayList<>();
@@ -150,9 +160,17 @@ public final class Journal {
      * is returned rather than thrown so one stuck file doesn't poison the replay or commit bad ledger rows.
      */
     public Result replay(Path instanceDir) {
+        return replay(instanceDir, QUIET);
+    }
+
+    /** Same as replay(), but reports each op as it starts for progress bars (factory resets can have
+     *  thousands of ops and would look hung without progress output). */
+    public Result replay(Path instanceDir, Watcher watcher) {
         List<Op> retryable = new ArrayList<>();
         List<Op> abandoned = new ArrayList<>();
+        int done = 0;
         for (Op op : ops) {
+            watcher.at(op, ++done, ops.size());
             try {
                 Path to = instanceDir.resolve(op.to());
                 if (op.kind().equals("delete")) {
@@ -188,5 +206,46 @@ public final class Journal {
             }
         }
         return new Result(retryable, abandoned);
+    }
+
+    /**
+     * Reads back off DISK what the given ops claimed to do, and returns the ones it cannot prove: a delete
+     * whose path is still there, a placement that is missing, a placement whose bytes are not the sha the
+     * journal named. The caller passes the ops replay reported nothing about, because replay already spoke for
+     * the rest and this pass exists to catch the opposite case, an op that returned without throwing and did
+     * not do what it said.
+     * Worth its cost only because of WHEN it runs: a factory reset's next boot may have no network at all,
+     * and the sync that would otherwise re-hash everything never gets to run. This answers from local bytes,
+     * which is the same thing step 0 itself is for.
+     * A delete is only judged when nothing later in the SAME journal places that path again. An op pair
+     * like that is a hazard FactoryReset already refuses to write, and reading it as a failure here would
+     * report a file that is exactly where it should be.
+     */
+    public static List<Op> verify(Path instanceDir, List<Op> ops, Watcher watcher) {
+        Set<String> placed = new HashSet<>();
+        for (Op op : ops) {
+            if (!op.kind().equals("delete")) {
+                placed.add(op.to());
+            }
+        }
+        List<Op> wrong = new ArrayList<>();
+        int done = 0;
+        for (Op op : ops) {
+            watcher.at(op, ++done, ops.size());
+            Path to = instanceDir.resolve(op.to());
+            try {
+                if (op.kind().equals("delete")) {
+                    if (!placed.contains(op.to()) && Files.exists(to)) {
+                        wrong.add(op);
+                    }
+                } else if (!Files.isRegularFile(to) || !HashUtils.sha256(to).equals(op.sha256())) {
+                    wrong.add(op);
+                }
+            } catch (IOException unreadable) {
+                // If we can't hash the file, treat it as unverified.
+                wrong.add(op);
+            }
+        }
+        return wrong;
     }
 }

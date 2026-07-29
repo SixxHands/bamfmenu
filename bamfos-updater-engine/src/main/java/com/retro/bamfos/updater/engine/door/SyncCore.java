@@ -92,20 +92,61 @@ final class SyncCore {
         }
     }
 
-    /** step 0: finish any crashed apply from LOCAL bytes; stuck ops are re-planned, never poison. */
-    static void stepZero(Path dir) throws IOException {
+    /** Headless step 0 for callers without a boot terminal (server and tests). */
+    static boolean stepZero(Path dir) throws IOException {
+        return stepZero(dir, BootBus.headless());
+    }
+
+    /** Step 0: replays any leftover journal from local staging and verifies the resulting files on disk.
+     *  Returns true if any verified path doesn't match, signaling the caller to skip the up-to-date shortcut. */
+    static boolean stepZero(Path dir, BootBus bus) throws IOException {
         Journal leftover = Journal.load(Journal.pathIn(dir));
         if (leftover.ops.isEmpty()) {
-            return;
+            return false;
         }
-        System.out.println("[updater] finishing interrupted apply (" + leftover.ops.size() + " ops)");
-        Journal.Result replayed = leftover.replay(dir);
+        int total = leftover.ops.size();
+        int removals = (int) leftover.ops.stream().filter(o -> o.kind().equals("delete")).count();
+        System.out.println("[updater] finishing interrupted apply (" + total + " ops)");
+        bus.applyBegin(leftover.targetVersion, removals, total - removals);
+        // each phase counts itself, because an ordinary journal interleaves the two kinds and one running total
+        // would draw a bar that says "installing" over a delete
+        int[] removed = {0};
+        int[] placed = {0};
+        Journal.Result replayed = leftover.replay(dir, (op, done, n) -> {
+            if (op.kind().equals("delete")) {
+                bus.applyStep("remove", op.to(), ++removed[0], removals);
+            } else {
+                bus.applyStep("install", op.to(), ++placed[0], total - removals);
+            }
+        });
         if (!replayed.abandoned().isEmpty()) {
             // Drop abandoned ops (missing/changed source or already-moved before a crash) so sync below can
             // re-plan them if needed. Word gently since a fully-applied pre-crash journal also lands here.
             System.out.println("[updater] " + replayed.abandoned().size()
                     + " ops could not be re-verified, those paths get re-planned: " + names(replayed.abandoned()));
         }
+        // Verify every op that returned cleanly (file exists with expected hash, or deleted path is gone).
+        // Collect the list before bookkeeping below clears it.
+        List<Journal.Op> landed = new ArrayList<>(leftover.ops);
+        landed.removeAll(replayed.retryable());
+        landed.removeAll(replayed.abandoned());
+        List<Journal.Op> wrong = Journal.verify(dir, landed,
+                (op, done, n) -> bus.applyStep("verify", op.to(), done, n));
+        if (!wrong.isEmpty()) {
+            System.out.println("[updater] " + wrong.size() + " of " + landed.size() + " applied paths are not"
+                    + " what the journal placed, so this cycle re-derives the whole install: " + names(wrong));
+        }
+        keepOrDrop(dir, leftover, replayed);
+        // `partial` covers files still stuck and files that failed readback. An abandoned op isn't partial
+        // by itself (usually a move whose source was already consumed by an earlier replay); verify above
+        // distinguishes the two.
+        bus.applyEnd(wrong.isEmpty() && replayed.retryable().isEmpty() ? "ok" : "partial");
+        return !wrong.isEmpty();
+    }
+
+    /** Whether the journal survives this boot: kept for the ops still worth another go, deleted the moment
+     *  nothing is left, because an empty journal is a file every later boot reads for nothing. */
+    private static void keepOrDrop(Path dir, Journal leftover, Journal.Result replayed) throws IOException {
         if (replayed.retryable().isEmpty()) {
             Files.deleteIfExists(Journal.pathIn(dir));
             return;

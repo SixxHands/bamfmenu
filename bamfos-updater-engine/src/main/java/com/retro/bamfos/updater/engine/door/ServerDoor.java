@@ -71,8 +71,13 @@ public final class ServerDoor {
                 return EngineHealth.proven(dir, 0); // another instance is already running sync
             }
             try (InstanceLock ignored = lock.get()) {
-                SyncCore.stepZero(dir);
-                repair = repair || selfHeal(dir);
+                // same as client: step 0 saw a file mismatch on readback, so force a full hash check
+                boolean unproven = SyncCore.stepZero(dir);
+                if (unproven) {
+                    SyncCore.loud(dir, "step 0 applied files that do not read back as what it placed, so this "
+                            + "cycle re-derives the whole install");
+                }
+                repair = repair || unproven || selfHeal(dir);
                 if (repair) {
                     // --repair is the operator saying "re-derive this box", so it is also the way back from a
                     // false-positive engine refusal: nothing else ever clears that memory, and a box pinned to

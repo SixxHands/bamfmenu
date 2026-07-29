@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.Fx;
+import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
@@ -314,6 +315,49 @@ class ClientDoorTest {
         assertTrue(out.contains("could not be re-verified"), String.valueOf(out));
         assertTrue(out.contains("mods/vanished.jar"), String.valueOf(out));
         assertTrue(out.contains("mods/locked.jar"), String.valueOf(out));
+    }
+
+    /** Step 0 must emit literal progress lines on the bus (matched by UpdaterFeed in the other jar) so
+     * large factory-reset replays do not look hung. */
+    @Test
+    void stepZero_drawsItsThreePhasesOnTheBus() throws IOException {
+        Fx.write(dir, ".bamfos-updater/staging/there.part", CM);
+        Fx.write(dir, "mods/old.jar", "the version being replaced".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.targetVersion = "vNEW";
+        j.ops.add(new Journal.Op("delete", "", "mods/old.jar", ""));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/there.part", "mods/new.jar",
+                HashUtils.sha256(CM)));
+        j.save(Journal.pathIn(dir));
+
+        assertFalse(SyncCore.stepZero(dir, BootBus.at(dir)));
+
+        String bus = Files.readString(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("APPLY\tvNEW\t1\t1"), String.valueOf(bus));
+        assertTrue(bus.contains("ASTEP\tremove\tmods/old.jar\t1\t1"), bus);
+        assertTrue(bus.contains("ASTEP\tinstall\tmods/new.jar\t1\t1"), bus);
+        assertTrue(bus.contains("ASTEP\tverify\t"), String.valueOf(bus));
+        assertTrue(bus.contains("ADONE\tok"), String.valueOf(bus));
+    }
+
+    /** Step 0 must verify written bytes after replay; two moves onto one destination both succeed, so
+     * read-back is the only way to catch the wrong bytes offline. */
+    @Test
+    void stepZero_saysPartialAndForcesARederiveWhenAFileDoesNotReadBack() throws IOException {
+        byte[] other = "different bytes entirely".getBytes(StandardCharsets.UTF_8);
+        Fx.write(dir, ".bamfos-updater/staging/a.part", CM);
+        Fx.write(dir, ".bamfos-updater/staging/b.part", other);
+        Journal j = new Journal();
+        j.targetVersion = "vNEW";
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/a.part", "mods/x.jar", HashUtils.sha256(CM)));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/b.part", "mods/x.jar", HashUtils.sha256(other)));
+        j.save(Journal.pathIn(dir));
+
+        String out = captureOut(() -> assertTrue(SyncCore.stepZero(dir, BootBus.at(dir))));
+
+        assertTrue(out.contains("are not what the journal placed"), out);
+        assertTrue(out.contains("mods/x.jar"), String.valueOf(out));
+        assertTrue(Files.readString(dir.resolve(".bamfos-updater").resolve("bus.log")).contains("ADONE\tpartial"));
     }
 
     private interface Body {

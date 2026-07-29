@@ -54,7 +54,9 @@ public final class ClientDoor {
                 return EngineHealth.proven(dir, 0);
             }
             try (InstanceLock ignored = lock.get()) {
-                SyncCore.stepZero(dir);
+                // Pass the bus so large replays (like a factory reset) render progress. True means post-replay
+                // verification found a mismatch, which must bypass the up-to-date shortcut below.
+                boolean unproven = SyncCore.stepZero(dir, bus);
                 kick = KickGuard.consume(dir, cfg.pins(), bus);
 
                 String tag;
@@ -84,14 +86,19 @@ public final class ClientDoor {
                         boolean cached = Files.isRegularFile(
                                 dir.resolve(".bamfos-updater").resolve("manifest-current.json"));
                         boolean agrees = SyncCore.ledgerAgrees(dir, local);
-                        if (missing.isEmpty() && cached && agrees) {
+                        if (missing.isEmpty() && cached && agrees && !unproven) {
                             bus.line("updater: packages current (" + local + "), nothing to do");
                             // three checks agreed that this box is already as converged as a boot can make it,
                             // which is a VERDICT and not a skip. The finally is where that distinction pays off
                             reachedVerdict = true;
                             return EngineHealth.proven(dir, 0);
                         }
-                        if (missing.isPresent()) {
+                        if (unproven) {
+                            // FIRST, because it is the loudest of the three: step 0 read a file back and the bytes
+                            // were not the ones it had just placed, which nothing else here can see. Same
+                            // register as the missing-file line below, because it is the same class of fault
+                            bus.line("integrity: applied files do not match, re-deriving");
+                        } else if (missing.isPresent()) {
                             // A managed file is missing even though the version matches; bypass the shortcut so the
                             // reconciler can restore it, and report it as an integrity issue.
                             bus.line("integrity: " + missing.get() + " missing, restoring");

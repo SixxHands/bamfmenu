@@ -110,6 +110,103 @@ class UpdaterFeedTest {
         }
     }
 
+    /**
+     * Step 0 factory reset moves already-fetched local files and never emits SYNC;
+     * the apply block must still render progress instead of showing an empty terminal.
+     */
+    @Test
+    void anApplyBlockDrawsWithNoSyncEventAtAll() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tremove\tconfig/gone.json\t412\t412",
+                "ASTEP\tinstall\tmods/create-6.0.4.jar\t630\t879");
+        String block = String.join("\n", feed.postBlock(0).stream().map(UpdaterFeed.Line::text).toList());
+
+        assertTrue(block.contains("Applying BAMFOS"), block);
+        assertTrue(block.contains("Target           : v0.2.5"), block);
+        assertTrue(block.contains("Removing ............. 412 files  OK"), String.valueOf(block));
+        assertTrue(block.contains("Installing ........... 630 of 879"), block);
+        assertTrue(block.contains("[###"), String.valueOf(block));
+        assertTrue(block.contains("630/879 files"), String.valueOf(block));
+        assertTrue(block.contains("mods/create-6.0.4.jar"), block);
+    }
+
+    /** Verify pass gets a dedicated row and progress bar since hashing during a reset can take minutes. */
+    @Test
+    void theVerifyPhaseGetsItsOwnRow() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tverify\tmods/create-6.0.4.jar\t1291\t1291",
+                "ADONE\tok");
+        String block = String.join("\n", feed.postBlock(0).stream().map(UpdaterFeed.Line::text).toList());
+
+        assertTrue(block.contains("Verifying ............ 1291 files  OK"), block);
+        assertFalse(block.contains("Apply stopped"));
+        assertFalse(feed.syncActive());
+    }
+
+    /** Pins column alignment between values and the progress bar bracket against label-length changes. */
+    @Test
+    void everyValueAndTheBarShareOneColumn() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tremove\tconfig/gone.json\t412\t412",
+                "ASTEP\tinstall\tmods/create-6.0.4.jar\t630\t879");
+        int column = -1;
+        for (UpdaterFeed.Line l : feed.postBlock(0)) {
+            String t = l.text();
+            int at = t.indexOf(". ") >= 0 ? t.indexOf(". ") + 2 : t.indexOf('[');
+            if (at < 0 || !t.contains("..")) {
+                continue; // Title and active file path rows don't have a value column.
+            }
+            if (column < 0) {
+                column = at;
+            }
+            assertEquals(column, at, String.valueOf(t));
+        }
+        assertEquals(23, column);
+    }
+
+    /** Blocks opening the BIOS while files are being moved, same as during a sync. */
+    @Test
+    void anApplyInFlightHoldsTheBiosShut() throws IOException {
+        assertTrue(feedOn("APPLY\tv0.2.5\t412\t879").syncActive());
+    }
+
+    /** The block has to TERMINATE on something other than rows that all say OK, or a player reads a partial
+     *  apply as a finished one. `partial` is files still stuck or bytes that did not read back. */
+    @Test
+    void aPartialApplyClosesOnTheHonestWord() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tinstall\tmods/create-6.0.4.jar\t878\t879",
+                "ADONE\tpartial");
+        List<UpdaterFeed.Line> rows = feed.postBlock(0);
+        UpdaterFeed.Line last = rows.get(rows.size() - 1);
+
+        assertEquals("Apply stopped ........ INCOMPLETE", last.text());
+        assertTrue(last.bright());
+        for (UpdaterFeed.Line l : rows) {
+            assertFalse(l.text().contains("[#"), String.valueOf(l.text()));
+        }
+    }
+
+    /**
+     * Unknown phase names from newer engines should be ignored without altering counts,
+     * since the shim can upgrade the engine independently of this jar.
+     */
+    @Test
+    void aPhaseFromANewerEngineIsIgnoredNotGuessedAt() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t2\t2",
+                "ASTEP\tinstall\tmods/a.jar\t2\t2",
+                "ASTEP\tdefragmenting\tmods/b.jar\t1\t9");
+        String block = String.join("\n", feed.postBlock(0).stream().map(UpdaterFeed.Line::text).toList());
+
+        assertTrue(block.contains("Installing ........... 2 files  OK"), String.valueOf(block));
+        assertFalse(block.contains("1 of 9"), String.valueOf(block));
+    }
+
     private static String[] midSync(String endState) {
         return new String[]{
                 "SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",

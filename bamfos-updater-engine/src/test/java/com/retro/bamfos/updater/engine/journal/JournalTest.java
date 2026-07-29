@@ -188,6 +188,72 @@ class JournalTest {
         assertFalse(Files.exists(file));
     }
 
+    /** Progress bar relies on these callbacks. Factory reset journals have thousands of ops, so
+     *  missing notifications would make the progress bar look frozen. */
+    @Test
+    void theWatcherIsToldAboutEveryOpOnceAndInOrder() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/part1"), NEW);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/old.jar"), "old".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("delete", "", "mods/old.jar", ""));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/new.jar", HashUtils.sha256(NEW)));
+
+        java.util.List<String> seen = new java.util.ArrayList<>();
+        j.replay(dir, (op, done, total) -> seen.add(op.to() + " " + done + "/" + total));
+
+        assertEquals(java.util.List.of("mods/old.jar 1/2", "mods/new.jar 2/2"), seen);
+    }
+
+    /** Verify check on a normal successful boot should report nothing; a false positive here would
+     *  trigger a full re-derive. */
+    @Test
+    void verifyProvesAnApplyThatActuallyLanded() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/part1"), NEW);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/old.jar"), "old".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("delete", "", "mods/old.jar", ""));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/new.jar", HashUtils.sha256(NEW)));
+        assertTrue(j.replay(dir).allLanded());
+
+        assertTrue(Journal.verify(dir, j.ops, (op, done, total) -> { }).isEmpty());
+    }
+
+    /**
+     * Tests the three ways a journal op can claim success while wrong on disk, which matters when the boot
+     * after a factory reset has no network. Built by hand since replay itself shouldn't produce these states.
+     */
+    @Test
+    void verifyCatchesAnOpThatSaidItLandedAndDidNot() throws IOException {
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/survived.jar"), "still here".getBytes(StandardCharsets.UTF_8));
+        Files.write(dir.resolve("mods/wrong.jar"), "not the bytes we placed".getBytes(StandardCharsets.UTF_8));
+        java.util.List<Journal.Op> ops = java.util.List.of(
+                new Journal.Op("delete", "", "mods/survived.jar", ""),
+                new Journal.Op("move", ".bamfos-updater/staging/p", "mods/wrong.jar", HashUtils.sha256(NEW)),
+                new Journal.Op("move", ".bamfos-updater/staging/q", "mods/never-arrived.jar", HashUtils.sha256(NEW)));
+
+        java.util.List<Journal.Op> wrong = Journal.verify(dir, ops, (op, done, total) -> { });
+
+        assertEquals(3, wrong.size(), String.valueOf(wrong));
+    }
+
+    /** Deleting and then placing the same path shouldn't be flagged as a failed delete when the
+     *  new file is present at the end. */
+    @Test
+    void verifyDoesNotFailADeleteThatALaterOpPutsBack() throws IOException {
+        Files.createDirectories(dir.resolve("config"));
+        Files.write(dir.resolve("config/foo.json"), NEW);
+        java.util.List<Journal.Op> ops = java.util.List.of(
+                new Journal.Op("delete", "", "config/foo.json", ""),
+                new Journal.Op("move", ".bamfos-updater/staging/p", "config/foo.json", HashUtils.sha256(NEW)));
+
+        assertTrue(Journal.verify(dir, ops, (op, done, total) -> { }).isEmpty());
+    }
+
     @Test
     void lock_blocksLiveHolder_reclaimsDeadHolder() throws IOException {
         // a live holder (this very JVM) blocks a second acquire
