@@ -1,6 +1,7 @@
 package com.retro.bamfmenu.early.core.repair.view;
 
 import com.retro.bamfmenu.early.core.repair.api.PageRow;
+import com.retro.bamfmenu.early.core.repair.api.RepairEffect;
 import com.retro.bamfmenu.early.core.repair.api.RepairItem;
 import com.retro.bamfmenu.early.core.repair.api.RepairPage;
 import com.retro.bamfmenu.early.core.repair.api.RepairResult;
@@ -21,10 +22,14 @@ public final class RepairFrames {
 
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
 
+    /** Fixed wrap width for confirmation dialog text, narrow enough for the smallest supported BIOS window.
+     *  TerminalCanvas.popup sizes to the longest line, so unwrapped warnings would overflow the screen. */
+    public static final int MODAL_WIDTH = 60;
+
     /** Snapshot of inputs needed to build a frame without reaching back into session state. */
     public record View(List<RepairItem> items, int sel, UpdaterState state, RepairPage page,
                        int pageSel, int pageTop, String working, String activity, RepairResult last,
-                       String hints, String confirm, String editTitle, String editField) {
+                       String hints, RepairEffect.Confirm confirm, String editTitle, String editField) {
 
         /** True while a worker action is running, switching the notice slot to a spinner. */
         public boolean busy() {
@@ -241,10 +246,24 @@ public final class RepairFrames {
 
     /* Confirm dialogs and text input share one modal channel so `prompting()` covers both.
        Text input draws between `> <` with a `_` caret rather than nesting a second border. */
-    private static List<String> modalLines(String confirm, String editTitle, String editField) {
+    private static List<String> modalLines(RepairEffect.Confirm confirm, String editTitle, String editField) {
         if (!editTitle.isEmpty()) {
             return List.of("", editTitle, "", "> " + editField, "", "[ENTER] Save      [ESC] Cancel");
         }
-        return confirm.isEmpty() ? List.of() : List.of("", confirm, "[ENTER] Yes      [ESC] No");
+        if (confirm == null) {
+            return List.of();
+        }
+        // Wrap to a fixed width: TerminalCanvas.popup sizes to the longest line, so an unwrapped
+        // warning would overflow the screen.
+        List<String> out = new ArrayList<>();
+        out.add("");
+        out.add(confirm.title());
+        out.add("");
+        out.addAll(RepairBox.wrap(confirm.body(), MODAL_WIDTH));
+        out.add("");
+        // its OWN key names. Two boxes that both read Yes and No are one box shown twice to a reader, and
+        // the entire point of a second warning is that it is not the first
+        out.add("[ENTER] " + confirm.yes() + "      [ESC] " + confirm.no());
+        return out;
     }
 }

@@ -6,6 +6,10 @@ import com.retro.bamfos.updater.engine.door.Doors;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
+import com.retro.bamfos.updater.engine.factory.FactoryReset;
+import com.retro.bamfos.updater.engine.manifest.Manifest;
+import com.retro.bamfos.updater.engine.manifest.ManifestParser;
+import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
@@ -124,6 +128,74 @@ public final class UpdaterOps {
         } catch (IOException e) {
             return 2;
         }
+    }
+
+    /**
+     * Arms a factory reset against the installed version (never latest): stages the pack and journals
+     * wipe+replace for next boot's step 0. Returns a map instead of a code so the BIOS gets real disk
+     * space and file-count numbers.
+     */
+    public Map<String, Object> factoryReset() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("code", 2L);
+        Optional<InstanceLock> lock;
+        try {
+            lock = InstanceLock.acquire(dir);
+        } catch (IOException e) {
+            return said(out, 2, "could not take the updater lock, so nothing was changed.");
+        }
+        if (lock.isEmpty()) {
+            return said(out, 3, "another sync is running, so the reset did not start. Try again in a moment.");
+        }
+        try (InstanceLock ignored = lock.get()) {
+            UpdaterConfig cfg = UpdaterConfig.load(dir);
+            String tag = !cfg.tagPin().isEmpty() ? cfg.tagPin()
+                    : Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            if (tag.isEmpty()) {
+                return said(out, 1, "this install has never completed a sync, so there is no release to reset "
+                        + "to. Sync first.");
+            }
+            Path staging = dir.resolve(".bamfos-updater").resolve("staging");
+            Files.createDirectories(staging);
+            GithubReleases gh = new GithubReleases(apiBase, cfg.repo(), cfg.githubToken(), tag, staging);
+            Manifest manifest = ManifestParser.parse(gh.manifestJson());
+            FactoryReset.Armed armed = FactoryReset.arm(dir, manifest, Reconciler.Side.CLIENT, gh::fetch, tag,
+                    (path, done, total) -> bus(path, done, total));
+            out.put("deletes", (long) armed.deletes());
+            out.put("places", (long) armed.places());
+            out.put("bytes", armed.payloadBytes());
+            out.put("tag", armed.tag());
+            return said(out, 0, "reset armed for " + tag + ": " + armed.places() + " files downloaded and "
+                    + armed.deletes() + " to remove. Nothing has changed yet.");
+        } catch (FactoryReset.Refused refused) {
+            // Separate exit code for refusals vs failures: a refusal leaves the install untouched.
+            return said(out, 6, refused.why);
+        } catch (HttpFetcher.TokenDead dead) {
+            return said(out, 4, "github refused the token, so nothing was downloaded and nothing changed.");
+        } catch (HttpFetcher.RateLimited limited) {
+            return said(out, 5, "github is rate limiting this box, so the reset could not download. It clears "
+                    + "itself, try again later. Nothing was changed.");
+        } catch (Exception e) {
+            return said(out, 2, "the reset did not finish and nothing was changed: " + e);
+        }
+    }
+
+    /** Reports download progress to the bus so the boot terminal can render a progress bar. */
+    private void bus(String path, int done, int total) {
+        try {
+            // Use append(), not at(): the BIOS feed is already tailing this file from a live offset, so truncating
+            // it would stop the UI from seeing new progress lines.
+            BootBus.append(dir).fileStart(path.substring(path.lastIndexOf('/') + 1),
+                    "factory reset " + done + "/" + total);
+        } catch (RuntimeException | Error ignored) {
+            // a progress line is never worth a failed reset
+        }
+    }
+
+    private static Map<String, Object> said(Map<String, Object> out, int code, String message) {
+        out.put("code", (long) code);
+        out.put("message", message);
+        return out;
     }
 
     /** Clears the persistent token-dead marker after the credential is fixed. Returns 0 if removed, 1 if

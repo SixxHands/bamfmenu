@@ -24,7 +24,6 @@ import java.util.List;
 public final class RepairSession {
 
     private static final String HINTS_LIST = "UP/DOWN  Select      ENTER  Choose      ESC  Back      F2  Volume";
-    private static final String HINTS_PROMPT = "ENTER  Yes      ESC  No";
     private static final String HINTS_EDIT = "TYPE  Edit      LEFT/RIGHT  Move      ENTER  Save      ESC  Cancel";
     /* Names the two keys that really are locked, because the arrows still move on purpose (a frozen-looking
        window reads as a hung one) and the provider takes F2 before this screen sees it, so a bar claiming
@@ -44,6 +43,9 @@ public final class RepairSession {
     private int panelWidth = 60;
 
     private RepairEffect.Act pending; // the are-you-sure box, null when none is up
+    /** Index of the active confirmation prompt for `pending` (some actions like reset ask twice
+     *  with different messages, so a boolean isn't enough). */
+    private int promptStep;
     private TextEntry editing;              // the open field, null when nothing is being typed
     private RepairEffect.Edit editingEffect; // action to run when ENTER submits the active text field
     private String working = "";      // non-empty while the worker keeps an action
@@ -143,12 +145,20 @@ public final class RepairSession {
         if (pending != null) {
             switch (intent) {
                 case ACTIVATE -> {
+                    // Advance through each confirm dialog in order; run the action only after the last one.
+                    if (promptStep + 1 < pending.confirms().size()) {
+                        promptStep++;
+                        return;
+                    }
                     RepairEffect.Act act = pending;
                     pending = null;
+                    promptStep = 0;
                     start(act, ctx);
                 }
                 case BACK -> {
+                    // ESC cancels the entire confirm sequence instead of stepping back one dialog.
                     pending = null;
+                    promptStep = 0;
                     last = new RepairResult(RepairResult.Kind.REFUSED, "Cancelled.");
                 }
                 default -> {
@@ -256,12 +266,13 @@ public final class RepairSession {
         }
     }
 
-    /* A confirm string means the row asks first; an empty one means it goes now. */
+    /* Show confirmation prompts if configured; otherwise run the action immediately. */
     private void offer(RepairEffect.Act act, RepairContext ctx) {
-        if (act.confirm().isEmpty()) {
+        if (act.confirms().isEmpty()) {
             start(act, ctx);
         } else {
             pending = act;
+            promptStep = 0;
         }
     }
 
@@ -289,7 +300,9 @@ public final class RepairSession {
             return HINTS_EDIT;
         }
         if (pending != null) {
-            return HINTS_PROMPT;
+            // Use this prompt's own button labels (e.g. Proceed/Cancel on reset step 2) so the footer matches.
+            RepairEffect.Confirm c = confirm();
+            return "ENTER  " + c.yes() + "      ESC  " + c.no();
         }
         return page != null ? page.hints() : HINTS_LIST;
     }
@@ -301,7 +314,7 @@ public final class RepairSession {
     public RepairFrame frame(int maxChars, int interiorRows, int tick) {
         panelWidth = RepairBox.rightInner(maxChars);
         RepairFrames.View view = new RepairFrames.View(items, sel, state, page, pageSel, pageTop,
-                working, activity, last, hints(), prompt(), editTitle(), editField());
+                working, activity, last, hints(), confirm(), editTitle(), editField());
         RepairFrames.Built built = RepairFrames.build(view, maxChars, interiorRows, tick);
         pageSel = built.pageSel();
         pageTop = built.pageTop();
@@ -320,9 +333,10 @@ public final class RepairSession {
         return page;
     }
 
-    /** The are-you-sure question currently up, "" when none is. */
-    public String prompt() {
-        return pending == null ? "" : pending.confirm();
+    /** Active confirmation dialog, or null if none is open. */
+    public RepairEffect.Confirm confirm() {
+        return pending == null || promptStep >= pending.confirms().size()
+                ? null : pending.confirms().get(promptStep);
     }
 
     /** Heading for the open text field, or "" when no field is active. */

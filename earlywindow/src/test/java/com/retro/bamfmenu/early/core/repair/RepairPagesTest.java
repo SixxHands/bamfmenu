@@ -140,7 +140,7 @@ class RepairPagesTest {
         assertTrue(first >= 0);
         RepairEffect.Act act = page.activate(first, live, WIDTH);
         assertNotNull(act);
-        assertEquals("Roll back to v0.2.5? This pins BAMFOS to it.", act.confirm());
+        assertEquals("Roll back to v0.2.5? This pins BAMFOS to it.", act.confirms().get(0).body());
         RepairSessionTest.FakeOps ops = new RepairSessionTest.FakeOps();
         RepairResult result = act.action().run(ops);
         assertEquals("v0.2.5", ops.syncedTag);

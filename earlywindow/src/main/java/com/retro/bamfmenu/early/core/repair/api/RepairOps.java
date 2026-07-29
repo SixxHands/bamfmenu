@@ -30,4 +30,10 @@ public interface RepairOps {
     /** Updates the server address for both the updater and the player's server list.
      *  Returns 0 if both updated, 1 if already set, 2 if refused/failed, or 3 if only the updater updated. */
     int setServer(String host, int port);
+
+    /**
+     * Arms a factory reset: downloads the pack and journals a wipe and replace for next boot.
+     * Returns a map with `code` (0 armed..6 refused), `message`, and on success `deletes`, `places`, `bytes`, `tag`.
+     */
+    java.util.Map<String, Object> factoryReset();
 }

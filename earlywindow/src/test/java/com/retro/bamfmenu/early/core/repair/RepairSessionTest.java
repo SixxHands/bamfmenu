@@ -43,7 +43,8 @@ class RepairSessionTest {
             ids.add(item.id());
         }
         assertEquals(List.of("status", "verify", "sync", "optional", "notes", "rollback", "server",
-                        "clearlock"), ids);
+                        "clearlock", "factory"), ids);
+        assertEquals("factory", ids.get(ids.size() - 1));
     }
 
     @Test
@@ -71,7 +72,7 @@ class RepairSessionTest {
         s.key(RepairIntent.ACTIVATE, host);
         assertEquals("Update in progress. Actions locked.", s.lastMessage());
         assertEquals(0, host.runs);
-        assertEquals("", s.prompt());
+        assertNull(s.confirm());
 
         // The same check covers subpage rows too.
         RepairSession page = session(RepairSample.state("optional"));
@@ -123,12 +124,12 @@ class RepairSessionTest {
     @Test
     void aConfirmPromptOwnsTheKeysUntilItIsAnswered() {
         RepairSession s = RepairSample.session("confirm");
-        assertEquals("Verify and repair every managed file?", s.prompt());
+        assertEquals("Verify and repair every managed file?", s.confirm().body());
         Recorder host = new Recorder();
         s.key(RepairIntent.DOWN, host);
-        assertEquals("Verify and repair every managed file?", s.prompt());
+        assertEquals("Verify and repair every managed file?", s.confirm().body());
         s.key(RepairIntent.BACK, host);
-        assertEquals("", s.prompt());
+        assertNull(s.confirm());
         assertEquals("Cancelled.", s.lastMessage());
         assertEquals(0, host.runs);
 
@@ -144,7 +145,7 @@ class RepairSessionTest {
     @Test
     void aPromptAnsweredAfterTheEngineStartedWritingIsStillRefused() {
         RepairSession s = RepairSample.session("confirm");
-        assertEquals("Verify and repair every managed file?", s.prompt());
+        assertEquals("Verify and repair every managed file?", s.confirm().body());
         s.state(s.state().live(0L, true)); // Sync starts while the confirmation dialog is open.
         Recorder host = new Recorder();
         s.key(RepairIntent.ACTIVATE, host);
@@ -335,6 +336,11 @@ class RepairSessionTest {
             toggledPath = path;
             toggledTo = disabled;
             return toggleOk;
+        }
+
+        @Override
+        public java.util.Map<String, Object> factoryReset() {
+            return java.util.Map.of(); // No test calls reset here; an empty map matches what an older engine returns.
         }
 
         @Override

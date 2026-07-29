@@ -54,4 +54,11 @@ public final class EngineOps implements RepairOps {
     public int setServer(String host, int port) {
         return OpsBridge.code("setServer", host, port);
     }
+
+    /** Older engines without this op return an error string, which map() treats as an empty map.
+     *  The caller turns that into "your updater is too old" instead of a failed reset. */
+    @Override
+    public java.util.Map<String, Object> factoryReset() {
+        return OpsBridge.map("factoryReset");
+    }
 }

@@ -31,6 +31,7 @@ public final class OpsGateway {
                 // ClassCastException, which the panel can't distinguish from a write failure.
                 case "setServer" -> o.setServer(String.valueOf(args[0]),
                         args[1] instanceof Number n ? n.intValue() : -1);
+                case "factoryReset" -> o.factoryReset();
                 case "releaseNotes" -> o.releaseNotes();
                 default -> "error: unknown op " + op;
             };
