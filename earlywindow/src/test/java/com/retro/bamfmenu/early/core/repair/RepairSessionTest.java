@@ -109,6 +109,58 @@ class RepairSessionTest {
         assertEquals(Tone.NORMAL, leftToneOf(s.frame(WIDTH, ROWS, 0), "Optional Mods"));
     }
 
+    /** Guards the farewell prompt (the only exit path in this window) against firing unexpectedly. */
+    @Test
+    void onlyARestartRequiredResultEverArmsTheFarewell() {
+        Recorder host = new Recorder();
+        for (RepairResult.Kind kind : new RepairResult.Kind[]{RepairResult.Kind.DONE,
+                RepairResult.Kind.STAGED, RepairResult.Kind.REFUSED, RepairResult.Kind.FAILED}) {
+            RepairSession s = session(RepairSample.state("idle"));
+            s.done(new RepairResult(kind, "whatever happened"));
+            s.tick(host);
+            assertEquals(0, host.closes, kind + " must never close the game");
+            assertNull(s.confirm(), kind + " must not put a farewell box up");
+        }
+    }
+
+    @Test
+    void theFarewellCountsDownAndClosesWhenItRunsOut() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+
+        assertEquals("Restart Required", s.confirm().title());
+        assertTrue(s.confirm().body().contains("Your game will now close"), s.confirm().body());
+        assertEquals("Ok", s.confirm().yes());
+        assertEquals(10, s.closingIn());
+
+        s.tick(host);
+        assertEquals(0, host.closes);
+
+        s.state(s.state().live(1_000L + 9_000L, false));
+        assertEquals(1, s.closingIn());
+        s.tick(host);
+        assertEquals(0, host.closes);
+
+        s.state(s.state().live(1_000L + 10_000L, false));
+        s.tick(host);
+        assertEquals(1, host.closes);
+    }
+
+    /** The box says "press any key", so any key has to take it, not one particular key. */
+    @Test
+    void anyKeyTakesTheFarewellImmediately() {
+        for (RepairIntent intent : new RepairIntent[]{RepairIntent.ACTIVATE, RepairIntent.BACK,
+                RepairIntent.DOWN, RepairIntent.LEFT}) {
+            RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+            Recorder host = new Recorder();
+            s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+            s.key(intent, host);
+            assertEquals(1, host.closes, intent + " should close the game since the prompt accepts any key");
+            assertEquals(0, host.leaves, intent + " must not walk out to SETUP instead");
+        }
+    }
+
     @Test
     void escWalksOneDepthAtATimeAndOnlyLeavesFromTheList() {
         RepairSession s = RepairSample.session("optional");
@@ -257,6 +309,7 @@ class RepairSessionTest {
     static final class Recorder implements RepairContext {
         int runs;
         int leaves;
+        int closes;
         int stateReads;
         int releaseReads;
         RepairAction action;
@@ -275,6 +328,11 @@ class RepairSessionTest {
         @Override
         public void readReleases() {
             releaseReads++;
+        }
+
+        @Override
+        public void closeGame() {
+            closes++;
         }
 
         @Override

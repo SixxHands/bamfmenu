@@ -82,6 +82,7 @@ public final class RepairScreen implements Screen, RepairContext {
             return;
         }
         drainWorker(s, ctx);
+        s.tick(this); // the farewell countdown, which needs a frame loop and the session has none
         // characters first: a codepoint and the ENTER that commits it can land in the same frame, and
         // draining keys first would run the commit against a field missing its last character
         Integer ch;
@@ -162,6 +163,24 @@ public final class RepairScreen implements Screen, RepairContext {
                 readReleases.set(new ReleaseList(ReleaseList.OFFLINE, java.util.List.of()));
             }
         });
+    }
+
+    /**
+     * Ends the process, the only op in this window that does. A factory reset is journalled by the time this
+     * runs, so the next launch converges from bytes already on disk whatever happens here.
+     * exit and not Minecraft.stop(): at BIOS time the game has not started, there is no world open and no
+     * Minecraft instance to ask, and this module has no Minecraft classes by design. Status 0 because this is a
+     * deliberate quit, and a launcher reading a non-zero code would report a crash the player did not have.
+     */
+    @Override
+    public void closeGame() {
+        System.out.println("[bamfmenu] factory reset armed, closing so the next launch can apply it");
+        try {
+            System.out.flush();
+        } catch (Throwable ignored) {
+            // never let a flush be the reason the exit below does not happen
+        }
+        Runtime.getRuntime().halt(0);
     }
 
     @Override

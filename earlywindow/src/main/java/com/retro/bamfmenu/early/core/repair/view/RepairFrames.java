@@ -261,9 +261,11 @@ public final class RepairFrames {
         out.add("");
         out.addAll(RepairBox.wrap(confirm.body(), MODAL_WIDTH));
         out.add("");
-        // its OWN key names. Two boxes that both read Yes and No are one box shown twice to a reader, and
-        // the entire point of a second warning is that it is not the first
-        out.add("[ENTER] " + confirm.yes() + "      [ESC] " + confirm.no());
+        // Use this prompt's button labels; when both labels match (farewell dialog),
+        // render a single option instead of duplicating it.
+        out.add(confirm.yes().equals(confirm.no())
+                ? "[ " + confirm.yes() + " ]"
+                : "[ENTER] " + confirm.yes() + "      [ESC] " + confirm.no());
         return out;
     }
 }

@@ -17,7 +17,12 @@ public record RepairResult(Kind kind, String message) {
         /** Action was skipped without error (e.g. nothing to do or another write is active). */
         REFUSED,
         /** It went wrong, and the log has the rest. */
-        FAILED
+        FAILED,
+        /**
+         * Succeeded, and the game must close before it takes effect.
+         * Separate kind (not a boolean on DONE) so callers cannot miss the farewell and exit flow.
+         */
+        RESTART_REQUIRED
     }
 
     /* Exit codes for sync ops (repair, syncNow, syncTo). Code 5 gets a separate message because

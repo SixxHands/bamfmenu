@@ -24,6 +24,12 @@ import java.util.List;
 public final class RepairSession {
 
     private static final String HINTS_LIST = "UP/DOWN  Select      ENTER  Choose      ESC  Back      F2  Volume";
+    /** Auto-close timeout for the farewell dialog (10s): long enough to read, short enough if AFK. */
+    static final long FAREWELL_MS = 10_000L;
+    static final String FAREWELL_TITLE = "Restart Required";
+    static final String FAREWELL_BODY = "A restart is needed to apply the Factory Reset. Your game will now "
+            + "close. Press any key to continue.";
+
     private static final String HINTS_EDIT = "TYPE  Edit      LEFT/RIGHT  Move      ENTER  Save      ESC  Cancel";
     /* Names the two keys that really are locked, because the arrows still move on purpose (a frozen-looking
        window reads as a hung one) and the provider takes F2 before this screen sees it, so a bar claiming
@@ -52,6 +58,8 @@ public final class RepairSession {
     /* Active file status pushed from the screen's frame loop off the boot bus feed; cleared when the op ends. */
     private String activity = "";
     private RepairResult last;        // the notice line, null until something has happened
+    /* Farewell dialog deadline in wall-clock millis (0 when inactive), driven by the per-frame snapshot clock. */
+    private long closeAt;
 
     public RepairSession(RepairRegistry registry) {
         this.items = registry.items();
@@ -89,6 +97,10 @@ public final class RepairSession {
 
     /** Applies the worker result, clears the busy state, and displays the returned status line. */
     public void done(RepairResult result) {
+        if (result != null && result.kind() == RepairResult.Kind.RESTART_REQUIRED) {
+            // Start the exit countdown here rather than in the item since this session displays the countdown.
+            closeAt = state.nowMillis() + FAREWELL_MS;
+        }
         working = "";
         activity = ""; // Clear any leftover progress text once the operation finishes.
         last = result;
@@ -114,6 +126,11 @@ public final class RepairSession {
             } else {
                 moveSelection(intent);
             }
+            return;
+        }
+        if (closeAt > 0) {
+            // Any key dismisses the farewell dialog, matching its "press any key" prompt.
+            ctx.closeGame();
             return;
         }
         if (editing != null) {
@@ -291,6 +308,18 @@ public final class RepairSession {
         ctx.run(act.working(), act.action());
     }
 
+    /** Advances the farewell countdown from the screen's frame loop; no-op unless armed. */
+    public void tick(RepairContext ctx) {
+        if (closeAt > 0 && state.nowMillis() >= closeAt) {
+            ctx.closeGame();
+        }
+    }
+
+    /** Seconds left before the game closes itself, 0 when no farewell is up. */
+    public int closingIn() {
+        return closeAt <= 0 ? 0 : (int) Math.max(0, (closeAt - state.nowMillis() + 999) / 1000);
+    }
+
     /** The bottom control bar for wherever the window currently is. */
     public String hints() {
         if (busy()) {
@@ -298,6 +327,9 @@ public final class RepairSession {
         }
         if (editing != null) {
             return HINTS_EDIT;
+        }
+        if (closeAt > 0) {
+            return "Closing in " + closingIn() + "s      Press any key to close now";
         }
         if (pending != null) {
             // Use this prompt's own button labels (e.g. Proceed/Cancel on reset step 2) so the footer matches.
@@ -335,6 +367,11 @@ public final class RepairSession {
 
     /** Active confirmation dialog, or null if none is open. */
     public RepairEffect.Confirm confirm() {
+        if (closeAt > 0) {
+            // one option, because there is no second answer: the reset is already journalled and the next boot
+            // applies it whether this box closes politely or gets killed
+            return new RepairEffect.Confirm(FAREWELL_TITLE, FAREWELL_BODY, "Ok", "Ok");
+        }
         return pending == null || promptStep >= pending.confirms().size()
                 ? null : pending.confirms().get(promptStep);
     }

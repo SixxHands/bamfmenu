@@ -17,4 +17,7 @@ public interface RepairContext {
 
     /** Exits back to the BIOS SETUP menu on the row that opened this window. */
     void leave(String notice);
+
+    /** Ends the game so a next-boot action can apply; safe here because no world is open during BIOS. */
+    void closeGame();
 }

@@ -53,9 +53,9 @@ public final class FactoryResetItem implements RepairDef {
         String said = answer.get("message") instanceof String s && !s.isBlank()
                 ? s : "The reset did not report what it did.";
         return switch (code.intValue()) {
-            // DONE and not "reset complete": nothing has been deleted yet, and saying otherwise to somebody
-            // who is about to close their game is the one lie this row cannot afford
-            case 0 -> new RepairResult(RepairResult.Kind.DONE, said);
+            // RESTART_REQUIRED closes the game so step 0 applies the wipe/replace on next boot.
+            // Never word this as "complete" since nothing has been deleted yet.
+            case 0 -> new RepairResult(RepairResult.Kind.RESTART_REQUIRED, said);
             // Non-fatal conditions map to REFUSED instead of FAILED: 1 = never synced, 3 = lock active,
             // 5 = throttled, 6 = reset precondition failed (no space, blocked file, etc.).
             case 1, 3, 5, 6 -> new RepairResult(RepairResult.Kind.REFUSED, said);

@@ -79,7 +79,7 @@ class FactoryResetItemTest {
         RepairResult r = FactoryResetItem.read(Map.of("code", 0L,
                 "message", "reset armed for v0.2.5: 879 files downloaded and 412 to remove. "
                         + "Nothing has changed yet."));
-        assertEquals(RepairResult.Kind.DONE, r.kind());
+        assertEquals(RepairResult.Kind.RESTART_REQUIRED, r.kind());
         assertTrue(r.message().contains("Nothing has changed yet"), r.message());
         assertFalse(r.message().toLowerCase().contains("complete"), String.valueOf(r.message()));
     }

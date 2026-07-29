@@ -20,6 +20,7 @@ public final class RepairSample {
     /** Sample screen states in display order for offline rendering. */
     public static final String[] SCENARIOS = {
             "reading", "idle", "pinned", "syncing", "working", "working-file", "confirm",
+            "reset-confirm", "reset-warning", "reset-farewell",
             "status", "optional", "optional-missing", "notes", "rollback", "rollback-offline",
             "rollback-first", "hostile", "hostile-notes", "editing", "editing-long"};
 
@@ -94,6 +95,25 @@ public final class RepairSample {
             case "optional", "optional-missing", "hostile" -> open(s, quiet, "optional");
             case "notes", "hostile-notes" -> open(s, quiet, "notes");
             case "rollback", "rollback-offline", "rollback-first" -> open(s, quiet, "rollback");
+            // Poses all three factory-reset modals separately (confirm 1, confirm 2, farewell)
+            // so the offline renderer verifies each dialog fits on screen.
+            case "reset-confirm" -> {
+                select(s, quiet, "factory");
+                s.key(RepairIntent.ACTIVATE, quiet);
+            }
+            case "reset-warning" -> {
+                select(s, quiet, "factory");
+                s.key(RepairIntent.ACTIVATE, quiet); // box 1
+                s.key(RepairIntent.ACTIVATE, quiet); // Second confirmation prompt (irreversible action).
+            }
+            case "reset-farewell" -> {
+                select(s, quiet, "factory");
+                // Skip straight to the result since the dummy context never runs actions.
+                s.done(new com.retro.bamfmenu.early.core.repair.api.RepairResult(
+                        com.retro.bamfmenu.early.core.repair.api.RepairResult.Kind.RESTART_REQUIRED,
+                        "reset armed for v0.2.5: 879 files downloaded and 412 to remove. "
+                                + "Nothing has changed yet."));
+            }
             case "confirm" -> {
                 select(s, quiet, "verify");
                 s.key(RepairIntent.ACTIVATE, quiet); // stops on the are-you-sure box
@@ -176,6 +196,11 @@ public final class RepairSample {
 
         @Override
         public void leave(String notice) {
+        }
+
+        /** No-op so rendering the exit scenario doesn't terminate the offline renderer process. */
+        @Override
+        public void closeGame() {
         }
     }
 }
