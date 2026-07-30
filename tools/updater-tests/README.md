@@ -18,6 +18,7 @@ Boxes go in `scratch/updater-boxes/`, which is gitignored, because each one is t
 | `mangle-and-repair.ps1` | can it fix files that are present and WRONG, and does asking for a repair re-download everything | yes | ~2 min |
 | `lifecycle.ps1` | install from nothing, update, roll back, restore a deleted mod, rebuild a lost ledger, stand up a server | yes | ~5 min |
 | `Bios.java` | drives one BIOS op headlessly, which is the only way to reach client-side repair | depends on the op | - |
+| `Broadcast.java` | what a RUNNING server is telling clients, and whether that matches what it really is | no | seconds |
 
 `offline-boot.ps1` is the cheap one and it exits non-zero on failure, so it is the one to run after touching
 the shim, EngineLoader, the journal or step 0. The other two print a report and want reading.
@@ -37,6 +38,13 @@ boot, six of six after a repair.
 **Repair is surgical.** On a 596 file pack with five files damaged it fetched five, in four seconds. If that
 number ever comes back near 596, something upstream started moving bytes that no edit moved, and
 `tools\repro-check.ps1` is the thing that answers why.
+
+**The broadcast is BCC's, not ours.** `betterStatus` in the server list ping is written by Better Compatibility
+Checker and only READ by us, so every test on our side runs against a reply captured off a real server months
+ago (`src/test/resources/slp-status-v0.2.4.json`). Those prove the parser and say nothing about whether the BCC
+shipping today still emits that shape at the version the box actually settled on. `Broadcast.java` is the probe
+for that, and it is the only check in the set that needs a server actually running. Proven once
+against the staging box: `{"name":"BAMFOS","version":"v0.0.3-test"}`, parsed, and agreeing with the ledger.
 
 **The measurement is the hard part, not the damage.** Two of these harnesses shipped wrong the first time: one
 compared bare filenames against path keys so every check passed on `null -eq null`, and one never ran the op
