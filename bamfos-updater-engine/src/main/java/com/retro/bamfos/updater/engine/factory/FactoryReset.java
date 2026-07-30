@@ -107,17 +107,22 @@ public final class FactoryReset {
 
         Journal journal = new Journal();
         journal.targetVersion = manifest.pack().version();
-        // deletes FIRST and in one list with the moves: ops replay in order, so every target is empty by
-        // the time its move runs. A path this journal also PLACES is never deleted, because the move already
-        // replaces it and a delete would only open a window where the file is gone and the move is stuck
+        // Queue deletes before moves so targets are cleared in order. Exempt move targets (replaced in place)
+        // and move sources (WipeSet walks staging/, so deleting sources would wipe our own staged payload
+        // before replay). Filter by exact source set so it stays safe if staging naming changes.
+        Set<String> sources = new HashSet<>();
+        for (Journal.Op m : moves) {
+            sources.add(m.from());
+        }
         for (String gone : wipe.delete()) {
-            if (!targets.contains(gone)) {
+            if (!targets.contains(gone) && !sources.contains(gone)) {
                 journal.ops.add(new Journal.Op("delete", "", gone, ""));
             }
         }
         journal.ops.addAll(moves);
 
         assertNoKeeperDeleted(journal);
+        assertNoSourceDeleted(journal);
         journal.save(Journal.pathIn(dir));
         return new Armed(journal.ops.size() - moves.size(), moves.size(), payload, tag, room);
     }
@@ -134,6 +139,28 @@ public final class FactoryReset {
         if (!bad.isEmpty()) {
             throw new Refused("refusing to arm a reset that would delete " + bad
                     + ", which the updater needs to run again. Nothing was changed.");
+        }
+    }
+
+    /** Independent safety check ensuring no delete op removes a move source in the same journal.
+     *  Deletes run before moves, so deleting a source would cause the move to be permanently abandoned. */
+    static void assertNoSourceDeleted(Journal journal) throws Refused {
+        Set<String> deletes = new HashSet<>();
+        for (Journal.Op op : journal.ops) {
+            if (op.kind().equals("delete")) {
+                deletes.add(op.to());
+            }
+        }
+        Set<String> bad = new HashSet<>();
+        for (Journal.Op op : journal.ops) {
+            if (!op.kind().equals("delete") && deletes.contains(op.from())) {
+                bad.add(op.from());
+            }
+        }
+        if (!bad.isEmpty()) {
+            throw new Refused("refusing to arm a reset that would delete " + bad.size() + " of the files it "
+                    + "then needs to install from (" + bad.stream().findFirst().orElse("") + " and so on). "
+                    + "Nothing was changed. This is a bug, not something you did.");
         }
     }
 

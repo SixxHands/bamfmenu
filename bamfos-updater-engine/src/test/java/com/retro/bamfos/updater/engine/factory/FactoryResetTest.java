@@ -105,6 +105,48 @@ class FactoryResetTest {
         assertTrue(kinds.lastIndexOf("delete") < kinds.indexOf("move"), String.valueOf(kinds));
     }
 
+    /** Retrying an interrupted reset must not journal deletes for freshly staged move sources
+     * (WipeSet scans staging/ before re-fetching). Verified end to end. */
+    @Test
+    void aResetRetriedAfterAFailedOneDoesNotDeleteItsOwnStagedFiles() throws Exception {
+        Manifest m = manifest(
+                entry("config/bcc-common.toml", "v0.2.5", FileEntry.Side.BOTH, false),
+                entry("mods/create.jar", "create", FileEntry.Side.BOTH, false),
+                entry("kubejs/server_scripts/a.js", "script", FileEntry.Side.BOTH, false));
+
+        // First attempt fails after staging one file; existing install must remain untouched.
+        assertThrows(IOException.class,
+                () -> FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, failsAfter(1), "v0.2.5", QUIET));
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+        try (var s = Files.list(dir.resolve(".bamfos-updater/staging"))) {
+            assertTrue(s.findAny().isPresent());
+        }
+
+        // Second attempt on the same release, reusing the same staged paths listed in the wipe set.
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+        Journal j = Journal.load(Journal.pathIn(dir));
+
+        java.util.Set<String> deleted = new java.util.HashSet<>();
+        for (Journal.Op op : j.ops) {
+            if (op.kind().equals("delete")) {
+                deleted.add(op.to());
+            }
+        }
+        for (Journal.Op op : j.ops) {
+            if (!op.kind().equals("delete")) {
+                assertFalse(deleted.contains(op.from()), String.valueOf(op.from()));
+            }
+        }
+
+        // Replaying the journal should produce the complete target install.
+        Journal.Result r = j.replay(dir);
+        assertTrue(r.allLanded(), String.valueOf(r.abandoned().size()) + " / " + String.valueOf(r.retryable().size()));
+        assertEquals("v0.2.5", Files.readString(dir.resolve("config/bcc-common.toml")));
+        assertEquals("create", Files.readString(dir.resolve("mods/create.jar")));
+        assertEquals("script", Files.readString(dir.resolve("kubejs/server_scripts/a.js")));
+        assertEquals("IRREPLACEABLE", Files.readString(dir.resolve("saves/World/level.dat")));
+    }
+
     /** Files replaced by a journal move shouldn't also be in the delete list, so there's no window where
      * the file is missing before the move runs. */
     @Test
