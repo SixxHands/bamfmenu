@@ -273,7 +273,7 @@ class RepairSessionTest {
         UpdaterState base = RepairSample.state("idle");
         return new UpdaterState(true, base.installed(), base.pinned(), false, base.lastSyncResult(),
                 base.lastSyncAt(), base.nowMillis(), false, 0, 0, false, base.notes(), List.of(), null,
-                base.serverHost(), base.serverPort());
+                base.serverHost(), base.serverPort(), base.resetTarget());
     }
 
     private static void select(RepairSession s, String id) {

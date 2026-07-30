@@ -14,12 +14,15 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 
 // Stages a full pack download and writes a single journal to wipe and replace on next boot (nothing gets deleted until the journal saves).
 public final class FactoryReset {
 
-    /** What arming decided, and everything a caller needs to explain itself without asking again. */
-    public record Armed(int deletes, int places, long payloadBytes, String tag, DiskSpace.Room room) {
+    /** Summary returned by arm(). `reused` tracks staged parts kept from an earlier interrupted attempt
+     *  (already subtracted from the free-space check) so callers and tests can observe resume progress. */
+    public record Armed(int deletes, int places, int reused, long payloadBytes, String tag,
+                        DiskSpace.Room room) {
     }
 
     /** Precondition failures that block arming a reset. Returned as readable status messages instead of
@@ -77,29 +80,57 @@ public final class FactoryReset {
         if (place.isEmpty()) {
             throw new Refused("that release lists no files for this install, so there is nothing to reset to.");
         }
-        long payload = place.stream().mapToLong(FileEntry::size).sum();
-        DiskSpace.Room room = DiskSpace.check(dir, payload);
-        if (room.blocks()) {
-            throw new Refused("not enough free space: a reset needs about " + DiskSpace.mb(room.needBytes())
-                    + " free to download the whole pack before it removes the old one, and this drive has "
-                    + DiskSpace.mb(room.freeBytes()) + ". Nothing was changed.");
-        }
-
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
+
+        // Derive deterministic part names from (sha, index) so retries reuse staged files and duplicate-sha
+        // entries at different paths get distinct sources (the first move consumes its source).
+        List<Path> parts = new ArrayList<>(place.size());
+        for (int i = 0; i < place.size(); i++) {
+            parts.add(staging.resolve(place.get(i).sha256() + "-fr" + i + ".part"));
+        }
+
+        // Reuse verified parts already in staging from an interrupted reset so retries don't re-download
+        // or fail the free-space check over their own leftovers. Hash each part before trusting it.
+        boolean[] have = new boolean[place.size()];
+        long haveBytes = 0;
+        int reused = 0;
+        for (int i = 0; i < place.size(); i++) {
+            if (Files.isRegularFile(parts.get(i))
+                    && HashUtils.sha256(parts.get(i)).equals(place.get(i).sha256())) {
+                have[i] = true;
+                haveBytes += place.get(i).size();
+                reused++;
+            }
+        }
+        sweepStrays(staging, parts);
+
+        long payload = place.stream().mapToLong(FileEntry::size).sum();
+        // the check is about what still has to COME DOWN, because what is already staged is already paid for
+        DiskSpace.Room room = DiskSpace.check(dir, payload - haveBytes);
+        if (room.blocks()) {
+            throw new Refused("not enough free space: a reset needs about " + DiskSpace.mb(room.needBytes())
+                    + " free to download the rest of the pack before it removes the old one, and this drive "
+                    + "has " + DiskSpace.mb(room.freeBytes()) + ". Nothing was changed.");
+        }
+        if (reused > 0) {
+            System.out.println("[updater] resuming a reset: " + reused + " of " + place.size()
+                    + " files were already downloaded and still verify");
+        }
+
         List<Journal.Op> moves = new ArrayList<>();
         Set<String> targets = new LinkedHashSet<>();
-        int idx = 0;
-        for (FileEntry e : place) {
+        for (int i = 0; i < place.size(); i++) {
+            FileEntry e = place.get(i);
             String to = target(e);
-            // unique per TARGET and not per sha, the same trap Reconciler.apply names: two entries with
-            // identical bytes at different paths would share one staged file, and the first move consumes it
-            Path part = staging.resolve(e.sha256() + "-fr" + (idx++) + ".part");
-            onFile.at(to, idx, place.size());
-            fetcher.fetch(e, part);
-            if (!HashUtils.sha256(part).equals(e.sha256())) {
-                // verify before writing the journal so a failure leaves the existing install untouched
-                throw new IOException("staged bytes for " + e.path() + " failed hash verification");
+            Path part = parts.get(i);
+            onFile.at(to, i + 1, place.size());
+            if (!have[i]) {
+                fetcher.fetch(e, part);
+                if (!HashUtils.sha256(part).equals(e.sha256())) {
+                    // verify before writing the journal so a failure leaves the existing install untouched
+                    throw new IOException("staged bytes for " + e.path() + " failed hash verification");
+                }
             }
             moves.add(new Journal.Op("move", rel(dir, part), to, e.sha256()));
             targets.add(to);
@@ -124,7 +155,7 @@ public final class FactoryReset {
         assertNoKeeperDeleted(journal);
         assertNoSourceDeleted(journal);
         journal.save(Journal.pathIn(dir));
-        return new Armed(journal.ops.size() - moves.size(), moves.size(), payload, tag, room);
+        return new Armed(journal.ops.size() - moves.size(), moves.size(), reused, payload, tag, room);
     }
 
     /** Final check on the finished journal ensuring no keeper file (config, token, shim, etc.) is
@@ -161,6 +192,38 @@ public final class FactoryReset {
             throw new Refused("refusing to arm a reset that would delete " + bad.size() + " of the files it "
                     + "then needs to install from (" + bad.stream().findFirst().orElse("") + " and so on). "
                     + "Nothing was changed. This is a bug, not something you did.");
+        }
+    }
+
+    /**
+     * Deletes reset parts from an EARLIER release, which are pure dead weight: their names carry a sha this
+     * manifest never asks for, so nothing will ever reuse them, and until they go they hold the space the
+     * free-space check is about to demand.
+     * Only ever touches `-fr` parts this arm is not using. An ordinary staged sync's parts live in the same
+     * folder and its journal still needs them, so sweeping by "everything in staging" would break a pending
+     * sync to tidy up after a reset. Best-effort throughout: a file we cannot delete is a file the journal
+     * removes later anyway.
+     */
+    private static void sweepStrays(Path staging, List<Path> keep) {
+        Set<String> mine = new HashSet<>();
+        for (Path p : keep) {
+            mine.add(p.getFileName().toString());
+        }
+        try (Stream<Path> tree = Files.list(staging)) {
+            tree.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String n = p.getFileName().toString();
+                        return n.endsWith(".part") && n.contains("-fr") && !mine.contains(n);
+                    })
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException held) {
+                            // nothing to do and nothing lost: the journal lists staging for deletion too
+                        }
+                    });
+        } catch (IOException unreadable) {
+            // no staging dir, or we cannot list it. Either way there is nothing to reclaim
         }
     }
 

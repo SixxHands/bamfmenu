@@ -40,14 +40,23 @@ public final class DiskSpace {
     }
 
     public static Room check(Path dir, long payloadBytes) {
-        long need = payloadBytes + Math.max(FLOOR_BYTES, (long) (payloadBytes * MARGIN));
         try {
             FileStore store = Files.getFileStore(dir.toRealPath());
             long free = store.getUsableSpace(); // use usable space instead of free space (free ignores quotas and reserved blocks)
-            return new Room(need, free, free >= need, true);
+            return room(payloadBytes, free);
         } catch (IOException | RuntimeException unmeasurable) {
-            return new Room(need, 0L, true, false);
+            return new Room(need(payloadBytes), 0L, true, false);
         }
+    }
+
+    /** Pure free-space check separated from filesystem measurement so margin math can be unit tested. */
+    static Room room(long payloadBytes, long freeBytes) {
+        long need = need(payloadBytes);
+        return new Room(need, freeBytes, freeBytes >= need, true);
+    }
+
+    static long need(long payloadBytes) {
+        return payloadBytes + Math.max(FLOOR_BYTES, (long) (payloadBytes * MARGIN));
     }
 
     /** Formats a byte count as a human-readable size (KB/MB/GB) for UI dialogs. */

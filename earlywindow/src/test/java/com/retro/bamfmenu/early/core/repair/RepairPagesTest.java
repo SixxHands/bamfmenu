@@ -167,7 +167,7 @@ class RepairPagesTest {
         assertTrue(pinned.contains("UPDATE TOKEN EXPIRED."));
 
         UpdaterState broken = new UpdaterState(true, "", "", false, "", 0L, 0L, false, 0, 0, true,
-                "", List.of(), null, "", 0);
+                "", List.of(), null, "", 0, "");
         String unreadable = text(new StatusPage().rows(broken, WIDTH));
         assertTrue(unreadable.contains("Status unavailable."), unreadable);
         assertTrue(unreadable.contains("Last Sync        : unknown"));

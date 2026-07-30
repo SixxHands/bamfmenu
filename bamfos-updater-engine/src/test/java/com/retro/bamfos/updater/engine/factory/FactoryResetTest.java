@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /** Factory reset arming invariants: nothing changes before the journal is written, deletes precede
  * places, keepers are never touched, and any failure leaves the install intact. */
@@ -145,6 +146,150 @@ class FactoryResetTest {
         assertEquals("create", Files.readString(dir.resolve("mods/create.jar")));
         assertEquals("script", Files.readString(dir.resolve("kubejs/server_scripts/a.js")));
         assertEquals("IRREPLACEABLE", Files.readString(dir.resolve("saves/World/level.dat")));
+    }
+
+    /** bus.log and journal.json must stay out of the wipe set; deleting bus.log mid-replay broke
+     * BootBus.emit and froze the boot terminal with the BIOS locked. */
+    @Test
+    void theResetNeverDeletesTheFeedOrTheJournalItIsRunningOn() throws Exception {
+        onDisk(".bamfos-updater/bus.log", "SYNC\tbamfos-pack\tv0.2.4\tv0.2.5");
+        onDisk(".bamfos-updater/journal.json", "{\"target_version\":\"v0.2.5\",\"ops\":[]}");
+        onDisk(".bamfos-updater/last-sync.json", "{}");
+        Manifest m = manifest(entry("config/bcc-common.toml", "v0.2.5", FileEntry.Side.BOTH, false));
+
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        List<String> deleted = Journal.load(Journal.pathIn(dir)).ops.stream()
+                .filter(o -> o.kind().equals("delete")).map(Journal.Op::to).toList();
+        assertFalse(deleted.contains(".bamfos-updater/bus.log"));
+        assertTrue(deleted.contains(".bamfos-updater/last-sync.json"));
+    }
+
+    /** Structural guard: journal.json is not walked today, so assert KEEPERS membership directly to
+     * catch any future wipe-list expansion at arm time. */
+    @Test
+    void theJournalIsAKeeperEvenThoughNothingCurrentlyTriesToDeleteIt() {
+        assertTrue(WipeSet.KEEPERS.contains(".bamfos-updater/journal.json"));
+        assertTrue(WipeSet.KEEPERS.contains(".bamfos-updater/bus.log"));
+    }
+
+    /** Resume space checks must subtract already-staged bytes (payload - haveBytes) so a partial
+     * download is not rejected for needing space it already has on disk. */
+    @Test
+    void theSpaceCheckAsksOnlyForTheBytesStillMissing() {
+        long fourHundredMb = 400L * 1024 * 1024;
+        long staged = 380L * 1024 * 1024;
+        long free = 300L * 1024 * 1024;
+
+        assertTrue(DiskSpace.room(fourHundredMb, free).blocks());
+        assertFalse(DiskSpace.room(fourHundredMb - staged, free).blocks());
+    }
+
+    /** Assert the headroom margin directly on room(), not just on need(), so removing the margin
+     * from the check fails the test. */
+    @Test
+    void theHeadroomIsTenPercentOrTwoFiftySixMegWhicheverIsBigger() {
+        long plenty = Long.MAX_VALUE / 4;
+        assertEquals(DiskSpace.FLOOR_BYTES, DiskSpace.need(0L));
+        assertEquals(DiskSpace.FLOOR_BYTES, DiskSpace.room(0L, plenty).needBytes());
+        long tenGig = 10L * 1024 * 1024 * 1024;
+        assertEquals(tenGig + tenGig / 10, DiskSpace.need(tenGig));
+        assertEquals(tenGig + tenGig / 10, DiskSpace.room(tenGig, plenty).needBytes());
+    }
+
+    /** Verify Armed reports reused staged files for ops logging and tests. */
+    @Test
+    void armedSaysHowManyFilesTheRetryDidNotHaveToFetch() throws Exception {
+        Manifest m = manifest(
+                entry("config/a.toml", "aaa", FileEntry.Side.BOTH, false),
+                entry("mods/b.jar", "bbb", FileEntry.Side.BOTH, false));
+
+        FactoryReset.Armed fresh = FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+        assertEquals(0, fresh.reused());
+
+        // arm again over the same staging: both parts are there and both verify
+        FactoryReset.Armed again = FactoryReset.arm(dir, m, Reconciler.Side.CLIENT,
+                (e, dest) -> fail("nothing should be fetched, both parts are already staged and valid"),
+                "v0.2.5", QUIET);
+        assertEquals(2, again.reused());
+        assertEquals(2, again.places());
+
+        // Confirm arm() checks only remaining bytes on resume rather than the full pack size.
+        assertTrue(again.room().needBytes() < fresh.room().needBytes(), String.valueOf(fresh.room().needBytes()) + " / " + String.valueOf(again.room().needBytes()));
+    }
+
+    /** Resuming an interrupted reset reuses valid staged files instead of re-downloading everything and
+     * failing the free-space check because of leftover staged files. */
+    @Test
+    void aRetryKeepsTheFilesTheFirstAttemptAlreadyDownloaded() throws Exception {
+        Manifest m = manifest(
+                entry("config/a.toml", "aaa", FileEntry.Side.BOTH, false),
+                entry("mods/b.jar", "bbb", FileEntry.Side.BOTH, false),
+                entry("mods/c.jar", "ccc", FileEntry.Side.BOTH, false));
+
+        assertThrows(IOException.class,
+                () -> FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, failsAfter(2), "v0.2.5", QUIET));
+        long staged;
+        try (var s = Files.list(dir.resolve(".bamfos-updater/staging"))) {
+            staged = s.count();
+        }
+        assertEquals(2, staged);
+
+        // Retry with a fetcher that always throws, so this only passes if staged files are reused.
+        int[] fetches = {0};
+        Reconciler.Fetcher counting = (e, dest) -> {
+            fetches[0]++;
+            Files.createDirectories(dest.getParent());
+            Files.write(dest, remote.get(e.path()));
+        };
+        FactoryReset.Armed armed = FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, counting, "v0.2.5", QUIET);
+
+        assertEquals(1, fetches[0]);
+        assertEquals(3, armed.places());
+        assertTrue(Journal.load(Journal.pathIn(dir)).replay(dir).allLanded());
+        assertEquals("aaa", Files.readString(dir.resolve("config/a.toml")));
+        assertEquals("ccc", Files.readString(dir.resolve("mods/c.jar")));
+    }
+
+    /** A truncated staged file fails hash verification and gets re-fetched instead of reused. */
+    @Test
+    void aHalfWrittenPartIsNeverReused() throws Exception {
+        Manifest m = manifest(entry("mods/b.jar", "the whole thing", FileEntry.Side.BOTH, false));
+        assertThrows(IOException.class,
+                () -> FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, failsAfter(0), "v0.2.5", QUIET));
+
+        Path staging = dir.resolve(".bamfos-updater/staging");
+        Files.createDirectories(staging);
+        Path part = staging.resolve(HashUtils.sha256("the whole thing".getBytes(StandardCharsets.UTF_8))
+                + "-fr0.part");
+        Files.writeString(part, "the whol"); // the write that died
+
+        int[] fetches = {0};
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, (e, dest) -> {
+            fetches[0]++;
+            Files.createDirectories(dest.getParent());
+            Files.write(dest, remote.get(e.path()));
+        }, "v0.2.5", QUIET);
+
+        assertEquals(1, fetches[0]);
+        assertTrue(Journal.load(Journal.pathIn(dir)).replay(dir).allLanded());
+        assertEquals("the whole thing", Files.readString(dir.resolve("mods/b.jar")));
+    }
+
+    /** Sweep staged leftovers from older releases before checking free space so stale files cannot
+     * block the new attempt. */
+    @Test
+    void partsFromAnOlderReleaseAreSweptAndOurOwnAreNot() throws Exception {
+        Path staging = dir.resolve(".bamfos-updater/staging");
+        Files.createDirectories(staging);
+        Files.writeString(staging.resolve("deadbeef-fr0.part"), "a part for a release we are not arming");
+        Files.writeString(staging.resolve("someothersync.part"), "a PENDING SYNC's part, not ours to touch");
+
+        Manifest m = manifest(entry("mods/b.jar", "bbb", FileEntry.Side.BOTH, false));
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        assertFalse(Files.exists(staging.resolve("deadbeef-fr0.part")));
+        assertTrue(Files.exists(staging.resolve("someothersync.part")));
     }
 
     /** Files replaced by a journal move shouldn't also be in the delete list, so there's no window where

@@ -63,23 +63,37 @@ foreach ($j in $JARS) {
     $bad++
     Write-Output ("  CHANGED   {0}" -f $name)
     # print what changed, what entry because "the hash is different" doesn't help and solo <whatever> number tells me nothing and Idk how hashes work anyways
-    $za = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $keep $name))
-    $zb = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $root $j))
-    $ea = @{}; foreach ($e in $za.Entries) { $ea[$e.FullName] = $e }
+    # Hash entry bytes directly instead of checking ZipArchiveEntry.Crc32 (PowerShell 5.1's .NET Framework doesn't have Crc32 so it always evaluates null).
+    function EntryMap($path) {
+        $z = [System.IO.Compression.ZipFile]::OpenRead($path)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $m = @{}
+        try {
+            foreach ($e in $z.Entries) {
+                $s = $e.Open()
+                $ms = New-Object System.IO.MemoryStream
+                try { $s.CopyTo($ms); $h = [System.BitConverter]::ToString($sha.ComputeHash($ms.ToArray())) }
+                finally { $s.Dispose(); $ms.Dispose() }
+                $m[$e.FullName] = @{ sha = $h; time = $e.LastWriteTime; len = $e.Length }
+            }
+        } finally { $z.Dispose(); $sha.Dispose() }
+        $m
+    }
+    $ea = EntryMap (Join-Path $keep $name)
+    $eb = EntryMap (Join-Path $root $j)
     $crc = 0; $time = 0; $only = 0
     $shown = 0
-    foreach ($e in $zb.Entries) {
-        $o = $ea[$e.FullName]
+    foreach ($k in $eb.Keys) {
+        $o = $ea[$k]
         if (-not $o) { $only++; continue }
-        if ($o.Crc32 -ne $e.Crc32) {
+        if ($o.sha -ne $eb[$k].sha) {
             $crc++
-            if ($shown -lt 5) { Write-Output ("      content moved : {0}" -f $e.FullName); $shown++ }
-        } elseif ($o.LastWriteTime -ne $e.LastWriteTime) {
+            if ($shown -lt 5) { Write-Output ("      content moved : {0}" -f $k); $shown++ }
+        } elseif ($o.time -ne $eb[$k].time) {
             $time++
-            if ($shown -lt 5) { Write-Output ("      TIMESTAMP moved: {0}" -f $e.FullName); $shown++ }
+            if ($shown -lt 5) { Write-Output ("      TIMESTAMP moved: {0}" -f $k); $shown++ }
         }
     }
-    $za.Dispose(); $zb.Dispose()
     Write-Output ("      {0} content, {1} timestamp, {2} entries only in the second build" -f $crc, $time, $only)
     if ($time -gt 0 -and $crc -eq 0) {
         Write-Output "      timestamps only, so the archive block in the root build.gradle is not reaching this task"

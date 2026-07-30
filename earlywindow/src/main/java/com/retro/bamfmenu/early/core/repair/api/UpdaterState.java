@@ -12,7 +12,7 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
                            String lastSyncResult, long lastSyncAt, long nowMillis, boolean syncing,
                            int disabledCount, int quarantinedCount, boolean statusUnreadable,
                            String notes, List<Mod> optional, ReleaseList releases,
-                           String serverHost, int serverPort) {
+                           String serverHost, int serverPort, String resetTarget) {
 
     /** An optional or quarantined managed jar from listOptional(). `missing` is true when neither the
      *  enabled nor .disabled file exists on disk, so the UI doesn't show a false on/off state. */
@@ -28,7 +28,7 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
     /** Initial loading state before the worker returns the first snapshot. */
     public static UpdaterState reading() {
         return new UpdaterState(false, "", "", false, "", 0L, 0L, false, 0, 0, false, "", List.of(), null,
-                "", 0);
+                "", 0, "");
     }
 
     /**
@@ -49,21 +49,22 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
                 (int) num(status.get("disabled_count")), (int) num(status.get("quarantined_count")),
                 status.isEmpty() || status.containsKey("error"), notes == null ? "" : notes,
                 List.copyOf(mods), null,
-                str(status.get("server_host")), (int) num(status.get("server_port")));
+                str(status.get("server_host")), (int) num(status.get("server_port")),
+                str(status.get("reset_target")));
     }
 
     /** Returns a copy of this state with the fetched release list attached. */
     public UpdaterState withReleases(ReleaseList list) {
         return new UpdaterState(loaded, installed, pinned, tokenDead, lastSyncResult, lastSyncAt,
                 nowMillis, syncing, disabledCount, quarantinedCount, statusUnreadable, notes,
-                optional, list, serverHost, serverPort);
+                optional, list, serverHost, serverPort, resetTarget);
     }
 
     /** Updates the wall clock and lock flag without re-reading the full snapshot. */
     public UpdaterState live(long millis, boolean engineSyncing) {
         return new UpdaterState(loaded, installed, pinned, tokenDead, lastSyncResult, lastSyncAt,
                 millis, engineSyncing, disabledCount, quarantinedCount, statusUnreadable, notes,
-                optional, releases, serverHost, serverPort);
+                optional, releases, serverHost, serverPort, resetTarget);
     }
 
     /**
@@ -85,6 +86,14 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
     /** Returns the installed version, or a fallback label if unknown. */
     public String installedOrUnknown() {
         return installed.isEmpty() ? "unknown" : installed;
+    }
+
+    /**
+     * Release that a factory reset would fetch (the target tag from the engine, not `installed`).
+     * Differs when pinned to an unsynced tag or missing a ledger; falls back to unknown on older engines.
+     */
+    public String resetTargetOrUnknown() {
+        return resetTarget.isEmpty() ? "unknown" : resetTarget;
     }
 
     /** Formats the last sync result and elapsed time as a single cell, or "never". */

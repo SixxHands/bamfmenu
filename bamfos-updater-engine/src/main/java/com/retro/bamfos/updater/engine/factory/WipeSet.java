@@ -21,7 +21,11 @@ public final class WipeSet {
             "mods/bamfos-updater-boot.jar.new",                         // a staged shim waiting to be promoted
             ".bamfos-updater/engine/bamfos-updater-engine.jar",         // held open by this very JVM
             ".bamfos-updater/bamfos-updater.properties",                // server_host, port, repo
-            "servers.dat");                                             // the player's whole server list
+            "servers.dat",                                              // Keep servers.dat, plus journal.json and bus.log because replay actively uses both.
+            // Deleting journal.json risks stranding a half-wiped install, and deleting bus.log breaks
+            // BootBus.emit (APPEND without CREATE), freezing the boot screen mid-reset.
+            ".bamfos-updater/journal.json",
+            ".bamfos-updater/bus.log");
 
     /** Directories a factory reset must never enter (asserted explicitly): user worlds, screenshots,
      *  logs for debugging, and resource/shader packs (managed packs are reconciled by normal sync). */
@@ -34,9 +38,11 @@ public final class WipeSet {
 
     /** Cache files deleted on reset so the next sync rebuilds them cleanly instead of reading stale state. */
     private static final Set<String> STATE_FILES = Set.of(
-            "manifest-current.json", "last-sync.json", "release-notes.json", "bus.log", "token-dead",
+            "manifest-current.json", "last-sync.json", "release-notes.json", "token-dead",
             // delete the ledger too so the next sync re-hashes every file on disk to verify what actually landed
             "ledger.json");
+    // Keep bus.log and journal.json out of this list (both are in KEEPERS): the reset still reads them
+    // while running, and deleting them freezes the boot terminal.
 
     private WipeSet() {
     }

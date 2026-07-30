@@ -36,8 +36,10 @@ public final class FactoryResetItem implements RepairDef {
     public RepairItem item() {
         return new RepairItem("factory", "Factory Reset", HELP,
                 RepairGate.FILE_SAFE,
-                // the version it would reset TO, because a reset targets the installed release and never latest
-                state -> "Resets to " + state.installedOrUnknown(),
+                // Version this reset will target (always the target release, never latest).
+                // Use the target reported by the engine instead of the version row, since they
+                // disagree when pinned or when a bcc stamp exists without a ledger.
+                state -> "Resets to " + state.resetTargetOrUnknown(),
                 new RepairEffect.Act("Factory Reset", List.of(ASK, WARN), ops -> read(ops.factoryReset())));
     }
 

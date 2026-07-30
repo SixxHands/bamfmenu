@@ -53,9 +53,10 @@ public final class RepairSample {
                 "ok", NOW - 14 * 60_000L, NOW, "syncing".equals(scenario), 1, 1, false,
                 "Nether rework lands: ash dunes, quartz shelves, and the new seam block.\n"
                         + "Fixes a crash when a contraption crossed a portal mid-assembly.",
-                // OBVIOUSLY FAKE on purpose. These scenarios get rendered to PNGs that go in the README, so
-                // whatever sits here is published, and the real address used to be right in this line.
-                List.copyOf(mods), null, "super.secret.ip.for.a.server", 25565);
+                // Placeholder address since rendered PNGs ship in the README.
+                // Reset target follows the engine rule (pin wins over installed).
+                List.copyOf(mods), null, "super.secret.ip.for.a.server", 25565,
+                pinned ? "v0.2.4" : VERSION);
         return switch (scenario) {
             case "rollback" -> base.withReleases(releases(ReleaseList.LIVE, 5));
             case "rollback-offline" -> base.withReleases(releases(ReleaseList.OFFLINE, 1));
@@ -81,8 +82,10 @@ public final class RepairSample {
                         + "wrap-cannot-split-because-there-is-not-one-single-space-anywhere-inside-it-at-all"
                         + "-and-it-keeps-going for the full notes.",
                 List.copyOf(mods), null,
-                // the overflow scenario's job is to be too long for its cell, addresses included
-                "a-very-long-host-name-that-no-narrow-panel-can-hold.example.invalid", 25599);
+                // the overflow scenario's job is to be too long for its cell, addresses included, and the
+                // reset row inherits the same absurd pin because that is what the engine would target here
+                "a-very-long-host-name-that-no-narrow-panel-can-hold.example.invalid", 25599,
+                "v0.2.4-release-candidate-2-hotfix-for-the-hotfix");
     }
 
     /** Builds a sample session by driving the real key handler so the state is always reachable. */

@@ -47,6 +47,27 @@ class UpdaterOpsTest {
         assertEquals(Boolean.TRUE, s.get("token_dead"));
         assertEquals(1L, s.get("disabled_count"));
         assertEquals(1L, s.get("quarantined_count"));
+        assertEquals("v0.2.2", s.get("reset_target"));
+    }
+
+    /**
+     * Reset target uses the pin or ledger, never the bcc stamp that `version` prefers. With no ledger, return
+     * empty so the UI shows "unknown" instead of offering a reset that will refuse to run.
+     */
+    @Test
+    void status_resetTargetIsThePinElseTheLedger_neverTheBccStamp() throws IOException {
+        Fx.write(dir, "config/bcc-common.toml", "modpackVersion = \"v0.2.5\"\n".getBytes());
+        assertEquals("v0.2.5", ops().status().get("version"));
+        assertEquals("", ops().status().get("reset_target"));
+
+        Ledger led = new Ledger();
+        led.installedVersion = "v0.2.3";
+        led.save(Ledger.pathIn(dir));
+        assertEquals("v0.2.5", ops().status().get("version"));
+        assertEquals("v0.2.3", ops().status().get("reset_target"));
+
+        Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "tag=v0.2.1\n".getBytes());
+        assertEquals("v0.2.1", ops().status().get("reset_target"));
     }
 
     @Test

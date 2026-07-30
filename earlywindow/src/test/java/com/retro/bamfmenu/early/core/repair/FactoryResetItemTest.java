@@ -5,6 +5,7 @@ import com.retro.bamfmenu.early.core.repair.items.factory.FactoryResetItem;
 import com.retro.bamfmenu.early.core.repair.api.RepairEffect;
 import com.retro.bamfmenu.early.core.repair.api.RepairItem;
 import com.retro.bamfmenu.early.core.repair.api.RepairResult;
+import com.retro.bamfmenu.early.core.repair.api.UpdaterState;
 import com.retro.bamfmenu.early.core.repair.view.RepairFrames;
 import org.junit.jupiter.api.Test;
 
@@ -93,6 +94,28 @@ class FactoryResetItemTest {
         }
         assertEquals(RepairResult.Kind.FAILED,
                 FactoryResetItem.read(Map.of("code", 2L, "message", "it broke")).kind());
+    }
+
+    /**
+     * Must show "reset_target" rather than "version": a pinned install reports its running release
+     * under "version" and the actual reset destination under "reset_target".
+     */
+    @Test
+    void theRowPromisesTheVersionTheEngineWouldFetchAndNotTheOneWeAreRunning() {
+        UpdaterState pinnedAhead = UpdaterState.of(
+                Map.<String, Object>of("version", "v0.2.4", "pinned", "v0.2.6", "reset_target", "v0.2.6"),
+                List.of(), "", 0L);
+        assertEquals("Resets to v0.2.6", new FactoryResetItem().item().status().line(pinnedAhead));
+
+        UpdaterState stampedNeverSynced = UpdaterState.of(
+                Map.<String, Object>of("version", "v0.2.5", "pinned", "", "reset_target", ""),
+                List.of(), "", 0L);
+        assertEquals("Resets to unknown", new FactoryResetItem().item().status().line(stampedNeverSynced));
+
+        UpdaterState ordinary = UpdaterState.of(
+                Map.<String, Object>of("version", "v0.2.6", "pinned", "", "reset_target", "v0.2.6"),
+                List.of(), "", 0L);
+        assertEquals("Resets to v0.2.6", new FactoryResetItem().item().status().line(ordinary));
     }
 
     /** Older engine returning no status map must not claim the reset failed, because nothing ran. */

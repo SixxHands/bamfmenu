@@ -63,6 +63,7 @@ public final class UpdaterOps {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             out.put("version", Doors.localVersion(dir).orElse(ledger.installedVersion));
             out.put("pinned", cfg.tagPin());
+            out.put("reset_target", pinnedOrInstalled(cfg, ledger));
             out.put("token_dead", Doors.tokenDead(dir));
             // Server address pinged for version broadcasts so the BIOS can display it; empty is normal
             // (falls back to servers.dat).
@@ -81,6 +82,14 @@ public final class UpdaterOps {
             out.put("error", String.valueOf(e));
         }
         return out;
+    }
+
+    /**
+     * Target version for repair and factoryReset: pin if set, else the ledger's converged version
+     * (never bcc's stamp). Shared with the BIOS so its reset label always matches what actually runs.
+     */
+    static String pinnedOrInstalled(UpdaterConfig cfg, Ledger ledger) {
+        return !cfg.tagPin().isEmpty() ? cfg.tagPin() : ledger.installedVersion;
     }
 
     /** Stages a sync to the pinned version, or the version currently broadcast by the server. */
@@ -118,8 +127,7 @@ public final class UpdaterOps {
     public int serverRepair() {
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
-            String tag = !cfg.tagPin().isEmpty() ? cfg.tagPin()
-                    : Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            String tag = pinnedOrInstalled(cfg, Ledger.load(Ledger.pathIn(dir)));
             if (tag.isEmpty()) {
                 return 1; // never synced, so there is no manifest to audit against and nothing to repair to
             }
@@ -149,8 +157,7 @@ public final class UpdaterOps {
         }
         try (InstanceLock ignored = lock.get()) {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
-            String tag = !cfg.tagPin().isEmpty() ? cfg.tagPin()
-                    : Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            String tag = pinnedOrInstalled(cfg, Ledger.load(Ledger.pathIn(dir)));
             if (tag.isEmpty()) {
                 return said(out, 1, "this install has never completed a sync, so there is no release to reset "
                         + "to. Sync first.");
@@ -165,7 +172,13 @@ public final class UpdaterOps {
             out.put("places", (long) armed.places());
             out.put("bytes", armed.payloadBytes());
             out.put("tag", armed.tag());
-            return said(out, 0, "reset armed for " + tag + ": " + armed.places() + " files downloaded and "
+            out.put("reused", (long) armed.reused());
+            // On a resumed reset, only count files downloaded in this run instead of reporting the full manifest
+            // total when most files were already cached.
+            String got = armed.reused() > 0
+                    ? armed.places() + " files ready (" + armed.reused() + " already downloaded before)"
+                    : armed.places() + " files downloaded";
+            return said(out, 0, "reset armed for " + tag + ": " + got + " and "
                     + armed.deletes() + " to remove. Nothing has changed yet.");
         } catch (FactoryReset.Refused refused) {
             // Separate exit code for refusals vs failures: a refusal leaves the install untouched.
@@ -359,8 +372,7 @@ public final class UpdaterOps {
     public int repair() {
         try {
             UpdaterConfig cfg = UpdaterConfig.load(dir);
-            String tag = !cfg.tagPin().isEmpty() ? cfg.tagPin()
-                    : Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            String tag = pinnedOrInstalled(cfg, Ledger.load(Ledger.pathIn(dir)));
             if (tag.isEmpty()) {
                 return 1;
             }
