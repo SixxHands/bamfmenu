@@ -4,6 +4,8 @@ import com.retro.bamfos.updater.engine.Fx;
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
+import com.retro.bamfos.updater.engine.manifest.Manifest;
+import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -36,7 +38,7 @@ class UpdaterOpsTest {
         q.quarantined = true;
         q.disabled = true;
         led.files.put("mods/bad.jar", q);
-        Ledger.Entry d = new Ledger.Entry("aa");
+        Ledger.Entry d = new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         d.disabled = true;
         led.files.put("mods/off.jar", d);
         led.save(Ledger.pathIn(dir));
@@ -48,6 +50,62 @@ class UpdaterOpsTest {
         assertEquals(1L, s.get("disabled_count"));
         assertEquals(1L, s.get("quarantined_count"));
         assertEquals("v0.2.2", s.get("reset_target"));
+    }
+
+    /**
+     * factoryReset always arms client side, so running it on a server would wipe server files and install
+     * client mods. Guard it directly since OpsGateway is public and linked on servers.
+     */
+    @Test
+    void factoryReset_refusesOnAServerRatherThanRebuildingItAsAClient() throws IOException {
+        Ledger led = new Ledger();
+        led.installedVersion = "v0.2.4";
+        led.save(Ledger.pathIn(dir));
+        Fx.write(dir, "server.properties", "server-port=25565\nmotd=BAMFOS\n".getBytes());
+
+        Map<String, Object> r = ops().factoryReset();
+
+        assertEquals(6L, r.get("code"));
+        String said = String.valueOf(r.get("message"));
+        assertTrue(said.contains("server directory"), said);
+        assertTrue(said.contains("Nothing was changed"), String.valueOf(said));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater").resolve("journal.json")));
+    }
+
+    /**
+     * A server that has synced but never booted Minecraft has no server.properties yet, so the server guard
+     * must fall back to the ledger to recognize it.
+     */
+    @Test
+    void serverOnlyFileOnDisk_catchesAServerThatHasSyncedButNeverRun() throws IOException {
+        // Use the fixture helper instead of hand-typing JSON so we get the right schema_version field.
+        Manifest man = ManifestParser.parse("""
+                {"schema_version":1,
+                 "pack":{"id":"bamfos","version":"v1","mc":"1.21.1","neoforge":"21.1.235","updater_abi":1},
+                 "requires_relaunch":false,"removed_modids":[],
+                 "files":[
+                  {"path":"config/both.toml","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1,"side":"both","policy":"managed",
+                   "source":{"type":"release-asset","asset":"x"}},
+                  {"path":"config/aeronautics-server.toml","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1,"side":"server",
+                   "policy":"managed","source":{"type":"release-asset","asset":"y"}}]}""");
+
+        Ledger client = new Ledger();
+        client.files.put("config/both.toml", new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assertNull(UpdaterOps.serverOnlyFileOnDisk(man, client));
+
+        Ledger server = new Ledger();
+        server.files.put("config/both.toml", new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        server.files.put("config/aeronautics-server.toml", new Ledger.Entry("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assertEquals("config/aeronautics-server.toml", UpdaterOps.serverOnlyFileOnDisk(man, server));
+    }
+
+    /** Clients don't have server.properties, so the server guard shouldn't block them; they should
+     *  still reach the normal "never synced" error code instead. */
+    @Test
+    void factoryReset_stillReachesTheClientPath_theGuardIsNotABlanketRefusal() {
+        Map<String, Object> r = ops().factoryReset();
+        assertNotEquals(6L, r.get("code"));
+        assertEquals(1L, r.get("code"));
     }
 
     /**
@@ -118,7 +176,7 @@ class UpdaterOpsTest {
     void setDisabled_flipsFilenameAndLedgerTogether() throws IOException {
         Fx.write(dir, "mods/iris.jar", Fx.jar("iris"));
         Ledger led = new Ledger();
-        led.files.put("mods/iris.jar", new Ledger.Entry("aa"));
+        led.files.put("mods/iris.jar", new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         led.save(Ledger.pathIn(dir));
 
         assertTrue(ops().setDisabled("mods/iris.jar", true));

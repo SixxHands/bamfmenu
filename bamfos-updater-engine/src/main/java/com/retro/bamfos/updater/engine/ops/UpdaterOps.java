@@ -7,6 +7,7 @@ import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.factory.FactoryReset;
+import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
@@ -92,6 +93,38 @@ public final class UpdaterOps {
         return !cfg.tagPin().isEmpty() ? cfg.tagPin() : ledger.installedVersion;
     }
 
+    /**
+     * True if this looks like a server dir (has server.properties). Guards factoryReset, which always
+     * passes Side.CLIENT, from ever running on a server via OpsGateway and wiping server-only mods.
+     */
+    static boolean looksLikeServer(Path dir) {
+        return Files.isRegularFile(dir.resolve("server.properties"));
+    }
+
+    /**
+     * The second tell, and the one that actually closes the hole: a path in this box's OWN ledger that the
+     * manifest marks {@code side: server}. Returns it, so the refusal can name the file rather than assert a
+     * conclusion. Null means nothing server-side is installed here.
+     *
+     * Why the server.properties check above is not enough, measured rather than reasoned: Minecraft
+     * writes server.properties on its first JVM run, so a box that has SYNCED but never RUN does not have one.
+     * That is exactly the state the test harness leaves a server box in, and the guard above did not fire on
+     * it. A real operator's box has the file, so tell 1 covers the common case cheaply and before any network,
+     * and this one covers the window tell 1 misses.
+     *
+     * Non-heuristic on purpose. It compares the ledger against the manifest that was just fetched, so it
+     * asks the box what it is instead of guessing from a filename, and a client ledger cannot contain a
+     * server-only path (a measured 288 of them separate the two sides on the shipping pack).
+     */
+    static String serverOnlyFileOnDisk(Manifest manifest, Ledger led) {
+        for (FileEntry e : manifest.files()) {
+            if (e.side() == FileEntry.Side.SERVER && led.files.containsKey(e.path())) {
+                return e.path();
+            }
+        }
+        return null;
+    }
+
     /** Stages a sync to the pinned version, or the version currently broadcast by the server. */
     public int syncNow() {
         try {
@@ -156,6 +189,11 @@ public final class UpdaterOps {
             return said(out, 3, "another sync is running, so the reset did not start. Try again in a moment.");
         }
         try (InstanceLock ignored = lock.get()) {
+            if (looksLikeServer(dir)) {
+                return said(out, 6, "this is a server directory, and a factory reset only knows how to rebuild "
+                        + "a client. Nothing was changed. Use /bamfos sync, or delete the instance and let the "
+                        + "wrapper rebuild it.");
+            }
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             String tag = pinnedOrInstalled(cfg, Ledger.load(Ledger.pathIn(dir)));
             if (tag.isEmpty()) {
@@ -166,6 +204,11 @@ public final class UpdaterOps {
             Files.createDirectories(staging);
             GithubReleases gh = new GithubReleases(apiBase, cfg.repo(), cfg.githubToken(), tag, staging);
             Manifest manifest = ManifestParser.parse(gh.manifestJson());
+            String serverFile = serverOnlyFileOnDisk(manifest, Ledger.load(Ledger.pathIn(dir)));
+            if (serverFile != null) {
+                return said(out, 6, "this install holds server files (" + serverFile + "), so it is a server "
+                        + "and a factory reset only knows how to rebuild a client. Nothing was changed.");
+            }
             FactoryReset.Armed armed = FactoryReset.arm(dir, manifest, Reconciler.Side.CLIENT, gh::fetch, tag,
                     (path, done, total) -> bus(path, done, total));
             out.put("deletes", (long) armed.deletes());
