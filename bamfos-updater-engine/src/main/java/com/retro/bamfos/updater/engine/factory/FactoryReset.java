@@ -64,6 +64,12 @@ public final class FactoryReset {
         return e.installDisabled() ? e.path() + ".disabled" : e.path();
     }
 
+    /** Journal ops keep the enabled state from when they were planned (same rule as Reconciler.strip),
+     *  so a carried mods/x.jar.disabled op and a fresh mods/x.jar op refer to the same manifest entry. */
+    private static String stripDisabled(String to) {
+        return to.endsWith(".disabled") ? to.substring(0, to.length() - ".disabled".length()) : to;
+    }
+
     /** Fetches missing parts and writes the reset journal, or throws {@link Refused} without touching files.
      *  @param onFile non-null progress callback invoked before each fetch */
     public static Armed arm(Path dir, Manifest manifest, Reconciler.Side side, Reconciler.Fetcher fetcher,
@@ -138,6 +144,22 @@ public final class FactoryReset {
 
         Journal journal = new Journal();
         journal.targetVersion = manifest.pack().version();
+
+        // Carry over non-colliding ops from an existing same-version journal (e.g., keepers outside the wipe
+        // set) and exempt their targets/sources from deletion so we don't drop or wipe pending work.
+        List<Journal.Op> carried = new ArrayList<>();
+        Journal leftover = Journal.load(Journal.pathIn(dir));
+        if (!leftover.ops.isEmpty() && leftover.targetVersion.equals(journal.targetVersion)) {
+            Set<String> named = new HashSet<>();
+            for (String t : targets) {
+                named.add(stripDisabled(t));
+            }
+            for (Journal.Op kept : leftover.ops) {
+                if (!named.contains(stripDisabled(kept.to()))) {
+                    carried.add(kept);
+                }
+            }
+        }
         // Queue deletes before moves so targets are cleared in order. Exempt move targets (replaced in place)
         // and move sources (WipeSet walks staging/, so deleting sources would wipe our own staged payload
         // before replay). Filter by exact source set so it stays safe if staging naming changes.
@@ -145,17 +167,32 @@ public final class FactoryReset {
         for (Journal.Op m : moves) {
             sources.add(m.from());
         }
+        // keep both the targets and sources of carried ops out of the wipe list so they aren't deleted
+        // before replay
+        Set<String> carriedFiles = new HashSet<>();
+        for (Journal.Op kept : carried) {
+            carriedFiles.add(kept.to());
+            if (!kept.from().isEmpty()) {
+                carriedFiles.add(kept.from());
+            }
+        }
         for (String gone : wipe.delete()) {
-            if (!targets.contains(gone) && !sources.contains(gone)) {
+            if (!targets.contains(gone) && !sources.contains(gone) && !carriedFiles.contains(gone)) {
                 journal.ops.add(new Journal.Op("delete", "", gone, ""));
             }
         }
+        // deletes, then the carried ops (their targets are exempt from the wipe, so order against the
+        // deletes is free, but they must not run after a reset move onto a path they read), then the moves
+        journal.ops.addAll(carried);
         journal.ops.addAll(moves);
 
         assertNoKeeperDeleted(journal);
         assertNoSourceDeleted(journal);
         journal.save(Journal.pathIn(dir));
-        return new Armed(journal.ops.size() - moves.size(), moves.size(), reused, payload, tag, room);
+        // exclude carried ops from the reset counts so the summary only reflects files placed or removed
+        // by the reset itself
+        return new Armed(journal.ops.size() - moves.size() - carried.size(), moves.size(), reused, payload,
+                tag, room);
     }
 
     /** Final check on the finished journal ensuring no keeper file (config, token, shim, etc.) is
@@ -193,6 +230,12 @@ public final class FactoryReset {
                     + "then needs to install from (" + bad.stream().findFirst().orElse("") + " and so on). "
                     + "Nothing was changed. This is a bug, not something you did.");
         }
+    }
+
+    /** Matches reset part names ({@code <sha256>-fr<index>.part}). Public so Reconciler.pruneStaging
+     *  spares them across reboots for resume; sweepStrays() and replay own their cleanup. */
+    public static boolean isResetPart(String fileName) {
+        return fileName.matches("[0-9a-f]{64}-fr\\d+\\.part");
     }
 
     /**

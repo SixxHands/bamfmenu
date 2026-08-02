@@ -156,6 +156,50 @@ class ReleasePollTest {
                 OpsBrain.pollProblem(poll.tokenDead, poll.deadCode, poll.rateLimited, poll.noRelease, false));
     }
 
+    /**
+     * Verifies the ETag is only saved after the body parses, so a mid-body disconnect cannot pair a new
+     * ETag with the old tag and hide the update behind future 304 responses.
+     */
+    @Test
+    void aPollCutMidBody_mustNotPoisonTheEtag() throws IOException {
+        HttpServer cut = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String host = "http://127.0.0.1:" + cut.getAddress().getPort();
+        AtomicInteger healthy = new AtomicInteger(0);
+        List<String> conditional = Collections.synchronizedList(new ArrayList<>());
+        cut.createContext("/repos/o/r/releases/latest", ex -> {
+            conditional.add(ex.getRequestHeaders().getFirst("If-None-Match"));
+            byte[] b = "{\"tag_name\":\"v0.2.7\"}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("ETag", "\"tag-v0.2.7\"");
+            if (healthy.get() == 0) {
+                // send headers (including ETag), then drop the connection mid-body
+                ex.sendResponseHeaders(200, b.length + 512);
+                ex.getResponseBody().write(b, 0, 4);
+                ex.close();
+                return;
+            }
+            if ("\"tag-v0.2.7\"".equals(ex.getRequestHeaders().getFirst("If-None-Match"))) {
+                ex.sendResponseHeaders(304, -1);
+                ex.close();
+                return;
+            }
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write(b);
+            }
+        });
+        cut.start();
+        try {
+            ReleasePoll poll = new ReleasePoll(host, "o/r", "tok");
+            assertTrue(poll.latestTag().isEmpty());
+
+            healthy.set(1);
+            assertEquals("v0.2.7", poll.latestTag().orElse(""));
+            assertNull(conditional.get(1));
+        } finally {
+            cut.stop(0);
+        }
+    }
+
     /** Verifies the default constructor uses the env-aware resolver and falls back to the default API URL. */
     @Test
     void theShippedConstructorResolvesThroughTheSameSeamAsTheFetcher() {

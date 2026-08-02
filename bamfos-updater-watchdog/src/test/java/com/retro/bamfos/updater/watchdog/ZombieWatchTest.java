@@ -74,10 +74,8 @@ class ZombieWatchTest {
     }
 
     /**
-     * An operator running /save-all flush. saveEverything runs INSIDE tickChildren, ahead of the Post event, so
-     * the counter does not move for the whole flush on a box whose max-tick-time=-1 was set precisely to make
-     * long single ticks legal. The last line is the one that matters: the save gate is a gate, not a mute
-     * button, so once the flush ends the same silence IS unexplained again.
+     * Verifies /save-all flushes reset the stall clock rather than merely muting it, so post-save silence
+     * still requires a full unexcused window before firing.
      */
     @Test
     void anOperatorSaveIsNeverAZombie_untilTheSaveEnds() {
@@ -85,7 +83,9 @@ class ZombieWatchTest {
         assertEquals(NOTHING, w.sample(2000, ZombieWatch.watchable(true, false, true), 0));
         assertEquals(NOTHING, w.sample(2000, ZombieWatch.watchable(true, false, true), STALL));
         assertEquals(NOTHING, w.sample(2000, ZombieWatch.watchable(true, false, true), STALL * 3));
-        assertEquals(WENT_ZOMBIE, w.sample(2000, ZombieWatch.watchable(true, false, false), STALL * 3 + 1_000));
+        assertEquals(NOTHING, w.sample(2000, ZombieWatch.watchable(true, false, false), STALL * 3 + 1_000));
+        assertEquals(NOTHING, w.sample(2000, ZombieWatch.watchable(true, false, false), STALL * 4 - 1));
+        assertEquals(WENT_ZOMBIE, w.sample(2000, ZombieWatch.watchable(true, false, false), STALL * 4));
     }
 
     /** Verifies the 120s window (2x vanilla's 60s max-tick-time) treats a 90s spike as lag, not a hang. */

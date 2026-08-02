@@ -179,6 +179,7 @@ public final class UpdaterOps {
     public Map<String, Object> factoryReset() {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("code", 2L);
+        lastBusFile = null;
         Optional<InstanceLock> lock;
         try {
             lock = InstanceLock.acquire(dir);
@@ -233,16 +234,31 @@ public final class UpdaterOps {
                     + "itself, try again later. Nothing was changed.");
         } catch (Exception e) {
             return said(out, 2, "the reset did not finish and nothing was changed: " + e);
+        } finally {
+            // Close the last FILE line on every exit so an aborted reset doesn't leave a stale progress line
+            // stuck on the BIOS bus for the rest of the session.
+            if (lastBusFile != null) {
+                try {
+                    BootBus.append(dir).fileDone(lastBusFile);
+                } catch (RuntimeException | Error ignored) {
+                    // same rule as bus(): a progress line is never worth a failed reset
+                }
+                lastBusFile = null;
+            }
         }
     }
+
+    /** Last FILE name written to the bus by factoryReset, so its finally block can close it on exit. */
+    private String lastBusFile;
 
     /** Reports download progress to the bus so the boot terminal can render a progress bar. */
     private void bus(String path, int done, int total) {
         try {
             // Use append(), not at(): the BIOS feed is already tailing this file from a live offset, so truncating
             // it would stop the UI from seeing new progress lines.
-            BootBus.append(dir).fileStart(path.substring(path.lastIndexOf('/') + 1),
-                    "factory reset " + done + "/" + total);
+            String name = path.substring(path.lastIndexOf('/') + 1);
+            BootBus.append(dir).fileStart(name, "factory reset " + done + "/" + total);
+            lastBusFile = name;
         } catch (RuntimeException | Error ignored) {
             // a progress line is never worth a failed reset
         }
@@ -315,7 +331,7 @@ public final class UpdaterOps {
     private boolean mergeServerList(String host, int port) {
         try {
             Path serversDat = dir.resolve("servers.dat");
-            String priorName = Ledger.load(dir).files.values().stream()
+            String priorName = Ledger.load(Ledger.pathIn(dir)).files.values().stream()
                     .map(e -> e.mergeName)
                     .filter(n -> n != null && !n.isBlank())
                     .findFirst()

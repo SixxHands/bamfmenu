@@ -165,6 +165,40 @@ class FactoryResetTest {
         assertTrue(deleted.contains(".bamfos-updater/last-sync.json"));
     }
 
+    /** Arming a reset must carry over same-version journal ops outside the wipe set (e.g. servers.dat),
+     * dropping ops from older target versions and letting reset ops win collisions. */
+    @Test
+    void armCarriesAStagedOpTheResetDoesNotItselfName() throws Exception {
+        onDisk(".bamfos-updater/staging/seed-blob.part", "their servers.dat entry");
+        Journal staged = new Journal();
+        staged.targetVersion = "v0.2.5";
+        staged.ops.add(new Journal.Op("seed", ".bamfos-updater/staging/seed-blob.part", "servers.dat", "sha"));
+        staged.save(Journal.pathIn(dir));
+        Manifest m = manifest(entry("config/bcc-common.toml", "v0.2.5", FileEntry.Side.BOTH, false));
+
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        Journal j = Journal.load(Journal.pathIn(dir));
+        assertTrue(j.ops.stream().anyMatch(o -> o.kind().equals("seed") && o.to().equals("servers.dat")), String.valueOf(j.ops));
+        assertFalse(j.ops.stream().anyMatch(o -> o.kind().equals("delete")
+                        && o.to().equals(".bamfos-updater/staging/seed-blob.part")));
+    }
+
+    /** The version rule: a journal staged for ANOTHER release does not survive a reset (* rollback safety, after a version move the new plan is authoritative). */
+    @Test
+    void armDropsAStagedJournalForADifferentVersion() throws Exception {
+        onDisk(".bamfos-updater/staging/seed-blob.part", "bytes for a version this reset is leaving");
+        Journal staged = new Journal();
+        staged.targetVersion = "v9.9.9";
+        staged.ops.add(new Journal.Op("seed", ".bamfos-updater/staging/seed-blob.part", "servers.dat", "sha"));
+        staged.save(Journal.pathIn(dir));
+        Manifest m = manifest(entry("config/bcc-common.toml", "v0.2.5", FileEntry.Side.BOTH, false));
+
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        assertFalse(Journal.load(Journal.pathIn(dir)).ops.stream().anyMatch(o -> o.kind().equals("seed")));
+    }
+
     /** Structural guard: journal.json is not walked today, so assert KEEPERS membership directly to
      * catch any future wipe-list expansion at arm time. */
     @Test

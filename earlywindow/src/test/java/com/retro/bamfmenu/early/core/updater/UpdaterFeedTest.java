@@ -12,11 +12,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The READER half of the boot bus, which is the half nothing used to guard: the engine's ClientDoorTest pins
- * the writer's END states, so a rename there goes red, while this side could silently drift and the player
- * would just read two rows contradicting each other with nothing failing anywhere. The bus IS a file, so a
- * synthetic bus.log is the whole fixture, no engine and no GL context needed (BootBus.end writes
- * ok | skip | limited | no-release | fail, BootBus.channel writes ok | fail | idle | no-carrier | pinned).
+ * Tests the bus.log reader against synthetic files (no engine or GL needed) so parsed states
+ * match BootBus.end (ok|skip|limited|offline|no-release|fail) and channel (ok|fail|idle|no-carrier|pinned).
  */
 class UpdaterFeedTest {
 

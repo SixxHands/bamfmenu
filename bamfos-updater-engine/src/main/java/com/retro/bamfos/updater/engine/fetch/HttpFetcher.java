@@ -261,7 +261,7 @@ public final class HttpFetcher {
                 long have = Files.isRegularFile(part) ? Files.size(part) : 0;
                 HttpResponse<InputStream> resp = follow(url, bearer, accept, have);
                 boolean append = resp.statusCode() == 206 && have > 0;
-                long tail = resp.headers().firstValueAsLong("content-length").orElse(-1L);
+                long tail = contentLength(resp); // Don't call firstValueAsLong directly; see the helper note on malformed header values.
                 long base = append ? have : 0;
                 long total = tail < 0 ? -1 : base + tail;
                 try (InputStream in = resp.body();

@@ -51,6 +51,8 @@ final class ZombieWatch {
             return Verdict.NOTHING;
         }
         if (!watchable) {
+            // Reset movedAt during excused silence (e.g. /save-all) so the stall window starts fresh once it ends.
+            movedAt = now;
             return Verdict.NOTHING;
         }
         stalledMs = now - movedAt;

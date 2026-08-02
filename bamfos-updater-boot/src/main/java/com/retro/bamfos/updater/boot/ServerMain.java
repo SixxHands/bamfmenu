@@ -20,6 +20,7 @@ public final class ServerMain {
                 // log this so operators know auto-restart is off without guessing from silence
                 System.out.println("[updater] panel mode: something else owns restarts, so the watchdog will "
                         + "announce an update and wait for you instead of stopping the server for it");
+                clearWrapperMark(dir);
             } else {
                 markPreJvmRun(dir);
             }
@@ -54,6 +55,17 @@ public final class ServerMain {
             java.nio.file.Files.writeString(f, Long.toString(System.currentTimeMillis()));
         } catch (Throwable unwritable) {
             // if disk is read-only or full, fail safe to announce-only rather than blocking boot
+        }
+    }
+
+    /**
+     * Clears any leftover wrapper mark so switching from run-server.bat to panel mode
+     * doesn't let the watchdog halt a server with no wrapper loop to relaunch it. Never fatal.
+     */
+    static void clearWrapperMark(Path dir) {
+        try {
+            java.nio.file.Files.deleteIfExists(dir.resolve(".bamfos-updater").resolve(WRAPPER_MARK));
+        } catch (Throwable stuck) {
         }
     }
 

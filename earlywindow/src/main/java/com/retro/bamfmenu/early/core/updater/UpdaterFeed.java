@@ -42,7 +42,11 @@ public final class UpdaterFeed {
 
     private final Path busFile;
     private long offset;
-    private StringBuilder carry = new StringBuilder();
+    /**
+     * Raw byte buffer decoded to UTF-8 only at `\n` boundaries.
+     * Chunk reads can split multi-byte UTF-8 filenames (producing U+FFFD), while `\n` is always a clean boundary.
+     */
+    private java.io.ByteArrayOutputStream carry = new java.io.ByteArrayOutputStream();
 
     private final Deque<String> pendingLog = new ArrayDeque<>();
     private boolean sawSync;
@@ -138,12 +142,27 @@ public final class UpdaterFeed {
                     return;
                 }
                 offset += n;
-                carry.append(new String(buf.array(), 0, n, StandardCharsets.UTF_8));
+                carry.write(buf.array(), 0, n);
             }
+            byte[] pending = carry.toByteArray();
+            int lastNl = -1;
+            for (int i = pending.length - 1; i >= 0; i--) {
+                if (pending[i] == '\n') {
+                    lastNl = i;
+                    break;
+                }
+            }
+            if (lastNl < 0) {
+                return; // Incomplete line; keep the trailing bytes until the rest arrives.
+            }
+            String text = new String(pending, 0, lastNl + 1, StandardCharsets.UTF_8);
+            carry.reset();
+            carry.write(pending, lastNl + 1, pending.length - lastNl - 1);
+            int from = 0;
             int nl;
-            while ((nl = carry.indexOf("\n")) >= 0) {
-                event(carry.substring(0, nl));
-                carry.delete(0, nl + 1);
+            while ((nl = text.indexOf('\n', from)) >= 0) {
+                event(text.substring(from, nl));
+                from = nl + 1;
             }
         } catch (IOException | RuntimeException ignored) {
             // Ignore transient read errors and retry on the next poll.
@@ -238,11 +257,8 @@ public final class UpdaterFeed {
             case "END" -> {
                 syncActive = false;
                 ended = true;
-                // the block has to TERMINATE, not just stop being fed. postBlock() rebuilds from sawSync
-                // every frame for the rest of the boot, so a spinner row left standing spins forever and a
-                // screen of "file ... ok" rows reads as a finished update, either one contradicting the
-                // honest skip line the engine printed underneath
-                // (BootBus.end: ok | skip | limited | no-release | fail)
+                // Terminate the sync block explicitly so postBlock() doesn't leave a spinner stuck
+                // or partial "ok" rows above the final status (BootBus.end: ok|skip|limited|offline|no-release|fail).
                 String state = f.length > 1 ? f[1] : "";
                 currentFile = "";
                 if (sawSync && !"ok".equals(state)) {

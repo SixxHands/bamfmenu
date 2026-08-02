@@ -49,7 +49,9 @@ public final class FactoryResetItem implements RepairDef {
      */
     public static RepairResult read(Map<String, Object> answer) {
         if (answer == null || answer.isEmpty() || !(answer.get("code") instanceof Number code)) {
-            return new RepairResult(RepairResult.Kind.FAILED,
+            // REFUSED and never FAILED, exactly as the contract above says: nothing ran, nothing broke,
+            // and FAILED's alert red sends a player hunting damage that does not exist
+            return new RepairResult(RepairResult.Kind.REFUSED,
                     "This updater is too old for a factory reset. Nothing was changed.");
         }
         String said = answer.get("message") instanceof String s && !s.isBlank()

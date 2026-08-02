@@ -1,75 +1,65 @@
 package com.retro.bamfos.updater.engine.journal;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 
-/**
- * Single-instance lock: two engines must never reconcile one instance simultaneously.
- * Holds the JVM PID; a lock whose PID is dead is reclaimed (without this, one kill -9 would
- * disable sync forever). Acquire fails ONLY when a LIVE process holds it -- callers skip sync
- * and boot as-is.
- */
+// OS file lock preventing two updater instances from reconciling the same folder at once (released automatically by the OS on crash).
 public final class InstanceLock implements AutoCloseable {
 
-    private final Path file;
+    private final FileChannel channel;
+    private final FileLock lock;
 
-    private InstanceLock(Path file) {
-        this.file = file;
+    private InstanceLock(FileChannel channel, FileLock lock) {
+        this.channel = channel;
+        this.lock = lock;
     }
 
     public static Path pathIn(Path instanceDir) {
         return instanceDir.resolve(".bamfos-updater").resolve("lock");
     }
 
-    /** empty = a live process holds the lock. */
+    /** empty = a live process (or another thread of this one) keeps the lock. */
     public static Optional<InstanceLock> acquire(Path instanceDir) throws IOException {
         Path file = pathIn(instanceDir);
         Files.createDirectories(file.getParent());
-        long self = ProcessHandle.current().pid();
-        for (int attempt = 0; attempt < 2; attempt++) {
-            try {
-                Files.writeString(file, Long.toString(self), StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
-                return Optional.of(new InstanceLock(file));
-            } catch (IOException exists) {
-                String content;
-                try {
-                    content = Files.readString(file, StandardCharsets.UTF_8).trim();
-                } catch (Exception unreadable) {
-                    content = ""; // garbage/empty lock = stale
-                }
-                long holder;
-                try {
-                    holder = Long.parseLong(content);
-                } catch (NumberFormatException nan) {
-                    holder = -1;
-                }
-                boolean alive = holder > 0 && holder != self
-                        && ProcessHandle.of(holder).map(ProcessHandle::isAlive).orElse(false);
-                if (alive) {
-                    return Optional.empty();
-                }
-                // reclaim ONLY if the file still names the exact dead/garbage content we observed:
-                // if another process legitimately took the lock between our read and now, its live
-                // PID differs, and a blind delete would clobber a real lock (two holders at once)
-                try {
-                    if (!Files.readString(file, StandardCharsets.UTF_8).trim().equals(content)) {
-                        return Optional.empty();
-                    }
-                } catch (IOException gone) {
-                    continue; // already deleted by whoever won -- retry the CREATE_NEW
-                }
-                Files.deleteIfExists(file); // stale: dead PID or unreadable -- reclaim and retry once
-            }
+        FileChannel ch = FileChannel.open(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        FileLock held;
+        try {
+            held = ch.tryLock();
+        } catch (OverlappingFileLockException thisVeryJvm) {
+            // the JVM refuses a second lock on a file it already holds: same answer as a live
+            // OTHER process, and the realistic shape of it (a BIOS op racing the door's own sync)
+            ch.close();
+            return Optional.empty();
         }
-        return Optional.empty();
+        if (held == null) {
+            ch.close();
+            return Optional.empty();
+        }
+        try {
+            ch.truncate(0);
+            ch.write(ByteBuffer.wrap(Long.toString(ProcessHandle.current().pid())
+                    .getBytes(StandardCharsets.UTF_8)));
+        } catch (IOException unwritable) {
+            // The file lock is what matters; the PID is just a hint for debugging.
+        }
+        return Optional.of(new InstanceLock(ch, held));
     }
 
     @Override
     public void close() throws IOException {
-        Files.deleteIfExists(file);
+        try {
+            lock.release();
+        } finally {
+            channel.close();
+        }
     }
 }

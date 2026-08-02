@@ -91,6 +91,29 @@ class SetServerTest {
         assertTrue(ServersDat.entryIp(dir.resolve("servers.dat"), "other").isPresent());
     }
 
+    /**
+     * Looks up the pack entry using the merge name stored in the ledger rather than falling back to "BAMFOS",
+     * which would leave the renamed row on the old address and add a duplicate entry.
+     */
+    @Test
+    void theLedgersRecordedNameFindsTheRenamedEntry() throws IOException {
+        Path dir = Files.createTempDirectory("setserver");
+        Files.createDirectories(props(dir).getParent());
+        Files.writeString(props(dir), "server_host=1.1.1.1\n");
+        writeList(dir.resolve("servers.dat"), "My BAMFOS", "1.1.1.1", "other", "o:1");
+        com.retro.bamfos.updater.engine.ledger.Ledger led = new com.retro.bamfos.updater.engine.ledger.Ledger();
+        com.retro.bamfos.updater.engine.ledger.Ledger.Entry entry =
+                new com.retro.bamfos.updater.engine.ledger.Ledger.Entry("whatever-sha");
+        entry.mergeName = "My BAMFOS";
+        led.files.put("servers.dat", entry);
+        led.save(com.retro.bamfos.updater.engine.ledger.Ledger.pathIn(dir));
+
+        assertEquals(0, new UpdaterOps(dir, null).setServer("2.2.2.2", 25599));
+        assertEquals("2.2.2.2:25599",
+                ServersDat.entryIp(dir.resolve("servers.dat"), "My BAMFOS").orElse(""));
+        assertTrue(ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").isEmpty());
+    }
+
     /** Preserves user comments, formatting, and unrelated keys byte-for-byte. */
     @Test
     void theirCommentsAndOtherKeysSurviveTheRewrite() throws IOException {
