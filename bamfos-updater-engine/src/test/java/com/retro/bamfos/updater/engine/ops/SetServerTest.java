@@ -114,6 +114,32 @@ class SetServerTest {
         assertTrue(ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").isEmpty());
     }
 
+    /**
+     * If the player renamed the pack entry and has their own server called "BAMFOS", falling back to the
+     * default name would overwrite their server instead of moving the pack entry.
+     */
+    @Test
+    void aRowThatOnlySharesTheDefaultNameIsNotTheRowWeOverlay() throws IOException {
+        Path dir = Files.createTempDirectory("setserver");
+        Files.createDirectories(props(dir).getParent());
+        Files.writeString(props(dir), "server_host=1.1.1.1\n");
+        // our entry, renamed by hand, plus a server of theirs that happens to be called BAMFOS too
+        writeList(dir.resolve("servers.dat"), "My BAMFOS", "1.1.1.1", "BAMFOS", "play.jax.example:25566");
+        com.retro.bamfos.updater.engine.ledger.Ledger led = new com.retro.bamfos.updater.engine.ledger.Ledger();
+        com.retro.bamfos.updater.engine.ledger.Ledger.Entry entry =
+                new com.retro.bamfos.updater.engine.ledger.Ledger.Entry("whatever-sha");
+        entry.mergeName = "My BAMFOS";
+        led.files.put("servers.dat", entry);
+        led.save(com.retro.bamfos.updater.engine.ledger.Ledger.pathIn(dir));
+
+        assertEquals(0, new UpdaterOps(dir, null).setServer("3.3.3.3", 25599));
+
+        assertEquals("play.jax.example:25566",
+                ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElse(""));
+        assertEquals("3.3.3.3:25599",
+                ServersDat.entryIp(dir.resolve("servers.dat"), "My BAMFOS").orElse(""));
+    }
+
     /** Preserves user comments, formatting, and unrelated keys byte-for-byte. */
     @Test
     void theirCommentsAndOtherKeysSurviveTheRewrite() throws IOException {

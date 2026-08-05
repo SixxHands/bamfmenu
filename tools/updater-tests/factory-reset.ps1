@@ -64,6 +64,16 @@ $fs.SetLength([math]::Max(1, $fs.Length - 64)); $fs.Dispose()
 "not mine"  | Out-File "$staging\cafebabe.part" -Encoding ascii
 Write-Output ("    " + $parts.Count + " staged, deleted 100, truncated 1, planted 2 strays")
 
+# Run a normal boot between the failed reset and retry to make sure Reconciler.pruneStaging doesn't delete our -fr .part resume files.
+Write-Output ""
+Write-Output "########## a boot in between, which is what a real friend does, and what pruneStaging runs on"
+$before = @(Get-ChildItem $staging -Filter "*-fr*.part").Count
+Invoke-Boot -Box $box -Filter "current|updated|repaired|interrupted"
+$after = @(Get-ChildItem $staging -Filter "*-fr*.part" -EA SilentlyContinue).Count
+Write-Output ("    -fr parts before the boot: " + $before + "   after: " + $after)
+Write-Output ("    the sweep left the resume state alone: " +
+              $(if ($after -eq $before) { "yes" } else { "NO, " + ($before - $after) + " eaten, resume is dead" }))
+
 $t0 = Get-Date
 $again = Invoke-Reset -Box $box
 Write-Output ("    " + $again)
