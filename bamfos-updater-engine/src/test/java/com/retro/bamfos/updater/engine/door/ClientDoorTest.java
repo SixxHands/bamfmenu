@@ -176,23 +176,14 @@ class ClientDoorTest {
                 Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")));
     }
 
-    /**
-     * The double-launch boot, which is the ONE boot where IDENT's position is load-bearing: the door returns at
-     * the lock-held line, so if IDENT were sent inside the lock the hardware row would sit on `Detecting ...`
-     * for the entire session, which is the exact thing that row exists not to do. A live foreign PID in the
-     * lock file is the only way to make acquire() refuse (our own PID reclaims it), and the
-     * parent-or-any-live-process pick is the same one ServerDoorTest uses.
-     */
+    /** Emit IDENT before taking the OS lock so a second instance doesn't leave the row stuck on
+     * "Detecting ...". */
     @Test
     void secondInstance_identsBeforeTheLockLine() throws IOException {
         bcc("vNEW");
-        Files.createDirectories(InstanceLock.pathIn(dir).getParent());
-        long other = ProcessHandle.allProcesses()
-                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive())
-                .findFirst().orElseThrow().pid();
-        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other));
-
-        assertEquals(0, new ClientDoor(base).run(dir));
+        try (InstanceLock held = InstanceLock.acquire(dir).orElseThrow()) {
+            assertEquals(0, new ClientDoor(base).run(dir));
+        }
 
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
         int ident = indexOfPrefix(bus, "IDENT\t");

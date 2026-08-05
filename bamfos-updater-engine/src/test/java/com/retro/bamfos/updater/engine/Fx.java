@@ -76,6 +76,44 @@ public final class Fx {
         }
     }
 
+    /** Builds a service jar with no mods.toml (like earlywindow/shim), just a provider file. */
+    public static byte[] serviceJar(String provider, String uniq) {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (ZipOutputStream z = new ZipOutputStream(bos)) {
+                z.putNextEntry(new ZipEntry("META-INF/services/" + provider));
+                z.write(("com.example.impl." + uniq + "\n").getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+                z.putNextEntry(new ZipEntry("marker-" + uniq + ".txt"));
+                z.write(uniq.getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+            }
+            return bos.toByteArray();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Normal mod jar that also has a service file. This shouldn't trigger the provider claim
+     *  since mods legitimately share things like mixin connectors. */
+    public static byte[] jarWithService(String modid, String provider) {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (ZipOutputStream z = new ZipOutputStream(bos)) {
+                z.putNextEntry(new ZipEntry("META-INF/neoforge.mods.toml"));
+                z.write(("modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\nlicense=\"x\"\n[[mods]]\nmodId=\""
+                        + modid + "\"\n").getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+                z.putNextEntry(new ZipEntry("META-INF/services/" + provider));
+                z.write(("com.example." + modid + ".Impl\n").getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+            }
+            return bos.toByteArray();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /** Matches vanilla uncompressed NBT layout, including TAG_End for empty lists:
      *  root compound > list "servers" > {name, ip}. */
     public static byte[] serversDat(String... ips) {

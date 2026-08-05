@@ -104,11 +104,13 @@ final class ReleasePoll {
                 }
                 tokenDead = false;
                 rateLimited = false;
-                etag = resp.headers().firstValue("ETag").orElse(null);
                 // Bounded read: HttpClient's timeout stops at headers, so a stalled body would park the poller forever.
                 Object root = MiniJson.parse(new String(
                         HttpFetcher.readAllBounded(in, 8 << 20), StandardCharsets.UTF_8));
                 if (root instanceof Map<?, ?> m && m.get("tag_name") instanceof String tag && !tag.isEmpty()) {
+                    // Only save the ETag once the tag parses; saving it before the body read would pair a new ETag with the
+                    // old tag on a mid-body drop, hiding the update behind 304s.
+                    etag = resp.headers().firstValue("ETag").orElse(null);
                     lastTag = tag;
                     return Optional.of(tag);
                 }

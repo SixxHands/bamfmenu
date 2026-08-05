@@ -254,23 +254,45 @@ class JournalTest {
         assertTrue(Journal.verify(dir, ops, (op, done, total) -> { }).isEmpty());
     }
 
+    /**
+     * "Later in the same journal" is positional: a placement before a delete must not excuse a failed delete,
+     * or step 0 would vouch for a file the journal says to remove.
+     */
     @Test
-    void lock_blocksLiveHolder_reclaimsDeadHolder() throws IOException {
-        // a live holder (this very JVM) blocks a second acquire
+    void verifyOnlyExcusesADeleteForAPlacementThatComesAfterIt() throws IOException {
+        java.util.List<Journal.Op> ops = java.util.List.of(
+                new Journal.Op("move", ".bamfos-updater/staging/p", "config/bar.json", HashUtils.sha256(NEW)),
+                new Journal.Op("delete", "", "config/bar.json", ""));
+
+        // Delete ran last and the file is still there, so report the failed delete
+        // even though an earlier placement succeeded.
+        Files.createDirectories(dir.resolve("config"));
+        Files.write(dir.resolve("config/bar.json"), NEW);
+        java.util.List<Journal.Op> wrong = Journal.verify(dir, ops, (op, done, total) -> { });
+        assertTrue(wrong.stream().anyMatch(o -> o.kind().equals("delete")), String.valueOf(wrong));
+
+        // With the file gone, the delete succeeded and only the earlier placement can't be verified on disk.
+        Files.delete(dir.resolve("config/bar.json"));
+        wrong = Journal.verify(dir, ops, (op, done, total) -> { });
+        assertEquals(1, wrong.size(), wrong.toString());
+        assertEquals("move", wrong.get(0).kind());
+    }
+
+    @Test
+    void lock_blocksLiveHolder_costsNothingAfterACrash() throws IOException {
+        // A leftover lock file with no active OS lock (e.g. after kill -9) should acquire cleanly without extra cleanup.
         Files.createDirectories(InstanceLock.pathIn(dir).getParent());
-        Files.writeString(InstanceLock.pathIn(dir), Long.toString(ProcessHandle.current().pid()));
-        // NOTE: acquire treats our own pid as reclaimable (holder == self happens only after a crash
-        // that reused the pid, vanishingly rare) -- so simulate a live OTHER process with a system one
-        Optional<ProcessHandle> other = ProcessHandle.allProcesses()
-                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive()).findFirst();
-        assertTrue(other.isPresent());
-        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other.get().pid()));
+        Files.writeString(InstanceLock.pathIn(dir), "999999999");
+        Optional<InstanceLock> first = InstanceLock.acquire(dir);
+        assertTrue(first.isPresent());
+
+        // While locked, a second acquire returns empty. Same-JVM contention matches a BIOS op racing
+        // a sync, and cross-process locking behaves the same way at the OS level.
         assertTrue(InstanceLock.acquire(dir).isEmpty());
 
-        Files.writeString(InstanceLock.pathIn(dir), "999999999"); // dead pid
-        Optional<InstanceLock> lock = InstanceLock.acquire(dir);
-        assertTrue(lock.isPresent());
-        lock.get().close();
-        assertFalse(Files.exists(InstanceLock.pathIn(dir)));
+        first.get().close();
+        Optional<InstanceLock> again = InstanceLock.acquire(dir);
+        assertTrue(again.isPresent());
+        again.get().close();
     }
 }

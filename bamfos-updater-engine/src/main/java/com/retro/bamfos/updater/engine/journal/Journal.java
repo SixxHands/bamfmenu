@@ -12,11 +12,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 // Crash-safe apply journal written after all downloads verify and before any file moves, so an interrupted apply finishes offline on next boot.
 public final class Journal {
@@ -209,33 +208,25 @@ public final class Journal {
     }
 
     /**
-     * Reads back off DISK what the given ops claimed to do, and returns the ones it cannot prove: a delete
-     * whose path is still there, a placement that is missing, a placement whose bytes are not the sha the
-     * journal named. The caller passes the ops replay reported nothing about, because replay already spoke for
-     * the rest and this pass exists to catch the opposite case, an op that returned without throwing and did
-     * not do what it said.
-     * Worth its cost only because of WHEN it runs: a factory reset's next boot may have no network at all,
-     * and the sync that would otherwise re-hash everything never gets to run. This answers from local bytes,
-     * which is the same thing step 0 itself is for.
-     * A delete is only judged when nothing later in the SAME journal places that path again. An op pair
-     * like that is a hazard FactoryReset already refuses to write, and reading it as a failure here would
-     * report a file that is exactly where it should be.
+     * Verifies on disk that the given ops actually landed (used after offline resets when no sync runs).
+     * Checks deletes only when no later op in journal order re-places that path; checks every placement
+     * so duplicate targets are caught.
      */
     public static List<Op> verify(Path instanceDir, List<Op> ops, Watcher watcher) {
-        Set<String> placed = new HashSet<>();
-        for (Op op : ops) {
-            if (!op.kind().equals("delete")) {
-                placed.add(op.to());
+        Map<String, Integer> lastPlaced = new HashMap<>();
+        for (int i = 0; i < ops.size(); i++) {
+            if (!ops.get(i).kind().equals("delete")) {
+                lastPlaced.put(ops.get(i).to(), i);
             }
         }
         List<Op> wrong = new ArrayList<>();
-        int done = 0;
-        for (Op op : ops) {
-            watcher.at(op, ++done, ops.size());
+        for (int i = 0; i < ops.size(); i++) {
+            Op op = ops.get(i);
+            watcher.at(op, i + 1, ops.size());
             Path to = instanceDir.resolve(op.to());
             try {
                 if (op.kind().equals("delete")) {
-                    if (!placed.contains(op.to()) && Files.exists(to)) {
+                    if (lastPlaced.getOrDefault(op.to(), -1) < i && Files.exists(to)) {
                         wrong.add(op);
                     }
                 } else if (!Files.isRegularFile(to) || !HashUtils.sha256(to).equals(op.sha256())) {

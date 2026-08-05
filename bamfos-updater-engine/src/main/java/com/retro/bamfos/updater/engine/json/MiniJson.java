@@ -142,7 +142,17 @@ public final class MiniJson {
                         if (pos + 4 > len) {
                             throw new JsonError("truncated \\u escape", pos);
                         }
-                        b.append((char) Integer.parseInt(s.substring(pos, pos + 4), 16));
+                        // Parse hex digits manually instead of Integer.parseInt: parseInt throws NumberFormatException
+                        // instead of JsonError on bad chars and accepts leading signs (so "\\u-123" would parse).
+                        int cp = 0;
+                        for (int i = 0; i < 4; i++) {
+                            int d = Character.digit(s.charAt(pos + i), 16);
+                            if (d < 0 || s.charAt(pos + i) > 'f') {
+                                throw new JsonError("bad \\u escape", pos + i);
+                            }
+                            cp = (cp << 4) | d;
+                        }
+                        b.append((char) cp);
                         pos += 4;
                     }
                     default -> throw new JsonError("bad escape '\\" + e + "'", pos - 1);

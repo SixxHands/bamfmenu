@@ -256,7 +256,7 @@ public final class Reconciler {
             stagedFiles.put(a.path(), part);
         }
 
-        dupeGuard(plan, manifest, ledger);
+        dupeGuard(plan, manifest, ledger, stagedFiles);
 
         // paths this apply gives up on, so the journal never carries their destructive op and the ledger
         // commit never speaks for them. Filled by the two courtesies that are allowed to fail below
@@ -459,10 +459,17 @@ public final class Reconciler {
      * IMPORTANT: this is called from the ONE exit that has just proven no journal survives. A pending op's
      * staged bytes are the whole of , the reason replay needs no network, so a sweep that runs while a
      * journal is kept turns a retryable op into an abandoned one and the box stops converging offline.
+     * A factory reset's -fr parts are NOT ours to sweep: they are the resume state of a reset that died
+     * mid-download, exactly the bytes that let the retry cost only the remainder, and this box may well
+     * reboot (and cleanly sync) between the failure and the player trying again. FactoryReset owns their
+     * lifecycle (sweepStrays on the next arm, replay consuming them as sources).
      */
     private static void pruneStaging(Path staging) {
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(staging, "*.part")) {
             for (Path part : ds) {
+                if (com.retro.bamfos.updater.engine.factory.FactoryReset.isResetPart(part.getFileName().toString())) {
+                    continue;
+                }
                 Files.deleteIfExists(part);
             }
         } catch (IOException litter) {
@@ -512,9 +519,12 @@ public final class Reconciler {
                 : a.path() + " did not land, ledger left on the old bytes for the next boot";
     }
 
-    /** Two ENABLED jars sharing a modid (or two service jars sharing a provider) after this sync
-     *  would refuse to boot -- abort BEFORE any move, name the culprit and the two fixes. */
-    private void dupeGuard(SyncPlan plan, Manifest manifest, Ledger ledger) throws IOException {
+    /**
+     * Aborts before moving anything if two enabled jars share a modid or two service jars share a
+     * provider (checked on staged bytes; service-only so normal mods sharing mixin SPIs don't false-trip).
+     */
+    private void dupeGuard(SyncPlan plan, Manifest manifest, Ledger ledger, Map<String, Path> stagedFiles)
+            throws IOException {
         Map<String, String> owners = new HashMap<>();
         Set<String> replacedPaths = new HashSet<>();
         Set<String> deadPaths = new HashSet<>();
@@ -523,7 +533,20 @@ public final class Reconciler {
                 replacedPaths.add(a.path());
                 if (!a.targetDisabled()) {
                     for (String mid : a.entry().modids()) {
-                        claim(owners, mid, a.path() + " (incoming)");
+                        claim(owners, "modid", mid, a.path() + " (incoming)");
+                    }
+                    Path staged = stagedFiles.get(a.path());
+                    if (staged != null) {
+                        try {
+                            JarInfo.Identity id = JarInfo.read(staged);
+                            if (id.isServiceJar()) {
+                                for (String svc : id.services()) {
+                                    claim(owners, "service", svc, a.path() + " (incoming)");
+                                }
+                            }
+                        } catch (IOException ignored) {
+                            // Unreadable staged jars will fail hash verification elsewhere, so skip them here.
+                        }
                     }
                 }
             }
@@ -540,9 +563,16 @@ public final class Reconciler {
                         continue; // post-sync this file is superseded
                     }
                     try {
-                        for (String mid : JarInfo.read(jar).modids()) {
-                            boolean tracked = ledger.files.containsKey(path);
-                            claim(owners, mid, path + (tracked ? "" : " (untracked - delete it or pin= it)"));
+                        JarInfo.Identity id = JarInfo.read(jar);
+                        boolean tracked = ledger.files.containsKey(path);
+                        String owner = path + (tracked ? "" : " (untracked - delete it or pin= it)");
+                        for (String mid : id.modids()) {
+                            claim(owners, "modid", mid, owner);
+                        }
+                        if (id.isServiceJar()) {
+                            for (String svc : id.services()) {
+                                claim(owners, "service", svc, owner);
+                            }
                         }
                     } catch (IOException ignored) {
                     }
@@ -551,10 +581,10 @@ public final class Reconciler {
         }
     }
 
-    private static void claim(Map<String, String> owners, String modid, String owner) {
-        String prev = owners.put(modid, owner);
+    private static void claim(Map<String, String> owners, String what, String id, String owner) {
+        String prev = owners.put(what + " '" + id + "'", owner);
         if (prev != null && !prev.equals(owner)) {
-            throw new DupeModidAbort("two enabled jars provide modid '" + modid + "': " + prev + " vs " + owner);
+            throw new DupeModidAbort("two enabled jars provide " + what + " '" + id + "': " + prev + " vs " + owner);
         }
     }
 

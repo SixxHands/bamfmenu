@@ -123,9 +123,11 @@ class FactoryResetItemTest {
     void anOldEngineIsToldItIsOldAndNotThatTheResetFailed() {
         for (Map<String, Object> answer : List.of(Map.<String, Object>of(), Map.<String, Object>of("x", 1L))) {
             RepairResult r = FactoryResetItem.read(answer);
+            assertEquals(RepairResult.Kind.REFUSED, r.kind());
             assertTrue(r.message().contains("too old"), r.message());
             assertTrue(r.message().contains("Nothing was changed"), String.valueOf(r.message()));
         }
+        assertEquals(RepairResult.Kind.REFUSED, FactoryResetItem.read(null).kind());
         assertTrue(FactoryResetItem.read(null).message().contains("too old"));
     }
 }

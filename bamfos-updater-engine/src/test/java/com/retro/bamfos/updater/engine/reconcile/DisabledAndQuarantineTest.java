@@ -344,6 +344,56 @@ class DisabledAndQuarantineTest {
         assertFalse(Files.exists(dir.resolve("mods/gone.jar.bak-v1")));
     }
 
+    /**
+     * Staging cleanup after a clean sync must leave FactoryReset's `-fr` resume parts alone so a normal reboot
+     * doesn't wipe a paused reset's downloads.
+     */
+    @Test
+    void aCleanSyncSweepsDeadParts_butNeverAResetsResumeParts() throws IOException {
+        String sha = "ab".repeat(32);
+        Fx.write(dir, ".bamfos-updater/staging/" + sha + "-fr7.part",
+                "a reset's resume bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Fx.write(dir, ".bamfos-updater/staging/" + sha + ".part",
+                "a dead ordinary download".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Ledger led = new Ledger();
+        Manifest empty = Fx.manifest("v1", List.of());
+        rec().apply(rec().plan(empty, led), empty, led, Fx.fetcher());
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater/staging/" + sha + ".part")));
+        assertTrue(Files.exists(dir.resolve(".bamfos-updater/staging/" + sha + "-fr7.part")));
+    }
+
+    /** Dupe guard must also catch duplicate service-provider jars (earlywindow, shim) that have no modid. */
+    @Test
+    void dupeServiceProviderAbortsLikeADupeModid() throws IOException {
+        byte[] managed = Fx.serviceJar("net.example.WindowProvider", "managed");
+        byte[] stray = Fx.serviceJar("net.example.WindowProvider", "stray");
+        FileEntry e = Fx.entry("mods/earlywindow.jar", managed, FileEntry.Side.CLIENT, FileEntry.Policy.MANAGED,
+                false, null, FileEntry.OnRemove.DELETE, List.of());
+        Fx.write(dir, "mods/earlywindow - Copy.jar", stray); // a player's hand-dropped duplicate
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v1", List.of(), e);
+        SyncPlan p = rec().plan(m, led);
+        Reconciler.DupeModidAbort abort = assertThrows(Reconciler.DupeModidAbort.class,
+                () -> rec().apply(p, m, led, Fx.fetcher()));
+        assertTrue(abort.getMessage().contains("service"), abort.getMessage());
+        assertTrue(abort.getMessage().contains("earlywindow - Copy.jar"), abort.getMessage());
+        assertFalse(Files.exists(dir.resolve("mods/earlywindow.jar")));
+    }
+
+    /** Real mods legitimately share service interfaces (mixin connectors and the like), so the provider
+     *  claim must only ever fire on modid-less service jars, never between two ordinary mods. */
+    @Test
+    void twoModsSharingAServiceInterfaceAreNotADupe() throws IOException {
+        byte[] a = Fx.jarWithService("moda", "org.example.MixinConnector");
+        FileEntry e = Fx.entry("mods/a.jar", a, FileEntry.Side.CLIENT, FileEntry.Policy.MANAGED,
+                false, null, FileEntry.OnRemove.DELETE, List.of("moda"));
+        Fx.write(dir, "mods/b.jar", Fx.jarWithService("modb", "org.example.MixinConnector"));
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v1", List.of(), e);
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+        assertTrue(Files.exists(dir.resolve("mods/a.jar")));
+    }
+
     @Test
     void dupeModidAbortsBeforeAnyMove_namesTheUntrackedCulprit() throws IOException {
         byte[] managed = Fx.jar("samemod");

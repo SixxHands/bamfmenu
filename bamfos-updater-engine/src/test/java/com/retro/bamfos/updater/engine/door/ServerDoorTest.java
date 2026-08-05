@@ -255,12 +255,9 @@ class ServerDoorTest {
 
     @Test
     void liveLockHolder_skipsSyncEntirely() throws IOException {
-        Files.createDirectories(InstanceLock.pathIn(dir).getParent());
-        long other = ProcessHandle.allProcesses()
-                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive())
-                .findFirst().orElseThrow().pid();
-        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other));
-        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        try (InstanceLock held = InstanceLock.acquire(dir).orElseThrow()) {
+            assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        }
         assertFalse(Files.exists(dir.resolve("mods")));
     }
 
@@ -364,11 +361,9 @@ class ServerDoorTest {
         assertFalse(Files.exists(probation()));
 
         onProbation();
-        long other = ProcessHandle.allProcesses()
-                .filter(p -> p.pid() != ProcessHandle.current().pid() && p.isAlive())
-                .findFirst().orElseThrow().pid();
-        Files.writeString(InstanceLock.pathIn(dir), Long.toString(other));
-        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        try (InstanceLock held = InstanceLock.acquire(dir).orElseThrow()) {
+            assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        }
         assertFalse(Files.exists(probation()));
     }
 
