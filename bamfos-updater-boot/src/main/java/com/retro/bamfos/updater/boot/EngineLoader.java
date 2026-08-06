@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -124,7 +125,7 @@ public final class EngineLoader {
                 }
                 Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
             }
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            replaceAtomic(tmp, target);
         } catch (IOException disk) {
             try {
                 Files.deleteIfExists(tmp); // ours alone now, so nothing else ever recycles a leftover
@@ -135,6 +136,18 @@ public final class EngineLoader {
         // the baseline is the shim's own twin, so it is known good by shipping and never inherits the verdict
         // that was hanging over the jar it just replaced
         EngineGuard.disarm(target);
+    }
+
+    /** The move that makes "atomic" TRUE on Windows: the plain replace there is delete-then-move, so a
+     *  crash between the two syscalls leaves NO jar in the slot. Every caller's tmp is a resolveSibling,
+     *  same volume, so the fallback only ever fires on a filesystem with no atomic rename at all, and
+     *  there the two-step beats refusing to write. */
+    static void replaceAtomic(Path from, Path to) throws IOException {
+        try {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException odd) {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     /** The shim jar's own embedded baseline (packed by the build, see build.gradle). */

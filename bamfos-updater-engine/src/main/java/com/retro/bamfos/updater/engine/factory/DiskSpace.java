@@ -5,21 +5,7 @@ import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/**
- * Is there room to stage a whole pack before deleting the one that is already there?
- *
- * A factory reset is the only op that holds two copies at once: every file is fetched and verified into
- * staging BEFORE the first delete, which is what makes it crash-safe, and the cost of that safety is peak
- * disk. Nothing anywhere else in the engine has ever asked this question (a grep for getUsableSpace across
- * all four modules returns nothing), because an ordinary sync only ever stages a handful of changed files.
- *
- * Running out mid-fetch is SAFE, since it happens before the journal and the install is untouched, but it
- * is not free: staging is only swept on the non-staged exit, so a reset that dies at 90% leaves hundreds of
- * megabytes of .part behind and the player is told nothing useful. Asking first turns that into one sentence.
- *
- * A hosted box makes this matter more, not less. A Pterodactyl container has a disk quota, and the quota
- * is what the filesystem reports, so this check sees it.
- */
+// Checks free disk space before staging files (a factory reset needs room for both the old install and the staged copy at once).
 public final class DiskSpace {
 
     /** Required free-space margin above the download payload (max of 10% or 256 MB) to leave room for

@@ -393,7 +393,12 @@ public final class PortHold {
         }
         Properties p = new Properties();
         try {
-            p.load(new StringReader(Files.readString(f, StandardCharsets.ISO_8859_1)));
+            String text = Files.readString(f, StandardCharsets.ISO_8859_1);
+            // Strip UTF-8 BOM (EF BB BF when read as latin-1): Notepad adds it on save, which would corrupt the first key (often server-port) and fall back to 25565.
+            if (text.length() >= 3 && text.charAt(0) == 0xEF && text.charAt(1) == 0xBB && text.charAt(2) == 0xBF) {
+                text = text.substring(3);
+            }
+            p.load(new StringReader(text));
         } catch (IOException | RuntimeException unreadable) {
             return p; // Fall back to the default port 25565 if server.properties is missing or unreadable.
         }

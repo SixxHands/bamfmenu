@@ -51,8 +51,10 @@ class RepairResultTest {
     void aToggleSaysWhichWayItWentAndWhen() {
         assertEquals("chipped.jar is on next boot.", RepairResult.ofToggle(true, "chipped.jar", false).message());
         assertEquals("chipped.jar is off next boot.", RepairResult.ofToggle(true, "chipped.jar", true).message());
+        assertEquals(RepairResult.Kind.STAGED, RepairResult.ofToggle(true, "chipped.jar", true).kind());
         assertEquals("Could not toggle chipped.jar. See the log.",
                 RepairResult.ofToggle(false, "chipped.jar", true).message());
+        assertEquals(RepairResult.Kind.FAILED, RepairResult.ofToggle(false, "chipped.jar", true).kind());
     }
 
     @Test

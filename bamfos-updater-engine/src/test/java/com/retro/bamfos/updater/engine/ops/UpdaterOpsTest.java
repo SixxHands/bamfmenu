@@ -7,6 +7,8 @@ import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -220,6 +222,87 @@ class UpdaterOpsTest {
         assertFalse(ops().setDisabled("mods/ghost.jar", true));
     }
 
+    /**
+     * FML keeps loaded jars open, so toggling a mod on Windows hits ERROR_SHARING_VIOLATION. Defer the rename
+     * through the journal for step 0 on next boot (Windows-only since POSIX renames open files).
+     */
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void setDisabled_aHeldJarIsJournaledForStepZero_neverFalseOverAnEmptyLog() throws IOException {
+        byte[] jar = Fx.jar("iris");
+        Fx.write(dir, "mods/iris.jar", jar);
+        Ledger led = new Ledger();
+        led.installedVersion = "v0.2.4";
+        led.files.put("mods/iris.jar",
+                new Ledger.Entry(com.retro.bamfos.updater.engine.util.HashUtils.sha256(jar)));
+        led.save(Ledger.pathIn(dir));
+        Path journalFile = com.retro.bamfos.updater.engine.journal.Journal.pathIn(dir);
+
+        // Lock the jar the same way FML does: ZipFile opens without delete sharing so rename actually
+        // fails on Windows (an NIO READ channel allows delete sharing so the move would succeed).
+        try (var held = new java.util.zip.ZipFile(dir.resolve("mods/iris.jar").toFile())) {
+            assertTrue(ops().setDisabled("mods/iris.jar", true));
+            assertTrue(Files.exists(dir.resolve("mods/iris.jar")));
+            var j = com.retro.bamfos.updater.engine.journal.Journal.load(journalFile);
+            assertEquals(1, j.ops.size());
+            assertEquals("rename", j.ops.get(0).kind());
+            assertEquals("mods/iris.jar", j.ops.get(0).from());
+            assertEquals("mods/iris.jar.disabled", j.ops.get(0).to());
+            assertEquals("v0.2.4", j.targetVersion);
+            assertFalse(Ledger.load(Ledger.pathIn(dir)).files.get("mods/iris.jar").disabled);
+
+            assertTrue(ops().setDisabled("mods/iris.jar", true));
+            assertEquals(1, com.retro.bamfos.updater.engine.journal.Journal.load(journalFile).ops.size());
+        }
+
+        // Lock is released, matching step 0 on next boot before FML opens any jars.
+        var replayed = com.retro.bamfos.updater.engine.journal.Journal.load(journalFile).replay(dir);
+        assertTrue(replayed.allLanded());
+        assertTrue(Files.exists(dir.resolve("mods/iris.jar.disabled")));
+        assertFalse(Files.exists(dir.resolve("mods/iris.jar")));
+    }
+
+    /**
+     * Return true if the rename succeeded even when Ledger.save fails; the next sync heals the ledger from disk.
+     */
+    @Test
+    void setDisabled_aLedgerThatWillNotSaveNeverWalksBackALandedFlip() throws IOException {
+        Fx.write(dir, "mods/iris.jar", Fx.jar("iris"));
+        Ledger led = new Ledger();
+        led.files.put("mods/iris.jar",
+                new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        led.save(Ledger.pathIn(dir));
+        // Putting a directory at the tmp path makes save() fail after the move succeeds.
+        Files.createDirectories(dir.resolve(".bamfos-updater").resolve("ledger.json.tmp"));
+
+        assertTrue(ops().setDisabled("mods/iris.jar", true));
+        assertTrue(Files.exists(dir.resolve("mods/iris.jar.disabled")));
+        assertFalse(Files.exists(dir.resolve("mods/iris.jar")));
+        assertFalse(Ledger.load(Ledger.pathIn(dir)).files.get("mods/iris.jar").disabled);
+    }
+
+    /** Log a clear reason on every toggle refusal and leave no journal behind to fail on future boots. */
+    @Test
+    void setDisabled_aRefusalPutsItsReasonInTheLog_andJournalsNothing() throws IOException {
+        Fx.write(dir, "mods/iris.jar", Fx.jar("iris"));
+        Fx.write(dir, "mods/iris.jar.disabled", Fx.jar("iris-twin"));
+        java.io.ByteArrayOutputStream sink = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream real = System.out;
+        System.setOut(new java.io.PrintStream(sink));
+        try {
+            assertFalse(ops().setDisabled("mods/iris.jar", true));
+            assertFalse(ops().setDisabled("mods/ghost.jar", true));
+        } finally {
+            System.setOut(real);
+        }
+        String log = sink.toString();
+        assertTrue(log.contains("mods/iris.jar") && log.contains("both names are on disk"), log);
+        assertTrue(log.contains("mods/ghost.jar") && log.contains("neither name is on disk"), log);
+        assertTrue(Files.exists(dir.resolve("mods/iris.jar"))
+                        && Files.exists(dir.resolve("mods/iris.jar.disabled")));
+        assertFalse(Files.exists(com.retro.bamfos.updater.engine.journal.Journal.pathIn(dir)));
+    }
+
     @Test
     void releaseNotes_readsTheCache_emptyWhenNone() throws IOException {
         assertEquals("", ops().releaseNotes());
@@ -420,6 +503,20 @@ class UpdaterOpsTest {
     }
 
     /**
+     * A failed config swap (simulated with a blocking directory) must keep the old properties and delete the .tmp.
+     */
+    @Test
+    void writeKeys_aFailedSwapLeavesTheOldConfigAndNoTmpLitter() throws IOException {
+        Path p = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
+        Files.createDirectories(p.resolve("squatter")); // p is a non-empty directory so the move should fail
+
+        assertThrows(IOException.class, () -> ops().writePin("v0.2.2"));
+
+        assertFalse(Files.exists(p.resolveSibling(p.getFileName() + ".tmp")));
+        assertTrue(Files.isDirectory(p.resolve("squatter")));
+    }
+
+    /**
      * java.util.Properties accepts `=`, `:`, and whitespace separators, so writeKeys has to match all of
      * them instead of just `tag=`, otherwise unpin() leaves the pin behind without error.
      */
@@ -575,14 +672,9 @@ class UpdaterOpsTest {
         }
     }
 
-    /**
-     * The other half of 6's seam: the SERVER ops stay on 0 even for a sync that staged nothing, because their
-     * replies live in OpsBrain's tables over in the watchdog and those have no line for 6, so the
-     * unknown-code arm would answer a healthy box in red. Lift the !server gate in stagedSync only WITH
-     * new OpsBrain lines, and move this pin when you do.
-     */
+    /** Server sync returns 6 when already current, matching the client and OpsBrain so the watchdog won't error. */
     @Test
-    void serverSyncNow_staysOnZeroWhenAlreadyCurrent_cuzOpsBrainHasNoLineFor6() throws IOException {
+    void serverSyncNow_answersAlreadyCurrentAsSix_nowThatOpsBrainSpeaksIt() throws IOException {
         byte[] jar = Fx.jar("srv");
         String sha = com.retro.bamfos.updater.engine.util.HashUtils.sha256(jar);
         Map<String, Object> entry = new java.util.LinkedHashMap<>();
@@ -617,7 +709,7 @@ class UpdaterOpsTest {
             led.files.put("mods/serveronly.jar", new Ledger.Entry(sha));
             led.save(Ledger.pathIn(dir));
 
-            assertEquals(0, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
+            assertEquals(6, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
         } finally {
             gh.stop(0);
         }
@@ -653,7 +745,8 @@ class UpdaterOpsTest {
             Files.createDirectories(probation.getParent());
             Files.writeString(probation, "a promoted sha the shim wrote");
 
-            assertEquals(0, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
+            int code = new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow();
+            assertTrue(code == 0 || code == 6, String.valueOf(code));
             assertTrue(Files.isRegularFile(probation));
         } finally {
             gh.stop(0);

@@ -5,9 +5,8 @@ import com.retro.bamfmenu.early.core.repair.api.RepairGate;
 import com.retro.bamfmenu.early.core.repair.api.RepairItem;
 import com.retro.bamfmenu.early.core.repair.api.RepairResult;
 
-/* Sync now (syncNow()). By menu time the jars are loaded and locked, so this ALWAYS stages
-   and the answer always says next boot; a row that claimed to update a running game would be lying
-   about the one thing a player cares about. */
+/* Sync now (syncNow): jars are locked at menu time, so updates stage for next boot.
+   Code 6 reports already current with nothing staged to avoid pointless reboots. */
 public final class SyncItem implements RepairDef {
 
     @Override

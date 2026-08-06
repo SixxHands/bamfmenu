@@ -68,6 +68,19 @@ class ServersMergeTest {
         java.nio.file.attribute.FileTime before = Files.getLastModifiedTime(local);
         ServersDat.mergeFirstEntry(local, SEED);
         assertEquals(before, Files.getLastModifiedTime(local));
+        assertFalse(Files.exists(dir.resolve("servers.dat.bak")));
+    }
+
+    /** Back up valid servers.dat before rewriting too, not just corrupt ones. We already have
+     *  the old bytes loaded, and losing this file wipes the player's whole server list. */
+    @Test
+    void healthyMerge_keepsThePreMergeBytesAsBak() throws IOException {
+        Path local = dir.resolve("servers.dat");
+        byte[] theirs = Fx.serversDat("9.9.9.9", "friends.server.net");
+        Files.write(local, theirs);
+        ServersDat.mergeFirstEntry(local, SEED);
+        assertArrayEquals(theirs, Files.readAllBytes(dir.resolve("servers.dat.bak")));
+        assertFalse(Files.exists(dir.resolve("servers.dat.tmp")));
     }
 
     /** Back up unparseable servers.dat bytes (e.g. gzipped NBT) before seeding so the player's list isn't lost. */

@@ -181,6 +181,48 @@ class JournalTest {
         j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/x.jar", HashUtils.sha256(NEW)));
         assertTrue(j.replay(dir).allLanded());
         assertArrayEquals(NEW, Files.readAllBytes(dir.resolve("mods/x.jar")));
+        assertFalse(Files.exists(dir.resolve(".bamfos-updater/staging/part1")));
+        assertFalse(Files.exists(dir.resolve("mods/x.jar.new")));
+    }
+
+    /**
+     * On Windows, REPLACE_EXISTING deletes the target before renaming the source, so a scanner locking the
+     * staged file can leave the mod missing. Replay copies beside the target and swaps atomically instead.
+     */
+    @Test
+    void aHeldStagedSource_neverCostsTheDestinationItsFile() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Path src = dir.resolve(".bamfos-updater/staging/part1");
+        Files.write(src, NEW);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/x.jar"), "the old version".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/x.jar", HashUtils.sha256(NEW)));
+
+        // Simulate AV scanner: open handle without FILE_SHARE_DELETE, blocking rename of src on Windows.
+        try (java.io.RandomAccessFile scanner = new java.io.RandomAccessFile(src.toFile(), "r")) {
+            j.replay(dir);
+        }
+
+        assertTrue(Files.exists(dir.resolve("mods/x.jar")));
+        assertArrayEquals(NEW, Files.readAllBytes(dir.resolve("mods/x.jar")));
+    }
+
+    /** A crash between copy and swap in place() leaves mods/x.jar.new behind. Replaying the journal
+     *  must overwrite that leftover file instead of failing with FileAlreadyExists. */
+    @Test
+    void aCrashLeftoverDotNew_neverStopsTheNextReplay() throws IOException {
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/part1"), NEW);
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/x.jar"), "old".getBytes(StandardCharsets.UTF_8));
+        Files.write(dir.resolve("mods/x.jar.new"), "half a copy the crash cut off".getBytes(StandardCharsets.UTF_8));
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/part1", "mods/x.jar", HashUtils.sha256(NEW)));
+
+        assertTrue(j.replay(dir).allLanded());
+        assertArrayEquals(NEW, Files.readAllBytes(dir.resolve("mods/x.jar")));
+        assertFalse(Files.exists(dir.resolve("mods/x.jar.new")));
     }
 
     /**

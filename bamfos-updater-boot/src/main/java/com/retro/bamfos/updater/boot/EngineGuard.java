@@ -342,7 +342,7 @@ final class EngineGuard {
         Path tmp = to.resolveSibling(to.getFileName() + "." + ProcessHandle.current().pid() + ".tmp");
         try {
             Files.copy(from, tmp, StandardCopyOption.REPLACE_EXISTING);
-            Files.move(tmp, to, StandardCopyOption.REPLACE_EXISTING);
+            EngineLoader.replaceAtomic(tmp, to);
         } catch (IOException disk) {
             try {
                 Files.deleteIfExists(tmp); // ours alone, nothing else ever recycles a pid-named leftover

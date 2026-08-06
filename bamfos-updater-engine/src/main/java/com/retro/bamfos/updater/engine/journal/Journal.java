@@ -7,6 +7,7 @@ import com.retro.bamfos.updater.engine.util.HashUtils;
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -192,8 +193,12 @@ public final class Journal {
                         // Never REPLACE_EXISTING for seed or rename: let FileAlreadyExistsException report the refusal
                         // instead of overwriting the player's file.
                         Files.move(from, to);
-                    } else {
+                    } else if (!Files.exists(to)) {
+                        // Target doesn't exist yet, so a direct rename is safe and much faster than copying (especially during
+                        // factory reset, which moves hundreds of files right after deleting targets).
                         Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+                    } else {
+                        place(from, to);
                     }
                 }
             } catch (FileAlreadyExistsException theirs) {
@@ -210,6 +215,43 @@ public final class Journal {
             }
         }
         return new Result(retryable, abandoned);
+    }
+
+    /**
+     * Replaces an OCCUPIED destination without ever leaving the name empty. On Windows a REPLACE_EXISTING
+     * move is two syscalls, delete the target then rename the source, and the realistic failure splits
+     * them: a scanner holding the freshly staged source (new files are exactly what a real-time scanner
+     * grabs) fails the rename AFTER the delete already unlinked the target. Step 0 runs before FML's mod
+     * scan and the retry is a whole boot away, so that session ran with the mod ABSENT, a
+     * missing-dependency crash, while every retry line upstream promised old bytes. Copying beside the
+     * target first means the only step that can touch the old file is an atomic swap, and a swap that
+     * fails leaves it standing.
+     */
+    private static void place(Path from, Path to) throws IOException {
+        Path fresh = to.resolveSibling(to.getFileName() + ".new");
+        try {
+            Files.copy(from, fresh, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(fresh, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException odd) {
+                // fresh is a same-directory sibling, so this arm should be unreachable; one plain move
+                // beats holding the op retryable for three boots on a filesystem that cannot say ATOMIC
+                Files.move(fresh, to, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            try {
+                Files.deleteIfExists(fresh);
+            } catch (IOException litter) {
+                // never mask the failure that matters with the cleanup's
+            }
+            throw e;
+        }
+        try {
+            Files.deleteIfExists(from);
+        } catch (IOException held) {
+            // Target is already updated, so ignore cleanup errors on the staged copy (the staging sweep removes it
+            // later). Failing here would leave the ledger out of sync with disk.
+        }
     }
 
     /**

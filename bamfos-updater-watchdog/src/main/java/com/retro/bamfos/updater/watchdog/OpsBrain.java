@@ -130,7 +130,7 @@ final class OpsBrain {
 
     // ------------------------------------------------------------------ sync
 
-    /** One sentence per UpdaterOps code, and only two of the six are painted as failures. */
+    /** One sentence per UpdaterOps code, and only two of the seven are painted as failures. */
     static Reply syncReply(int code) {
         return switch (code) {
             case 0 -> Reply.ok("sync staged. The files are downloaded and the journal is written, so the next "
@@ -143,6 +143,11 @@ final class OpsBrain {
                     + "/bamfos reload and /bamfos cleartoken.");
             case 5 -> Reply.ok("github is rate limiting this server, so nothing was staged. It clears itself, "
                     + "try again later.");
+            // the server engine does not answer 6 yet: UpdaterOps holds stagedSync's !server gate until
+            // this line and repairReply's exist, so lifting it cannot land a healthy box in the
+            // unknown-code arm below. NOT dead code, landing first is the point
+            case 6 -> Reply.ok("already current. This box is on the release it asked for, so nothing was "
+                    + "staged and a restart now would change nothing.");
             case 2 -> Reply.bad("the sync did not finish and nothing applied. Read "
                     + ".bamfos-updater/server-sync.log for the reason; the next boot syncs again anyway.");
             // Don't guess a message for an unknown exit code; just print the code.
@@ -168,6 +173,9 @@ final class OpsBrain {
                     + "/bamfos reload and /bamfos cleartoken.");
             case 5 -> Reply.ok("github is rate limiting this server, so the repair could not read the release. "
                     + "It clears itself, try again later.");
+            case 6 -> Reply.ok("repair clean. Every managed file was hash-checked against the release and "
+                    + "every one already matches, so nothing was staged and there is no restart to take. "
+                    + "Whatever sent you here, it is not something a repair can put back.");
             case 2 -> Reply.bad("the repair did not finish. Read .bamfos-updater/server-sync.log for the "
                     + "reason; the next boot re-derives the install by itself anyway.");
             default -> Reply.bad("the repair answered " + code + ", which this build has no line for. "

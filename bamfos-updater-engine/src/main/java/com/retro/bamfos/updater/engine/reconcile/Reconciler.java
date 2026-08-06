@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine.reconcile;
 
+import com.retro.bamfos.updater.engine.factory.DiskSpace;
 import com.retro.bamfos.updater.engine.jar.JarInfo;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
@@ -17,6 +18,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -244,8 +246,10 @@ public final class Reconciler {
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
         Map<String, Path> stagedFiles = new HashMap<>();
+        Map<Action, Path> toFetch = new LinkedHashMap<>();
         int stageIdx = 0;
         int reused = 0;
+        long owed = 0;
         for (Action a : plan.downloads()) {
             // Stage one temp file per manifest path, not per hash. Otherwise two identical files at
             // different paths would share a staged file and moving the first one would consume it.
@@ -257,6 +261,27 @@ public final class Reconciler {
                 reused++;
                 continue;
             }
+            toFetch.put(a, part);
+            long missing = a.entry().size();
+            Path dl = part.resolveSibling(part.getFileName() + ".dl");
+            if (Files.isRegularFile(dl)) {
+                missing -= Math.min(Files.size(dl), missing); // the fetcher resumes that tail with Range
+            }
+            owed += missing;
+        }
+        if (owed > 0) {
+            // Check free space before downloading so we fail cleanly upfront instead of throwing mid-pack
+            // and stranding partial downloads.
+            DiskSpace.Room room = DiskSpace.check(dir, owed);
+            if (room.blocks()) {
+                throw new IOException("not enough free space for this update: it needs about "
+                        + DiskSpace.mb(room.needBytes()) + " free to stage its downloads and this drive has "
+                        + DiskSpace.mb(room.freeBytes()) + ". Nothing was changed.");
+            }
+        }
+        for (Map.Entry<Action, Path> f : toFetch.entrySet()) {
+            Action a = f.getKey();
+            Path part = f.getValue();
             fetcher.fetch(a.entry(), part);
             if (!HashUtils.sha256(part).equals(a.entry().sha256())) {
                 throw new IOException("staged bytes for " + a.path() + " failed hash verification");
@@ -370,8 +395,7 @@ public final class Reconciler {
             // Gate the ledger on the original retryable+abandoned sets so we never record unlanded bytes.
             Journal.Stuck stuck = Journal.afterAttempt(replayed.retryable());
             for (Journal.Op op : stuck.gaveUp()) {
-                System.out.println("[updater] gave up on " + op.to() + " after " + Journal.MAX_ATTEMPTS
-                        + " tries, it stays on its old bytes and the next sync re-plans it");
+                System.out.println("[updater] " + gaveUpLine(dir, op));
             }
             journal.ops.clear();
             journal.ops.addAll(stuck.keep());
@@ -429,6 +453,12 @@ public final class Reconciler {
                     // Record on_remove=orphan now: rule E reads it after the manifest is gone, and existing seeds
                     // emit no action to backfill it later.
                     en.orphanOnRemove = a.entry().onRemove() == FileEntry.OnRemove.ORPHAN;
+                    if ("servers".equals(a.entry().merge())) {
+                        // Record merge_name immediately so the next sync can check if our server entry exists
+                        // instead of re-downloading the data zip to run a merge.
+                        en.mergeName = com.retro.bamfos.updater.engine.ping.ServersDat
+                                .firstEntryName(dir.resolve(a.path()));
+                    }
                     ledger.files.put(a.path(), en);
                 }
                 case DELETE, ORPHAN -> ledger.files.remove(a.path());
@@ -473,21 +503,19 @@ public final class Reconciler {
     }
 
     /**
-     * Dead downloads, swept only where the journal is already gone. Every row that was deferred, abandoned,
-     * or cut short by a DupeModidAbort leaves its staged .part behind and NOTHING else ever removes one, so
-     * an instance folder grows dead bytes for the life of the box with no line anywhere naming them (* step 6 promises otherwise).
-     * IMPORTANT: this is called from the ONE exit that has just proven no journal survives. A pending op's
-     * staged bytes are the whole of , the reason replay needs no network, so a sweep that runs while a
-     * journal is kept turns a retryable op into an abandoned one and the box stops converging offline.
-     * A factory reset's -fr parts are NOT ours to sweep: they are the resume state of a reset that died
-     * mid-download, exactly the bytes that let the retry cost only the remainder, and this box may well
-     * reboot (and cleanly sync) between the failure and the player trying again. FactoryReset owns their
-     * lifecycle (sweepStrays on the next arm, replay consuming them as sources).
+     * Sweeps dead staged .part/.part.dl files ONLY when no journal survives (pending ops need their
+     * staged bytes for offline replay). Leaves FactoryReset's -fr parts alone so resets can resume.
      */
     private static void pruneStaging(Path staging) {
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(staging, "*.part")) {
+        // Match *.part* (not just *.part) because HttpFetcher downloads into a .part.dl temp file
+        // first, so aborted downloads can leave .part.dl files behind.
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(staging, "*.part*")) {
             for (Path part : ds) {
-                if (com.retro.bamfos.updater.engine.factory.FactoryReset.isResetPart(part.getFileName().toString())) {
+                String name = part.getFileName().toString();
+                if (name.endsWith(".dl")) {
+                    name = name.substring(0, name.length() - 3); // a resume tail lives and dies with its part
+                }
+                if (com.retro.bamfos.updater.engine.factory.FactoryReset.isResetPart(name)) {
                     continue;
                 }
                 Files.deleteIfExists(part);
@@ -552,12 +580,25 @@ public final class Reconciler {
         return to.endsWith(DISABLED_SUFFIX) ? to.substring(0, to.length() - DISABLED_SUFFIX.length()) : to;
     }
 
-    /** The honest one-liner for a row this apply is not going to record. Q1's jars get their own wording:
-     *  the managed line names a ledger and old bytes an untracked third-party jar does not have. */
-    private static String notRecorded(Action a) {
-        return a.kind() == Kind.QUARANTINE
-                ? a.path() + " could not be disabled, nothing recorded for it, next sync retries"
-                : a.path() + " did not land, ledger left on the old bytes for the next boot";
+    /** The give-up one-liner, with the old-bytes claim made only when a stat backs it: replay's swap never
+     *  unlinks an occupied target anymore, but a stuck fresh INSTALL never had old bytes to keep, and
+     *  promising a file that is not there sends the player hunting for a mod that never existed. */
+    static String gaveUpLine(Path dir, Journal.Op op) {
+        return "gave up on " + op.to() + " after " + Journal.MAX_ATTEMPTS + " tries, "
+                + (Files.exists(dir.resolve(op.to()))
+                        ? "it stays on its old bytes and the next sync re-plans it"
+                        : "nothing is at that path and the next sync re-plans it");
+    }
+
+    /** Formats the skip message for a file that wasn't updated. Uses separate wording for Q1
+     *  untracked jars (no ledger entry), and checks disk before claiming the old file is intact. */
+    String notRecorded(Action a) {
+        if (a.kind() == Kind.QUARANTINE) {
+            return a.path() + " could not be disabled, nothing recorded for it, next sync retries";
+        }
+        return disk(a.path()).exists()
+                ? a.path() + " did not land, ledger left on the old bytes for the next boot"
+                : a.path() + " did not land and nothing is on disk there, the next sync retries it";
     }
 
     /**

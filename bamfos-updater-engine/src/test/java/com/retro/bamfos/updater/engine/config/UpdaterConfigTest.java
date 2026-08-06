@@ -24,6 +24,17 @@ class UpdaterConfigTest {
         Files.writeString(p, body, StandardCharsets.UTF_8);
     }
 
+    /** Same config file with a UTF-8 BOM prefix (as written by PowerShell 5.1 -Encoding utf8 or
+     *  Notepad "UTF-8 with BOM"). */
+    private void writeBommed(String body) throws IOException {
+        Path p = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
+        Files.createDirectories(p.getParent());
+        java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
+        raw.writeBytes(new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        raw.writeBytes(body.getBytes(StandardCharsets.ISO_8859_1));
+        Files.write(p, raw.toByteArray());
+    }
+
     /** A raw Windows path like C:\\users looks like an invalid \\u escape to Properties.load and
      *  causes loading the entire file to fail. */
     @Test
@@ -76,6 +87,24 @@ class UpdaterConfigTest {
 
         write("repo=o/r\n");
         assertTrue(UpdaterConfig.load(dir).toString().contains("githubToken=<none>"));
+    }
+
+    /** Strip a leading UTF-8 BOM (PowerShell/Notepad) before Properties.load, or U+FEFF becomes part of the
+     * github_token key and the override reads as absent. */
+    @Test
+    void bomOnLineOne_doesNotEatTheToken() throws IOException {
+        writeBommed("github_token=tok\nrepo=o/r\n");
+        UpdaterConfig cfg = UpdaterConfig.load(dir);
+        assertEquals("tok", cfg.githubToken());
+        assertEquals("o/r", cfg.repo());
+    }
+
+    /** Test BOM stripping in the latin-1 fallback: 0xE9 makes UTF-8 readString throw, so the latin-1
+     * fallback reads the UTF-8 BOM as three chars. Both paths need to strip it. */
+    @Test
+    void bomOnAnAnsiFile_stillDoesNotEatTheToken() throws IOException {
+        writeBommed("github_token=tok\nnotes=caf" + (char) 0xE9 + "\n"); // a pasted e-acute, not UTF-8
+        assertEquals("tok", UpdaterConfig.load(dir).githubToken());
     }
 
     /** The watchdog reads its keys from the same file via rawProps, so the fallback needs to keep them

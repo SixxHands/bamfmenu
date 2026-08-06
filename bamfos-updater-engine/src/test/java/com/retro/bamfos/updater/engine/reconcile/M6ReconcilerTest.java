@@ -102,14 +102,18 @@ class M6ReconcilerTest {
         Manifest m = Fx.manifest("vT", List.of(), entry);
         Reconciler rec = new Reconciler(dir, Reconciler.Side.CLIENT, List.of());
 
-        // fresh install: no file, no ledger -> plain SEED (rule D unchanged)
+        // fresh install: plain SEED records the merge name in the same commit, avoiding a follow-up
+        // MERGE_SERVERS backfill that would re-download the data zip
         Ledger ledger = new Ledger();
         SyncPlan p1 = rec.plan(m, ledger);
         assertEquals(SyncPlan.Kind.SEED, p1.actions.get(0).kind());
         rec.apply(p1, m, ledger, Fx.fetcher());
         assertArrayEquals(seed, Files.readAllBytes(dir.resolve("servers.dat")));
+        assertEquals("BAMFOS", ledger.files.get("servers.dat").mergeName);
+        assertTrue(rec.plan(m, ledger).actions.isEmpty());
 
-        // pre-merge ledger (no merge_name yet): one MERGE_SERVERS adopts it into the merge world
+        // Older ledger without merge_name: a single MERGE_SERVERS op migrates it to the new format.
+        ledger.files.get("servers.dat").mergeName = null;
         SyncPlan p2 = rec.plan(m, ledger);
         assertEquals(SyncPlan.Kind.MERGE_SERVERS, p2.actions.get(0).kind());
         rec.apply(p2, m, ledger, Fx.fetcher());

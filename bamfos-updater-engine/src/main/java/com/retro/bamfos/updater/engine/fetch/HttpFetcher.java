@@ -315,7 +315,14 @@ public final class HttpFetcher {
                                     : java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
                     copyBounded(in, out, stallMs, cap, copied -> onBytes.at(base + copied, total));
                 }
-                Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException odd) {
+                    // The .dl file is in the same directory, so AtomicMoveNotSupportedException only happens on filesystems
+                    // without atomic rename. Catch it separately from IOException so we don't treat it as a network error
+                    // and retry the download.
+                    Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
+                }
                 return;
             } catch (TokenDead | RateLimited stop) {
                 throw stop; // neither gets better by asking again inside a second

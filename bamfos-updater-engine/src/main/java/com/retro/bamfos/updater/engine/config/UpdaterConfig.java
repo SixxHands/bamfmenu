@@ -75,6 +75,12 @@ public record UpdaterConfig(
                 return props;
             }
         }
+        // A BOM'd save (PowerShell 5.1 -Encoding utf8, Notepad's "UTF-8 with BOM") glues U+FEFF onto the first key, so a github_token pasted as line 1 reads as absent while it sits right there in the file; trim() does not touch FEFF, it is not whitespace to Java. Spelled in hex because a FEFF string literal is invisible in source.
+        if (!text.isEmpty() && text.charAt(0) == 0xFEFF) {
+            text = text.substring(1);
+        } else if (text.length() >= 3 && text.charAt(0) == 0xEF && text.charAt(1) == 0xBB && text.charAt(2) == 0xBF) {
+            text = text.substring(3); // strip UTF-8 BOM (EF BB BF) if it was decoded as three latin-1 chars
+        }
         try {
             props.load(new StringReader(text));
             return props;

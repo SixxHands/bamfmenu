@@ -53,7 +53,10 @@ public record RepairResult(Kind kind, String message) {
         };
     }
 
-    /** An optional mod's flip: the rename is instant, the load is not, so the line says next boot. */
+    /**
+     * Optional mod toggle result: true is STAGED (never DONE), since renames apply on next boot.
+     * False means the engine refused and wrote the reason to the log.
+     */
     public static RepairResult ofToggle(boolean ok, String name, boolean nowDisabled) {
         if (!ok) {
             return new RepairResult(Kind.FAILED, "Could not toggle " + name + ". See the log.");

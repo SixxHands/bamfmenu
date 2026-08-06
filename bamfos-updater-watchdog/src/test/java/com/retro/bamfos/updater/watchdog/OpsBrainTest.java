@@ -92,8 +92,7 @@ class OpsBrainTest {
         }
     }
 
-    /** Only two of the six sync codes are the operator's problem. 5 folded into "failed" is the exact bug
-     *  the BIOS spent its own code on, and 1 is the pack's to fix by publishing, not the player's. */
+    /** Verifies sync exit-code wording, keeping code 5 (throttled) and code 1 (unpublished) distinct from failures. */
     @Test
     void syncReply_keepsAThrottleAndAMissingReleaseOffTheFailureFlag() {
         assertFalse(OpsBrain.syncReply(0).failed());
@@ -175,6 +174,24 @@ class OpsBrainTest {
         assertTrue(OpsBrain.repairReply(4).failed());
         assertFalse(OpsBrain.repairReply(5).failed());
         assertTrue(OpsBrain.repairReply(9).failed() && OpsBrain.repairReply(9).lines().get(0).contains("9"));
+    }
+
+    /** Verifies code 6 reports already up to date (nothing staged), distinct from code 0 and unknown errors. */
+    @Test
+    void alreadyCurrent_readsAsDone_neverAsStagedAndNeverAsRed() {
+        OpsBrain.Reply sync = OpsBrain.syncReply(6);
+        assertFalse(sync.failed());
+        String line = sync.lines().get(0);
+        assertTrue(line.contains("already current"), line);
+        assertFalse(line.contains("sync staged"), String.valueOf(line));
+        assertFalse(line.contains("no line for"), String.valueOf(line));
+
+        OpsBrain.Reply repair = OpsBrain.repairReply(6);
+        assertFalse(repair.failed());
+        String clean = repair.lines().get(0);
+        assertTrue(clean.contains("matches the release"), clean);
+        assertFalse(clean.contains("drifted"), String.valueOf(clean));
+        assertFalse(clean.contains("unknown code"), clean);
     }
 
     /** Verifies stopReply reports an aborted stop when the sentinel write fails on a wrapped server. */

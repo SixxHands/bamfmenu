@@ -53,6 +53,21 @@ public final class ServersDat {
         }
     }
 
+    /** Returns the name of the first entry in servers.dat, or null if unreadable. Saved in the ledger on
+     *  SEED so future plans can check presence without downloading the data zip. */
+    public static String firstEntryName(Path serversDat) {
+        if (!Files.isRegularFile(serversDat)) {
+            return null;
+        }
+        try (var in = Files.newInputStream(serversDat)) {
+            var entry = firstEntry(Nbt.read(in));
+            return entry != null && entry.get("name") instanceof Nbt.Val n && n.v() instanceof String s
+                    ? s : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
     /** Looks up the ip for the entry named `name`, returning empty if missing or malformed. */
     public static Optional<String> entryIp(Path serversDat, String name) {
         if (!Files.isRegularFile(serversDat)) {
@@ -134,12 +149,23 @@ public final class ServersDat {
                 }
                 servers.items().add(0, new Nbt.Val(0x0A, seedEntry)); // ours goes first, theirs keep their order
             }
+            // Keep a single rolling backup on healthy merges too since we're rewriting their whole list.
+            Files.write(local.resolveSibling(local.getFileName() + ".bak"), localBytes);
             out = Nbt.write(localTree);
         }
         Files.createDirectories(local.toAbsolutePath().getParent());
         Path tmp = local.resolveSibling(local.getFileName() + ".tmp");
         Files.write(tmp, out);
-        Files.move(tmp, local, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        // Use ATOMIC_MOVE: plain REPLACE_EXISTING on Windows deletes before moving, so an AV lock on the
+        // tmp file could wipe the player's server list.
+        try {
+            Files.move(tmp, local, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException odd) {
+            // Temp file is in the same directory, so we only hit this on filesystems without atomic rename;
+            // fall back to a regular replace.
+            Files.move(tmp, local, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
         return seedName;
     }
 

@@ -450,6 +450,30 @@ class ReconcilerTableTest {
         assertArrayEquals(EDIT, Files.readAllBytes(dir.resolve("servers.dat")));
     }
 
+    /**
+     * Recording the merge name during initial SEED prevents the next sync from re-downloading the full data zip
+     * for a no-op MERGE_SERVERS backfill.
+     */
+    @Test
+    void ruleD_aSeededMergeRow_recordsItsName_soTheNextPlanFetchesNothing() throws IOException {
+        byte[] seedBytes = Fx.serversDat("198.51.100.10");
+        Fx.CONTENT.put("servers.dat@" + com.retro.bamfos.updater.engine.util.HashUtils.sha256(seedBytes), seedBytes);
+        FileEntry seed = new FileEntry("servers.dat",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(seedBytes), seedBytes.length,
+                FileEntry.Side.CLIENT, FileEntry.Policy.SEED_ONCE, FileEntry.Clazz.HOT,
+                new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, "servers.dat", null, null, null, null),
+                List.of(), false, null, FileEntry.OnRemove.ORPHAN, "servers");
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v1", List.of(), seed);
+        SyncPlan p1 = rec().plan(m, led);
+        assertEquals(Kind.SEED, only(p1, "servers.dat"));
+        rec().apply(p1, m, led, Fx.fetcher());
+
+        assertEquals("BAMFOS", led.files.get("servers.dat").mergeName);
+        SyncPlan p2 = rec().plan(m, led);
+        assertTrue(p2.actions.isEmpty());
+    }
+
     @Test
     void ruleE_deletesOnlyLedgerPaths_orphanLeavesFile() throws IOException {
         Ledger led = new Ledger();

@@ -178,6 +178,22 @@ class PortHoldTest {
         assertEquals("updating_placeholder=false", h.why());
     }
 
+    /**
+     * Strip a leading UTF-8 BOM (EF BB BF) when reading server.properties as latin-1, otherwise a
+     * first-line server-port key gets corrupted and falls back to 25565.
+     */
+    @Test
+    void bomOnServerProperties_stillReadsTheRealPort() throws IOException {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        raw.writeBytes(new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        raw.writeBytes("server-port=0\nserver-ip=127.0.0.1\n".getBytes(StandardCharsets.ISO_8859_1));
+        Files.write(dir.resolve("server.properties"), raw.toByteArray());
+        hold = PortHold.open(dir, "v0.2.6");
+        assertTrue(hold.up());
+        assertNotEquals(25565, hold.port());
+        assertEquals("", hold.release());
+    }
+
     // raw wire helpers
 
     private static void handshake(OutputStream out, int next) throws IOException {

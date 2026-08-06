@@ -326,6 +326,40 @@ class FactoryResetTest {
         assertTrue(Files.exists(staging.resolve("someothersync.part")));
     }
 
+    /** Partial download files (-frN.part.dl) follow the same cleanup rules as their .part files: stale
+     *  releases get removed, while the current reset keeps its partial file so the next attempt can
+     *  resume with Range instead of restarting. */
+    @Test
+    void staleResumeTailsAreSweptAndTheCurrentOnesAreNot() throws Exception {
+        Path staging = dir.resolve(".bamfos-updater/staging");
+        Files.createDirectories(staging);
+        Files.writeString(staging.resolve("deadbeef-fr0.part.dl"), "a tail for a release we are not arming");
+        String sha = HashUtils.sha256("bbb".getBytes(StandardCharsets.UTF_8));
+        Files.writeString(staging.resolve(sha + "-fr0.part.dl"), "b"); // Partial download left over from an earlier attempt.
+
+        Manifest m = manifest(entry("mods/b.jar", "bbb", FileEntry.Side.BOTH, false));
+        FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        assertFalse(Files.exists(staging.resolve("deadbeef-fr0.part.dl")));
+        assertTrue(Files.exists(staging.resolve(sha + "-fr0.part.dl")));
+    }
+
+    /** Partial downloads already on disk should reduce needBytes so the free-space check doesn't
+     * double-count them. */
+    @Test
+    void aHalfDownloadedTailShrinksTheSpaceTheCheckAsksFor() throws Exception {
+        String body = "the whole thing"; // 15 bytes
+        Manifest m = manifest(entry("mods/b.jar", body, FileEntry.Side.BOTH, false));
+        Path staging = dir.resolve(".bamfos-updater/staging");
+        Files.createDirectories(staging);
+        String sha = HashUtils.sha256(body.getBytes(StandardCharsets.UTF_8));
+        Files.write(staging.resolve(sha + "-fr0.part.dl"), new byte[8]); // where the wifi died
+
+        FactoryReset.Armed armed = FactoryReset.arm(dir, m, Reconciler.Side.CLIENT, fetcher(), "v0.2.5", QUIET);
+
+        assertEquals(DiskSpace.FLOOR_BYTES + body.length() - 8, armed.room().needBytes());
+    }
+
     /** Files replaced by a journal move shouldn't also be in the delete list, so there's no window where
      * the file is missing before the move runs. */
     @Test

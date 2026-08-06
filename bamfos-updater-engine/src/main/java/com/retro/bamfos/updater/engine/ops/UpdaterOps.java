@@ -12,13 +12,16 @@ import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
+import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.ping.Nbt;
 import com.retro.bamfos.updater.engine.ping.ServersDat;
+import com.retro.bamfos.updater.engine.util.HashUtils;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -492,11 +495,13 @@ public final class UpdaterOps {
     }
 
     /** Flips the filename bit THROUGH the engine so the ledger stays coherent. True =
-     *  the state now matches the ask (idempotent); false = nothing sane to flip (both names on
-     *  disk is crash debris and the reconciler's business, neither name means no such mod). */
+     *  the ask is met or journaled (a held jar flips at the next boot's step 0); false = nothing sane
+     *  to flip (both names on disk is crash debris and the reconciler's business, neither name means
+     *  no such mod), with the reason printed, because the BIOS renders every false as "See the log." */
     public boolean setDisabled(String path, boolean disabled) {
         try (var lock = InstanceLock.acquire(dir).orElse(null)) {
             if (lock == null) {
+                System.out.println("[updater] cannot toggle " + path + ": another sync has the lock");
                 return false;
             }
             Path enabledFile = dir.resolve(path);
@@ -504,22 +509,75 @@ public final class UpdaterOps {
             boolean hasEnabled = Files.isRegularFile(enabledFile);
             boolean hasOff = Files.isRegularFile(off);
             if (hasEnabled == hasOff) {
+                System.out.println("[updater] cannot toggle " + path + (hasEnabled
+                        ? ": both names are on disk, crash debris the next sync untangles"
+                        : ": neither name is on disk, no such mod here"));
                 return false;
             }
-            if (disabled && hasEnabled) {
-                Files.move(enabledFile, off);
-            } else if (!disabled && hasOff) {
-                Files.move(off, enabledFile);
+            if (disabled == hasOff) {
+                ledgerBit(path, disabled); // Already in the requested state; just fix the ledger entry if it drifted.
+                return true;
             }
+            try {
+                Files.move(disabled ? enabledFile : off, disabled ? off : enabledFile);
+            } catch (IOException held) {
+                // FML keeps loaded jars in mods/ open while the game is running, so renaming one on Windows fails
+                // with ERROR_SHARING_VIOLATION. That's expected for a normal toggle, not an error.
+                return journalToggle(path, disabled, held);
+            }
+            ledgerBit(path, disabled);
+            return true;
+        } catch (IOException e) {
+            System.out.println("[updater] cannot toggle " + path + ": " + e);
+            return false;
+        }
+    }
+
+    /**
+     * Appends a "rename" journal op so next boot's step 0 flips the filename before FML scans mods.
+     * Verifies source sha and refuses occupied targets; ledger stays unchanged until that boot adopts it.
+     */
+    private boolean journalToggle(String path, boolean disabled, IOException held) {
+        String from = disabled ? path : path + ".disabled";
+        String to = disabled ? path + ".disabled" : path;
+        try {
+            Journal journal = Journal.load(Journal.pathIn(dir));
+            if (journal.ops.isEmpty()) {
+                // a fresh journal gets the installed version, because carryOver keeps leftover ops only for a
+                // plan targeting the SAME version: unnamed, the very next in-session sync drops the flip
+                journal.targetVersion = Ledger.load(Ledger.pathIn(dir)).installedVersion;
+            }
+            Journal.Op op = new Journal.Op("rename", from, to, HashUtils.sha256(dir.resolve(from)));
+            // Ignore duplicate toggle presses so we don't queue the same op twice and log a spurious abandon.
+            if (journal.ops.stream().noneMatch(o -> o.kind().equals(op.kind())
+                    && o.from().equals(op.from()) && o.to().equals(op.to()))) {
+                journal.ops.add(op);
+                journal.save(Journal.pathIn(dir));
+            }
+        } catch (IOException e) {
+            System.out.println("[updater] cannot toggle " + path + ": the game is locking " + from + " ("
+                    + held + ") and the journal write failed too (" + e + ")");
+            return false;
+        }
+        System.out.println("[updater] the game is locking " + from + " (" + held
+                + "), the toggle is journaled for the next boot");
+        return true;
+    }
+
+    /** Updates the ledger after a mod toggle rename already succeeded on disk. Swallows IOException so we
+     *  don't tell the player the toggle failed when it actually worked; the next sync picks up the on-disk
+     *  state anyway and logs the error. */
+    private void ledgerBit(String path, boolean disabled) {
+        try {
             Ledger ledger = Ledger.load(Ledger.pathIn(dir));
             Ledger.Entry en = ledger.files.get(path);
             if (en != null && en.disabled != disabled) {
                 en.disabled = disabled;
                 ledger.save(Ledger.pathIn(dir));
             }
-            return true;
         } catch (IOException e) {
-            return false;
+            System.out.println("[updater] " + path + " flipped on disk but the ledger did not save (" + e
+                    + "), the next sync adopts the bit");
         }
     }
 
@@ -560,10 +618,9 @@ public final class UpdaterOps {
             end = "ok";
             // 0 with nothing staged renders on the BIOS as "Changes staged. Applies on next boot.", which
             // sends a current box rebooting for nothing and means Verify can NEVER answer a healthy install
-            // clean. The server ops keep 0 on purpose: OpsBrain's reply tables over in the watchdog have no
-            // line for 6, so their unknown-code arm would answer a healthy box in red. Give them the line
-            // first if you ever lift the !server.
-            return code == 0 && !server && alreadyCurrent(asked) ? 6 : code;
+            // clean. Both surfaces read 6 now: OpsBrain grew its own already-current line, so the server
+            // gate that used to hold this back is gone.
+            return code == 0 && alreadyCurrent(asked) ? 6 : code;
         } catch (HttpFetcher.RateLimited limited) {
             // Catch rate limits before the generic handler so the UI reports throttling instead of a hard sync failure.
             end = "limited";
@@ -640,8 +697,23 @@ public final class UpdaterOps {
         });
         Files.createDirectories(p.getParent());
         Path tmp = p.resolveSibling(p.getFileName() + ".tmp");
-        Files.write(tmp, lines, StandardCharsets.ISO_8859_1);
-        Files.move(tmp, p, StandardCopyOption.REPLACE_EXISTING);
+        try {
+            Files.write(tmp, lines, StandardCharsets.ISO_8859_1);
+            try {
+                // Use ATOMIC_MOVE (same volume via resolveSibling): plain REPLACE_EXISTING on Windows deletes
+                // before moving, so an AV lock on the tmp file could wipe the player's config.
+                Files.move(tmp, p, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException filesystemSaysNo) {
+                Files.move(tmp, p, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            try {
+                Files.deleteIfExists(tmp); // If the replace fails, keep the old config and clean up the temp file.
+            } catch (IOException ignored) {
+                // Don't let a failed temp-file delete hide the original replace error.
+            }
+            throw e;
+        }
     }
 
     /* Matches any key separator java.util.Properties accepts ('=', ':', whitespace) so writes always

@@ -107,6 +107,13 @@ public final class FactoryReset {
                 have[i] = true;
                 haveBytes += place.get(i).size();
                 reused++;
+            } else {
+                // Credit any existing .part.dl resume partial (capped at entry size) against needed disk space;
+                // HttpFetcher resumes it via Range or deletes it on refusal, freeing those bytes.
+                Path dl = parts.get(i).resolveSibling(parts.get(i).getFileName() + ".dl");
+                if (Files.isRegularFile(dl)) {
+                    haveBytes += Math.min(Files.size(dl), place.get(i).size());
+                }
             }
         }
         sweepStrays(staging, parts);
@@ -238,15 +245,8 @@ public final class FactoryReset {
         return fileName.matches("[0-9a-f]{64}-fr\\d+\\.part");
     }
 
-    /**
-     * Deletes reset parts from an EARLIER release, which are pure dead weight: their names carry a sha this
-     * manifest never asks for, so nothing will ever reuse them, and until they go they hold the space the
-     * free-space check is about to demand.
-     * Only ever touches `-fr` parts this arm is not using. An ordinary staged sync's parts live in the same
-     * folder and its journal still needs them, so sweeping by "everything in staging" would break a pending
-     * sync to tidy up after a reset. Best-effort throughout: a file we cannot delete is a file the journal
-     * removes later anyway.
-     */
+    /** Best-effort cleanup of unused `-fr` reset parts (and `.part.dl` tails) from earlier releases to
+     *  reclaim disk space. Leaves non-reset staging parts alone so pending sync journals stay intact. */
     private static void sweepStrays(Path staging, List<Path> keep) {
         Set<String> mine = new HashSet<>();
         for (Path p : keep) {
@@ -256,6 +256,9 @@ public final class FactoryReset {
             tree.filter(Files::isRegularFile)
                     .filter(p -> {
                         String n = p.getFileName().toString();
+                        if (n.endsWith(".dl")) {
+                            n = n.substring(0, n.length() - 3); // a resume tail lives and dies with its part
+                        }
                         return n.endsWith(".part") && n.contains("-fr") && !mine.contains(n);
                     })
                     .forEach(p -> {
