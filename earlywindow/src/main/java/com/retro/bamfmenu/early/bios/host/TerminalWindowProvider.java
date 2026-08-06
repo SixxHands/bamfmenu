@@ -856,7 +856,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         } catch (Throwable t) {
             initFailed = true;
             System.err.println(
-                    "[bamfmenu] early terminal init failed; the boot window will be blank but the game still loads: "
+                    "[bamfmenu] early terminal init failed; boot window is blank but the game will still load: "
                             + t);
             t.printStackTrace();
         } finally {
@@ -1397,10 +1397,6 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             return;
         }
         if (action != GLFW_PRESS && action != GLFW_REPEAT) {
-            return;
-        }
-        if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
-            rhythmStartRequested = true; // dev trigger: launch the rhythm test
             return;
         }
         if (state == Mode.TETRIS) {
@@ -3018,7 +3014,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             renderLock.release();
         } else if (!initFailed) {
             System.err.println(
-                    "[bamfmenu] early terminal: a render frame did not yield within budget; proceeding with hand-off");
+                    "[bamfmenu] early terminal: a render frame did not yield within budget; proceeding with minecraft hand-off");
         }
 
         /* Take the context onto the main thread for Minecraft and release our input hooks. By now the render

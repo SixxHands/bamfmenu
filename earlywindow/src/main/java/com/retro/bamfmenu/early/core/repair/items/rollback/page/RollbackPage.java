@@ -66,7 +66,7 @@ public final class RollbackPage implements RepairPage {
         }
         String tag = entries.get(index).tag();
         return new RepairEffect.Act("Rolling back to " + tag,
-                "Roll back to " + tag + "? This pins BAMFOS to it.",
+                "Roll back to " + tag + "? This pins BAMFOS to the selected version.",
                 ops -> RepairResult.ofSync(ops.syncTo(tag)));
     }
 
@@ -80,7 +80,7 @@ public final class RollbackPage implements RepairPage {
         int cell = Math.max(12, width - 2); // the two columns the selection cursor takes
         ReleaseList list = state.releases();
         if (list == null) {
-            out.add(new Entry(PageRow.text("Reading the release list ...", Tone.DIM), null));
+            out.add(new Entry(PageRow.text("Checking release list ...", Tone.DIM), null));
             return out;
         }
         for (String line : RepairBox.wrap(StatusPage.PIN_WARNING, cell)) {
@@ -125,7 +125,7 @@ public final class RollbackPage implements RepairPage {
             case ReleaseList.TOKEN_DEAD -> "UPDATE TOKEN EXPIRED. The release list needs a working token.";
             case ReleaseList.RATE_LIMITED -> "GitHub is rate limiting. Try again later.";
             case ReleaseList.NO_ANSWER -> RepairResult.noAnswer().message();
-            default -> noRows ? "Offline." : "Offline. Only the installed version can be shown.";
+            default -> noRows ? "Offline." : "Offline. Only the current installed version can be shown.";
         };
     }
 

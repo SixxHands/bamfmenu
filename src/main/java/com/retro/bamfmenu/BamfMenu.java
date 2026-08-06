@@ -3,6 +3,7 @@ package com.retro.bamfmenu;
 import com.mojang.logging.LogUtils;
 import com.retro.bamfmenu.client.EarlyWindowKeying;
 import com.retro.bamfmenu.client.KickWatch;
+import com.retro.bamfmenu.client.QuitWatchdog;
 import com.retro.bamfmenu.client.WindowIconHandler;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -32,6 +33,8 @@ public final class BamfMenu {
         modBus.addListener(this::onClientSetup);
         // join-guard Q2 (the XP blue screen): screen-open interception is a GAME-bus event
         NeoForge.EVENT_BUS.addListener(KickWatch::onScreenOpening);
+        // quit watchdog: the dev JVM has been seen outliving a normal quit, the GAME-bus shutdown event arms it
+        NeoForge.EVENT_BUS.addListener(QuitWatchdog::onGameShuttingDown);
         LOGGER.info("[bamfmenu] client cosmetic mod loaded");
     }
 

@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine.door;
 
+import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
@@ -72,18 +73,17 @@ public final class ServerDoor {
             }
             try (InstanceLock ignored = lock.get()) {
                 // same as client: step 0 saw a file mismatch on readback, so force a full hash check
-                boolean unproven = SyncCore.stepZero(dir);
+                boolean unproven = SyncCore.stepZero(dir, BootBus.headless(), cfg.pins());
                 if (unproven) {
                     SyncCore.loud(dir, "step 0 applied files that do not read back as what it placed, so this "
                             + "cycle re-derives the whole install");
                 }
-                repair = repair || unproven || selfHeal(dir);
                 if (repair) {
-                    // --repair is the operator saying "re-derive this box", so it is also the way back from a
-                    // false-positive engine refusal: nothing else ever clears that memory, and a box pinned to
-                    // an older engine by one unlucky boot would otherwise wait for a new engine release
+                    // Only an explicit repair flag clears engine/core refusals (checked before self-heal sets repair=true),
+                    // so automatic self-heal never re-arms a known-bad engine into a rollback loop.
                     EngineHealth.forgiveRejectedEngines(dir);
                 }
+                repair = repair || unproven || selfHeal(dir);
                 String tag = !tagOverride.isEmpty() ? tagOverride
                         : !cfg.tagPin().isEmpty() ? cfg.tagPin()
                         : "latest";

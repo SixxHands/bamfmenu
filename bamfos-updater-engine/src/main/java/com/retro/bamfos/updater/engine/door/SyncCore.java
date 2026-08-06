@@ -94,15 +94,37 @@ final class SyncCore {
 
     /** Headless step 0 for callers without a boot terminal (server and tests). */
     static boolean stepZero(Path dir) throws IOException {
-        return stepZero(dir, BootBus.headless());
+        return stepZero(dir, BootBus.headless(), List.of());
+    }
+
+    /** Step 0 with a terminal and no pin mask, kept for the tests that drive the bus directly. */
+    static boolean stepZero(Path dir, BootBus bus) throws IOException {
+        return stepZero(dir, bus, List.of());
     }
 
     /** Step 0: replays any leftover journal from local staging and verifies the resulting files on disk.
      *  Returns true if any verified path doesn't match, signaling the caller to skip the up-to-date shortcut. */
-    static boolean stepZero(Path dir, BootBus bus) throws IOException {
+    static boolean stepZero(Path dir, BootBus bus, List<String> pins) throws IOException {
         Journal leftover = Journal.load(Journal.pathIn(dir));
         if (leftover.ops.isEmpty()) {
+            // delete empty journals instead of skipping them, otherwise anything checking this path treats
+            // an ops:[] file as a pending update
+            Files.deleteIfExists(Journal.pathIn(dir));
             return false;
+        }
+        // Drop queued ops for paths pinned after the journal was written, since replay uses REPLACE_EXISTING
+        // and would overwrite the pinned file.
+        PinMatcher pinGuard = new PinMatcher(pins);
+        List<Journal.Op> pinnedOps = leftover.ops.stream()
+                .filter(op -> pinGuard.pinned(stripDisabled(op.to()))).toList();
+        if (!pinnedOps.isEmpty()) {
+            System.out.println("[updater] " + pinnedOps.size()
+                    + " staged op(s) target pinned paths, dropped: " + names(pinnedOps));
+            leftover.ops.removeAll(pinnedOps);
+            if (leftover.ops.isEmpty()) {
+                Files.deleteIfExists(Journal.pathIn(dir));
+                return false;
+            }
         }
         int total = leftover.ops.size();
         int removals = (int) leftover.ops.stream().filter(o -> o.kind().equals("delete")).count();
@@ -172,6 +194,12 @@ final class SyncCore {
         leftover.save(Journal.pathIn(dir));
     }
 
+    /** Journal ops store the on-disk filename, so strip .disabled to match the manifest path before
+     *  checking pin globs (same as the reconciler carry-over). */
+    private static String stripDisabled(String to) {
+        return to.endsWith(".disabled") ? to.substring(0, to.length() - ".disabled".length()) : to;
+    }
+
     /** Formats a capped list of filenames from journal ops so stuck-file logs are actionable without flooding. */
     private static String names(List<Journal.Op> ops) {
         List<String> shown = ops.stream().limit(6).map(Journal.Op::to).toList();
@@ -200,8 +228,6 @@ final class SyncCore {
             EngineHealth.proven(dir);
         }
         clearTokenDead(dir);
-        bus.syncBegin(cfg.repo(), fromVersion.isEmpty() ? "?" : fromVersion, manifest.pack().version());
-        bus.manifest(manifest.files().size());
         cacheReleaseNotes(dir, gh, manifest.pack().version(), bus);
 
         List<FileEntry> files = new ArrayList<>();
@@ -222,11 +248,18 @@ final class SyncCore {
         Ledger ledger = Ledger.load(Ledger.pathIn(dir));
         Reconciler rec = new Reconciler(dir, side, cfg.pins());
         SyncPlan plan = rec.plan(filtered, ledger, repair);
+        boolean versionMoved = !fromVersion.equals(manifest.pack().version());
+        // Only emit syncBegin (which opens the Updating BAMFOS block and locks DEL) when files are downloading
+        // or the version changed; self-entry fetches emit it below so no-op syncs don't raise an empty block.
+        boolean postRaised = !plan.downloads().isEmpty() || versionMoved;
+        if (postRaised) {
+            bus.syncBegin(cfg.repo(), fromVersion.isEmpty() ? "?" : fromVersion, manifest.pack().version());
+            bus.manifest(manifest.files().size());
+        }
         bus.plan(plan.downloads().size());
         // Log loudly on the wrapper console before downloads start so the server doesn't look hung.
         // Checking versionChanged also catches engine/shim-only bumps absent from plan.downloads().
         boolean serverSide = side == Reconciler.Side.SERVER;
-        boolean versionMoved = !fromVersion.equals(manifest.pack().version());
         if (serverSide && (!plan.downloads().isEmpty() || versionMoved)) {
             String was = fromVersion.isEmpty() ? "?" : fromVersion;
             if (versionMoved) {
@@ -289,6 +322,12 @@ final class SyncCore {
                     && HashUtils.sha256(stagedNew).equals(e.sha256())) {
                 shimWaiting(e.path());
                 continue;
+            }
+            if (!postRaised) {
+                // self-only updates still download a jar and print REBOOT TO APPLY inside the POST block, so open it here
+                bus.syncBegin(cfg.repo(), fromVersion.isEmpty() ? "?" : fromVersion, manifest.pack().version());
+                bus.manifest(manifest.files().size());
+                postRaised = true;
             }
             Path part = staging.resolve(e.sha256() + ".part");
             bus.fileStart(fileName(e.path()), Reasons.SELF);
@@ -358,8 +397,11 @@ final class SyncCore {
         // UPDATE AND REPAIR row read "ok, just now" on every boot of a box the engine itself knows is holding a
         // row back (a player marking a managed jar read only yields AccessDeniedException forever)
         // heldBack OR a journal that outlived replay: the two halves of `pending` that mean bytes on disk do
-        // not match the manifest, as opposed to the two that just mean "the next boot finishes this"
-        boolean heldFiles = heldBack || Files.exists(Journal.pathIn(dir));
+        // not match the manifest, as opposed to the two that just mean "the next boot finishes this".
+        // NEVER for a staged run: there the journal is the healthy applies-next-boot state and heldBack is
+        // structural (the ledger commit was skipped on purpose), so recording held=true bought every routine
+        // in-session update a full re-hash, a false alarm in the log, and a rejected-engine amnesty next boot
+        boolean heldFiles = !staged && (heldBack || Files.exists(Journal.pathIn(dir)));
         lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary,
                 heldFiles);
         return 0;

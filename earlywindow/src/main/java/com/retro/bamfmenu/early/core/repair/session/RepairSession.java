@@ -16,6 +16,7 @@ import com.retro.bamfmenu.early.core.repair.view.RepairFrame;
 import com.retro.bamfmenu.early.core.repair.view.RepairFrames;
 
 import java.util.List;
+import java.util.function.LongSupplier;
 
 /**
  * Pure state machine for the repair window (selection, pages, modals, input; no GL or threads).
@@ -26,9 +27,21 @@ public final class RepairSession {
     private static final String HINTS_LIST = "UP/DOWN  Select      ENTER  Choose      ESC  Back      F2  Volume";
     /** Auto-close timeout for the farewell dialog (10s): long enough to read, short enough if AFK. */
     static final long FAREWELL_MS = 10_000L;
+    /**
+     * Grace period before a keypress can dismiss the farewell dialog, so queued keys don't close it unseen.
+     * Uses nanoTime instead of the snapshot clock, which stalls during frame freezes when keys pile up.
+     */
+    static final long FAREWELL_GRACE_NANOS = 1_500_000_000L; // 1.5s
     static final String FAREWELL_TITLE = "Restart Required";
-    static final String FAREWELL_BODY = "A restart is needed to apply the Factory Reset. Your game will now "
-            + "close. Press any key to continue.";
+
+    /**
+     * Restart message explaining which action requires closing the game.
+     * Passed as a parameter so any future action that requires a restart can provide a specific message.
+     */
+    public static String farewellBody(String cause) {
+        return "A restart is needed to apply the " + cause + ". Your game will now close. Press any key "
+                + "to continue.";
+    }
 
     private static final String HINTS_EDIT = "TYPE  Edit      LEFT/RIGHT  Move      ENTER  Save      ESC  Cancel";
     /* Names the two keys that really are locked, because the arrows still move on purpose (a frozen-looking
@@ -60,9 +73,19 @@ public final class RepairSession {
     private RepairResult last;        // the notice line, null until something has happened
     /* Farewell dialog deadline in wall-clock millis (0 when inactive), driven by the per-frame snapshot clock. */
     private long closeAt;
+    private boolean rearmFarewell; // done() may have used a stale frame clock, so the first tick() resets the timer
+    private long farewellNanos;    // nanoTime when the farewell dialog opened, for the key grace period
+    private String closeCause = "Factory Reset"; // reason shown in the restart countdown dialog
+    private final LongSupplier nanoClock;
 
     public RepairSession(RepairRegistry registry) {
+        this(registry, System::nanoTime);
+    }
+
+    /** Constructor with an injectable clock so tests don't wait 1.5 real seconds for the key grace period. */
+    public RepairSession(RepairRegistry registry, LongSupplier nanoClock) {
         this.items = registry.items();
+        this.nanoClock = nanoClock;
     }
 
     /** The rows this window found, in menu order. */
@@ -100,6 +123,11 @@ public final class RepairSession {
         if (result != null && result.kind() == RepairResult.Kind.RESTART_REQUIRED) {
             // Start the exit countdown here rather than in the item since this session displays the countdown.
             closeAt = state.nowMillis() + FAREWELL_MS;
+            rearmFarewell = true;
+            farewellNanos = nanoClock.getAsLong();
+            if (!working.isEmpty()) {
+                closeCause = working; // action label so the farewell dialog names what it is closing for
+            }
         }
         working = "";
         activity = ""; // Clear any leftover progress text once the operation finishes.
@@ -129,6 +157,9 @@ public final class RepairSession {
             return;
         }
         if (closeAt > 0) {
+            if (nanoClock.getAsLong() - farewellNanos < FAREWELL_GRACE_NANOS) {
+                return; // ignore stray key presses from right before the farewell dialog opened
+            }
             // Any key dismisses the farewell dialog, matching its "press any key" prompt.
             ctx.closeGame();
             return;
@@ -310,6 +341,12 @@ public final class RepairSession {
 
     /** Advances the farewell countdown from the screen's frame loop; no-op unless armed. */
     public void tick(RepairContext ctx) {
+        if (rearmFarewell) {
+            // done() used the clock from the last stepped frame, which pauses while the F2 volume overlay is open.
+            // Restart the 10-second countdown on the first visible frame so it can't expire off-screen.
+            rearmFarewell = false;
+            closeAt = state.nowMillis() + FAREWELL_MS;
+        }
         if (closeAt > 0 && state.nowMillis() >= closeAt) {
             ctx.closeGame();
         }
@@ -370,7 +407,7 @@ public final class RepairSession {
         if (closeAt > 0) {
             // one option, because there is no second answer: the reset is already journalled and the next boot
             // applies it whether this box closes politely or gets killed
-            return new RepairEffect.Confirm(FAREWELL_TITLE, FAREWELL_BODY, "Ok", "Ok");
+            return new RepairEffect.Confirm(FAREWELL_TITLE, farewellBody(closeCause), "Ok", "Ok");
         }
         return pending == null || promptStep >= pending.confirms().size()
                 ? null : pending.confirms().get(promptStep);

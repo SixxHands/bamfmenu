@@ -30,4 +30,13 @@ class BetterStatusTest {
         assertTrue(BetterStatus.parse("{\"betterStatus\":{\"name\":\"CHANGE_ME\",\"version\":\"CHANGE_ME\"}}").isEmpty());
         assertTrue(BetterStatus.parse("not json").isEmpty());
     }
+
+    /**
+     * Deeply nested JSON in a 4 MB Slp frame can trigger StackOverflowError in MiniJson. Catch it so a bad
+     * ping doesn't bypass catch(Exception) and cost an engine probation strike.
+     */
+    @Test
+    void aBracketBomb_isANoSignal_neverAnErrorPastTheDoorsCatches() {
+        assertTrue(BetterStatus.parse("[".repeat(100_000)).isEmpty());
+    }
 }

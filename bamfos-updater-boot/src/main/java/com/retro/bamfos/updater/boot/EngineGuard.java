@@ -334,11 +334,22 @@ final class EngineGuard {
     }
 
     /** Temp file beside the target, then move, same atomic shape as the baseline extract: a crash or a full
-     *  disk never leaves half a jar in the engine slot. */
+     *  disk never leaves half a jar in the engine slot. The pid is in the tmp name for the same reason it is
+     *  in EngineLoader.extract's: all of this runs before any InstanceLock exists, so a double-launch has two
+     *  processes maintaining the slot at once, and one shared name let A's move promote B's half-written
+     *  bytes into engine.jar (or over the .good rollback image through keepKnownGood). */
     private static void copyThroughTmp(Path from, Path to) throws IOException {
-        Path tmp = to.resolveSibling(to.getFileName() + ".tmp");
-        Files.copy(from, tmp, StandardCopyOption.REPLACE_EXISTING);
-        Files.move(tmp, to, StandardCopyOption.REPLACE_EXISTING);
+        Path tmp = to.resolveSibling(to.getFileName() + "." + ProcessHandle.current().pid() + ".tmp");
+        try {
+            Files.copy(from, tmp, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, to, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException disk) {
+            try {
+                Files.deleteIfExists(tmp); // ours alone, nothing else ever recycles a pid-named leftover
+            } catch (IOException ignored) {
+            }
+            throw disk;
+        }
     }
 
     /** 12 hex is plenty to match against the manifest by eye, and a full sha in a boot line is noise. */

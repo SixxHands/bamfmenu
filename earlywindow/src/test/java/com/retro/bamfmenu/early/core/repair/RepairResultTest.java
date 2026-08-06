@@ -23,6 +23,8 @@ class RepairResultTest {
         assertEquals("GitHub is rate limiting. Try again later.", RepairResult.ofSync(5).message());
         assertEquals(RepairResult.Kind.REFUSED, RepairResult.ofSync(5).kind());
         assertEquals(RepairResult.Kind.FAILED, RepairResult.ofSync(4).kind());
+        assertEquals("Already up to date. Nothing needed changing.", RepairResult.ofSync(6).message());
+        assertEquals(RepairResult.Kind.DONE, RepairResult.ofSync(6).kind());
     }
 
     @Test

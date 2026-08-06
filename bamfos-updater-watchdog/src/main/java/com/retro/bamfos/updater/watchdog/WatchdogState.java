@@ -27,16 +27,15 @@ final class WatchdogState {
         return p;
     }
 
-    /** Records the restart we are ABOUT to take, count included. The +1 lives here, not in the @Mod class:
-     *  the cooldown alone only spaces the bounces out, this count is the only thing that ever ends them, and
-     *  an off-by-one there is a box that restart-storms forever with nothing red anywhere. */
-    static void recordRestart(Path dir, String target, long at, int attemptsSoFar) {
-        save(dir, target, at, attemptsSoFar + 1);
+    /** Records the pending restart and increments the attempt count, returning false if the save fails.
+     *  Kept here so unit tests guard the +1 that stops infinite restart loops. */
+    static boolean recordRestart(Path dir, String target, long at, int attemptsSoFar) {
+        return save(dir, target, at, attemptsSoFar + 1);
     }
 
     /** Persists state atomically (tmp + ATOMIC_MOVE) before halt(false) so a sudden kill cannot leave a
      *  truncated file that resets the storm guard. */
-    static void save(Path dir, String target, long at, int attempts) {
+    static boolean save(Path dir, String target, long at, int attempts) {
         try {
             Path f = dir.resolve(".bamfos-updater").resolve("watchdog-state.properties");
             Files.createDirectories(f.getParent());
@@ -44,8 +43,10 @@ final class WatchdogState {
             Files.writeString(tmp, "last_target=" + target + "\nlast_restart_at=" + at
                     + "\nlast_target_attempts=" + attempts + "\n");
             Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException ignored) {
-            // losing the record only forgets one storm-guard cycle, never fatal
+            return true;
+        } catch (IOException unwritable) {
+            // Don't swallow write failures: a full or read-only disk would leave last_target blank and restart-loop forever.
+            return false; // act() refuses the arm on this
         }
     }
 

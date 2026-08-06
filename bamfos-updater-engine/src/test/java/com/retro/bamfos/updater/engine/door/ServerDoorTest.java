@@ -1,6 +1,8 @@
 package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.Fx;
+import com.retro.bamfos.updater.engine.bus.BootBus;
+import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
@@ -314,6 +316,133 @@ class ServerDoorTest {
         assertEquals(0, door.run(dir, "vT", false));
 
         assertEquals("mangled by something", Files.readString(dir.resolve("config/a.toml")));
+    }
+
+    /** A "failed" record has held=false, so self-heal must trigger on result=="failed" alone after a
+     * mid-apply exception. */
+    @Test
+    void aRecordSayingFailed_makesTheNextOrdinaryBootRepair_onTheWordAlone() throws IOException {
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+        Files.writeString(dir.resolve("config/a.toml"), "mangled by something");
+        poseLastSync("failed", false); // Matches what recordFailure writes (status string and held=false).
+
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertArrayEquals(CONFIG, Files.readAllBytes(dir.resolve("config/a.toml")));
+        assertTrue(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("full hash check"));
+    }
+
+    /** A normal staged sync leaves a journal and defers the ledger commit, so it should record
+     * held=false and not trigger self-heal on the next boot. */
+    @Test
+    void aStagedInSessionSync_isRecordedHealthy_andTheNextBootStaysOrdinary() throws Exception {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false)); // Install is converged on vT.
+
+        // the in-session op (/bamfos sync): FML keeps mods/ open, so everything lands via the journal
+        assertEquals(0, Doors.stagedServerSync(dir, UpdaterConfig.load(dir), "vT2", "vT", false, base,
+                BootBus.headless()));
+
+        assertTrue(Files.isRegularFile(Journal.pathIn(dir)));
+        assertEquals("staged", lastSync().get("result"));
+        assertEquals(Boolean.FALSE, lastSync().get("held"));
+
+        // The follow-up boot that replays it stays normal (no self-heal, no engine retry reset).
+        Files.writeString(dir.resolve(".bamfos-updater/engine/engine-rejected"),
+                "abc123\t1700000000000" + System.lineSeparator());
+        Files.writeString(serverLogPath(), "");
+        assertEquals(0, door.run(dir, "vT2", false));
+        assertArrayEquals(M2, Files.readAllBytes(dir.resolve("mods/m2.jar")));
+        assertFalse(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("full hash check"));
+        assertTrue(Files.exists(dir.resolve(".bamfos-updater/engine/engine-rejected")));
+    }
+
+    /** An already-current staged sync has no ops to journal; writing an empty ops:[] journal used to
+     * leave status stuck on pending until a later repair cleared it. */
+    @Test
+    void aStagedSyncOnACurrentBox_strandsNoEmptyJournal() throws Exception {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertEquals(0, Doors.stagedServerSync(dir, UpdaterConfig.load(dir), "vT", "vT", false, base,
+                BootBus.headless()));
+
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+        assertEquals("staged", lastSync().get("result"));
+        assertEquals(Boolean.FALSE, lastSync().get("held"));
+    }
+
+    /** Only explicit repair mode may forgive refused engines; automatic self-heal must not re-arm a
+     * known-bad engine for another rollback loop. */
+    @Test
+    void aSelfHealRepair_neverForgivesARefusedEngine() throws IOException {
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false));
+        Path rejected = dir.resolve(".bamfos-updater/engine/engine-rejected");
+        Files.createDirectories(rejected.getParent());
+        Files.writeString(rejected, "abc123\t1700000000000" + System.lineSeparator());
+        poseLastSync("pending", true); // the record that forces the self-heal repair pass
+
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertTrue(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("full hash check"));
+        assertTrue(Files.exists(rejected));
+    }
+
+    /** When step 0 can't verify the journal read-back, ServerDoor should run a repair pass instead of
+     * trusting stale files. */
+    @Test
+    void aJournalThatDoesNotReadBack_forcesTheFullRepairPass() throws IOException {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", false)); // converged, record says ok
+        Files.writeString(dir.resolve("config/a.toml"), "mangled by something");
+        byte[] other = "different bytes entirely".getBytes(StandardCharsets.UTF_8);
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/a.part"), M1);
+        Files.write(dir.resolve(".bamfos-updater/staging/b.part"), other);
+        Journal j = new Journal();
+        j.targetVersion = "vT";
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/a.part", "config/lying.toml",
+                HashUtils.sha256(M1)));
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/b.part", "config/lying.toml",
+                HashUtils.sha256(other)));
+        j.save(Journal.pathIn(dir));
+
+        assertEquals(0, door.run(dir, "vT", false)); // Ordinary boot without the repair flag.
+
+        assertArrayEquals(CONFIG, Files.readAllBytes(dir.resolve("config/a.toml")));
+    }
+
+    /** Filter kept journal ops against current pins so REPLACE_EXISTING replay cannot overwrite a file
+     * the operator pinned. */
+    @Test
+    void aJournaledOpOntoAPathPinnedSince_isDroppedAtStepZero() throws IOException {
+        byte[] theirs = "the operator's own build".getBytes(StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties"),
+                "repo=o/r\ngithub_token=tok\npin=mods/held.jar\n");
+        Files.createDirectories(dir.resolve("mods"));
+        Files.write(dir.resolve("mods/held.jar"), theirs);
+        Files.createDirectories(dir.resolve(".bamfos-updater/staging"));
+        Files.write(dir.resolve(".bamfos-updater/staging/p1"), M1);
+        Journal j = new Journal();
+        j.targetVersion = "vT";
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/p1", "mods/held.jar", HashUtils.sha256(M1)));
+        j.save(Journal.pathIn(dir));
+
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+
+        assertArrayEquals(theirs, Files.readAllBytes(dir.resolve("mods/held.jar")));
+        assertFalse(Files.exists(Journal.pathIn(dir)));
     }
 
     @Test

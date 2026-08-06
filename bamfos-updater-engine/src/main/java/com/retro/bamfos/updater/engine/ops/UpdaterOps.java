@@ -23,23 +23,27 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The BIOS-facing surface. The BIOS is a view, THIS is the single writer, menu code
  * never touches manifests, ledgers, or files, it calls here. The server's /bamfos op commands share
  * it (serverSyncNow, clearTokenDead, status), because by then the jars are locked on BOTH sides. By menu
- * time jars are loaded and locked, so every sync is STAGED: journal written, applies next boot,
- * "changes staged" is always the honest answer. Return codes over exceptions because callers sit across a
+ * time jars are loaded and locked, so every sync that moves anything is STAGED: journal written,
+ * applies next boot. Return codes over exceptions because callers sit across a
  * reflective boundary: 0 ok/staged, 1 no target to sync to (nothing resolved locally, or github 404s
  * the target tag, because to a caller those are one thing: there is nothing to converge to), 2 failed,
  * 3 another sync holds the lock, 4 token dead,
  * 5 github rate limited, try again later. 5 has its own code so the repair page cannot render a
  * throttle as "Sync failed. See the log.", because a limit clears itself inside the hour and is not a
- * failure. unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
+ * failure. 6 is the box already matching the target: NOTHING was staged, so the page can say done
+ * instead of promising a next boot that changes nothing (client-side ops only, stagedSync says why).
+ * unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
  * changed, 2 the file could not be written. listReleases() answers in it too but INSIDE its map,
  * under "code", because the picker needs the rows and the reason in one call: 0 the list is live, 2
  * offline, 4 token dead, 5 rate limited, and every non-zero one still ships the installed version as
@@ -102,23 +106,20 @@ public final class UpdaterOps {
     }
 
     /**
-     * The second tell, and the one that actually closes the hole: a path in this box's OWN ledger that the
-     * manifest marks {@code side: server}. Returns it, so the refusal can name the file rather than assert a
-     * conclusion. Null means nothing server-side is installed here.
-     *
-     * Why the server.properties check above is not enough, measured rather than reasoned: Minecraft
-     * writes server.properties on its first JVM run, so a box that has SYNCED but never RUN does not have one.
-     * That is exactly the state the test harness leaves a server box in, and the guard above did not fire on
-     * it. A real operator's box has the file, so tell 1 covers the common case cheaply and before any network,
-     * and this one covers the window tell 1 misses.
-     *
-     * Non-heuristic on purpose. It compares the ledger against the manifest that was just fetched, so it
-     * asks the box what it is instead of guessing from a filename, and a client ledger cannot contain a
-     * server-only path (a measured 288 of them separate the two sides on the shipping pack).
+     * Catches synced-but-never-run servers (no server.properties yet) by finding any ledger path only
+     * shipped by side:server manifest rows. Joins by side reach rather than path or hash, because a few
+     * configs and jars legitimately ship on both client and server rows with identical bytes.
      */
     static String serverOnlyFileOnDisk(Manifest manifest, Ledger led) {
+        Set<String> clientReach = new HashSet<>();
         for (FileEntry e : manifest.files()) {
-            if (e.side() == FileEntry.Side.SERVER && led.files.containsKey(e.path())) {
+            if (e.side() != FileEntry.Side.SERVER) {
+                clientReach.add(e.path());
+            }
+        }
+        for (FileEntry e : manifest.files()) {
+            if (e.side() == FileEntry.Side.SERVER && !clientReach.contains(e.path())
+                    && led.files.containsKey(e.path())) {
                 return e.path();
             }
         }
@@ -552,11 +553,17 @@ public final class UpdaterOps {
         String end = "fail";
         try (InstanceLock ignored = lock.get()) {
             String from = Doors.localVersion(dir).orElse("");
+            long asked = System.currentTimeMillis();
             int code = server
                     ? Doors.stagedServerSync(dir, cfg, tag, from, repair, apiBase, bus)
                     : Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, bus);
             end = "ok";
-            return code;
+            // 0 with nothing staged renders on the BIOS as "Changes staged. Applies on next boot.", which
+            // sends a current box rebooting for nothing and means Verify can NEVER answer a healthy install
+            // clean. The server ops keep 0 on purpose: OpsBrain's reply tables over in the watchdog have no
+            // line for 6, so their unknown-code arm would answer a healthy box in red. Give them the line
+            // first if you ever lift the !server.
+            return code == 0 && !server && alreadyCurrent(asked) ? 6 : code;
         } catch (HttpFetcher.RateLimited limited) {
             // Catch rate limits before the generic handler so the UI reports throttling instead of a hard sync failure.
             end = "limited";
@@ -573,6 +580,29 @@ public final class UpdaterOps {
             return 2;
         } finally {
             bus.end(end);
+        }
+    }
+
+    /**
+     * Did the sync that JUST answered 0 stage anything? Read off last-sync.json rather than a new SyncCore
+     * return code, because that record is the engine's own verdict written under the lock we still hold, and
+     * "already current (" is the one summary its no-op branch writes (SyncCore.sync); the boot doors keep
+     * their 0, current is their every-boot answer and no boot surface renders it as staged. The timestamp
+     * check covers the record write failing (lastSync swallows IOException): a stale already-current from an
+     * earlier sync must never turn real staged work into "done", so anything unreadable or old answers
+     * false and the page keeps the staged line, which is the safe direction, claiming staged over nothing
+     * wastes a reboot, claiming done over staged work hides an update.
+     */
+    private boolean alreadyCurrent(long since) {
+        try {
+            Path last = dir.resolve(".bamfos-updater").resolve("last-sync.json");
+            return Files.isRegularFile(last)
+                    && MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8)) instanceof Map<?, ?> m
+                    && m.get("at") instanceof Long at && at >= since
+                    && m.get("summary") instanceof String s
+                    && s.startsWith("already current (");
+        } catch (IOException | RuntimeException unreadable) {
+            return false;
         }
     }
 

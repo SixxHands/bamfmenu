@@ -9,6 +9,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -202,6 +203,10 @@ public final class Journal {
                 abandoned.add(op);
             } catch (IOException e) {
                 retryable.add(op);
+            } catch (InvalidPathException garbage) {
+                // Valid JSON can still name an OS-illegal path; catch the unchecked exception and abandon it so
+                // it doesn't crash step 0 on every boot.
+                abandoned.add(op);
             }
         }
         return new Result(retryable, abandoned);

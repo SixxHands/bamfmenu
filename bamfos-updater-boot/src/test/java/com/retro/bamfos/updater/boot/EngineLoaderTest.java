@@ -7,10 +7,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -96,6 +99,52 @@ class EngineLoaderTest {
         } finally {
             engine.loader().close();
         }
+    }
+
+    /**
+     * The double-launch tmp collision: everything ensureAndLoad does to the slot runs before any InstanceLock
+     * exists, and extract used to share one literal <target>.tmp with EngineGuard's copyThroughTmp, so process
+     * A's move could promote process B's half-written bytes into engine.jar (and from there over .good). The
+     * planted file below is the sibling's in-flight tmp under that old shared name: not ours to write through
+     * or consume, and a run that ate it is the shared name back.
+     */
+    @Test
+    void extractNeverTouchesASiblingsInFlightTmp() throws Exception {
+        Files.createDirectories(enginePath().getParent());
+        Path siblingTmp = enginePath().resolveSibling(enginePath().getFileName() + ".tmp");
+        byte[] midWrite = "half of some other process's copy".getBytes(StandardCharsets.UTF_8);
+        Files.write(siblingTmp, midWrite);
+
+        EngineLoader.extract(enginePath(), EngineLoader.embeddedBaseline());
+
+        try (InputStream in = EngineLoader.embeddedBaseline().get()) {
+            assertArrayEquals(in.readAllBytes(), Files.readAllBytes(enginePath()));
+        }
+        assertTrue(Files.isRegularFile(siblingTmp));
+        assertArrayEquals(midWrite, Files.readAllBytes(siblingTmp));
+    }
+
+    /**
+     * The other half of owning the tmp name: a leftover under the shared name used to get recycled by the
+     * next extract's REPLACE_EXISTING, but a pid-named tmp is ours alone and nothing else will ever take it,
+     * so the failure path has to delete it or every failed extract squats another half-jar in the engine
+     * folder forever.
+     */
+    @Test
+    void aFailedExtractCleansUpItsOwnTmp() throws Exception {
+        Files.createDirectories(enginePath().getParent());
+
+        assertThrows(IOException.class, () -> EngineLoader.extract(enginePath(), () -> new InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new IOException("wire died mid-baseline");
+            }
+        }));
+
+        try (var siblings = Files.list(enginePath().getParent())) {
+            assertEquals(List.of(), siblings.filter(p -> p.getFileName().toString().endsWith(".tmp")).toList());
+        }
+        assertFalse(Files.exists(enginePath()));
     }
 
     /**

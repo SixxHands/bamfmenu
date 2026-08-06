@@ -34,6 +34,9 @@ public record RepairResult(Kind kind, String message) {
             case 3 -> new RepairResult(Kind.REFUSED, "Another sync holds the lock.");
             case 4 -> new RepairResult(Kind.FAILED, "UPDATE TOKEN EXPIRED. Sync is dead until it is replaced.");
             case 5 -> new RepairResult(Kind.REFUSED, "GitHub is rate limiting. Try again later.");
+            // 6 means already current with nothing staged (avoids pointless reboots and lets Verify report clean).
+            // Older engines return 0 here.
+            case 6 -> new RepairResult(Kind.DONE, "Already up to date. Nothing needed changing.");
             case OpsBridge.NO_ANSWER -> noAnswer();
             default -> new RepairResult(Kind.FAILED, "Sync failed. See the log.");
         };

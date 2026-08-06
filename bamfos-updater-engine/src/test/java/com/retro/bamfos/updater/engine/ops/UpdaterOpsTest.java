@@ -99,6 +99,34 @@ class UpdaterOpsTest {
         assertEquals("config/aeronautics-server.toml", UpdaterOps.serverOnlyFileOnDisk(man, server));
     }
 
+    /**
+     * Manifests can ship the same path (even with identical sha) as separate client and server rows. Only a
+     * path with no client-reachable row counts as a server tell, or fresh clients get falsely refused.
+     */
+    @Test
+    void serverOnlyFileOnDisk_aPathTheClientSideAlsoShipsIsNeverAServerTell() throws IOException {
+        Manifest man = ManifestParser.parse("""
+                {"schema_version":1,
+                 "pack":{"id":"bamfos","version":"v1","mc":"1.21.1","neoforge":"21.1.235","updater_abi":1},
+                 "requires_relaunch":false,"removed_modids":[],
+                 "files":[
+                  {"path":"config/DistantHorizons.toml","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1,"side":"client",
+                   "policy":"managed","source":{"type":"release-asset","asset":"dh-client"}},
+                  {"path":"config/DistantHorizons.toml","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1,"side":"server",
+                   "policy":"managed","source":{"type":"release-asset","asset":"dh-server"}},
+                  {"path":"config/aeronautics-server.toml","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1,"side":"server",
+                   "policy":"managed","source":{"type":"release-asset","asset":"y"}}]}""");
+
+        Ledger freshClient = new Ledger();
+        freshClient.files.put("config/DistantHorizons.toml", new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assertNull(UpdaterOps.serverOnlyFileOnDisk(man, freshClient));
+
+        Ledger server = new Ledger();
+        server.files.put("config/DistantHorizons.toml", new Ledger.Entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        server.files.put("config/aeronautics-server.toml", new Ledger.Entry("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assertEquals("config/aeronautics-server.toml", UpdaterOps.serverOnlyFileOnDisk(man, server));
+    }
+
     /** Clients don't have server.properties, so the server guard shouldn't block them; they should
      *  still reach the normal "never synced" error code instead. */
     @Test
@@ -490,6 +518,106 @@ class UpdaterOpsTest {
             assertFalse(Files.exists(dir.resolve("mods/serveronly.jar")));
             assertTrue(Files.isRegularFile(
                             com.retro.bamfos.updater.engine.journal.Journal.pathIn(dir)));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    /**
+     * Staged sync returns 6 when already current and 0 when changes were actually staged, so the BIOS only
+     * prompts a reboot when there is work to apply.
+     */
+    @Test
+    void aSyncThatStagesNothingAnswersAlreadyCurrent_notChangesStaged() throws IOException {
+        byte[] cfgBytes = "the bytes this release ships\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String sha = com.retro.bamfos.updater.engine.util.HashUtils.sha256(cfgBytes);
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("path", "config/current.toml");
+        entry.put("sha256", sha);
+        entry.put("size", (long) cfgBytes.length);
+        entry.put("side", "both");
+        entry.put("policy", "managed");
+        entry.put("source", Map.of("type", "release-asset", "asset", "current.toml"));
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("schema_version", 1L);
+        m.put("pack", new java.util.LinkedHashMap<>(Map.of("id", "bamfos", "version", "v1",
+                "mc", "1.21.1", "neoforge", "21.1.235", "updater_abi", 1L)));
+        m.put("requires_relaunch", false);
+        m.put("removed_modids", List.of());
+        m.put("files", List.of(entry));
+        byte[] manifest = com.retro.bamfos.updater.engine.json.JsonWriter.write(m)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/tags/v1", ex -> body(ex,
+                ("{\"tag_name\":\"v1\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1},"
+                        + "{\"name\":\"current.toml\",\"id\":2}]}")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        gh.createContext("/repos/o/r/releases/assets/", ex -> body(ex,
+                ex.getRequestURI().getPath().endsWith("/1") ? manifest : cfgBytes));
+        gh.start();
+        try {
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+            Fx.write(dir, "config/current.toml", cfgBytes);
+            Ledger led = new Ledger();
+            led.installedVersion = "v1";
+            led.files.put("config/current.toml", new Ledger.Entry(sha));
+            led.save(Ledger.pathIn(dir));
+            UpdaterOps ops = new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort());
+
+            assertEquals(6, ops.syncTo("v1"));
+
+            Files.delete(dir.resolve("config/current.toml")); // the day an antivirus eats a managed file
+            assertEquals(0, ops.syncTo("v1"));
+        } finally {
+            gh.stop(0);
+        }
+    }
+
+    /**
+     * The other half of 6's seam: the SERVER ops stay on 0 even for a sync that staged nothing, because their
+     * replies live in OpsBrain's tables over in the watchdog and those have no line for 6, so the
+     * unknown-code arm would answer a healthy box in red. Lift the !server gate in stagedSync only WITH
+     * new OpsBrain lines, and move this pin when you do.
+     */
+    @Test
+    void serverSyncNow_staysOnZeroWhenAlreadyCurrent_cuzOpsBrainHasNoLineFor6() throws IOException {
+        byte[] jar = Fx.jar("srv");
+        String sha = com.retro.bamfos.updater.engine.util.HashUtils.sha256(jar);
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("path", "mods/serveronly.jar");
+        entry.put("sha256", sha);
+        entry.put("size", (long) jar.length);
+        entry.put("side", "server");
+        entry.put("policy", "managed");
+        entry.put("source", Map.of("type", "release-asset", "asset", "serveronly.jar"));
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("schema_version", 1L);
+        m.put("pack", new java.util.LinkedHashMap<>(Map.of("id", "bamfos", "version", "vS",
+                "mc", "1.21.1", "neoforge", "21.1.235", "updater_abi", 1L)));
+        m.put("requires_relaunch", false);
+        m.put("removed_modids", List.of());
+        m.put("files", List.of(entry));
+        byte[] manifest = com.retro.bamfos.updater.engine.json.JsonWriter.write(m)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        com.sun.net.httpserver.HttpServer gh = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        gh.createContext("/repos/o/r/releases/latest", ex -> body(ex,
+                "{\"tag_name\":\"vS\",\"assets\":[{\"name\":\"manifest.json\",\"id\":1}]}"
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        gh.createContext("/repos/o/r/releases/assets/", ex -> body(ex, manifest));
+        gh.start();
+        try {
+            Fx.write(dir, ".bamfos-updater/bamfos-updater.properties", "repo=o/r\ngithub_token=tok\n".getBytes());
+            Fx.write(dir, "mods/serveronly.jar", jar);
+            Ledger led = new Ledger();
+            led.installedVersion = "vS";
+            led.files.put("mods/serveronly.jar", new Ledger.Entry(sha));
+            led.save(Ledger.pathIn(dir));
+
+            assertEquals(0, new UpdaterOps(dir, "http://127.0.0.1:" + gh.getAddress().getPort()).serverSyncNow());
         } finally {
             gh.stop(0);
         }

@@ -13,7 +13,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -244,6 +246,102 @@ class ReconcilerTableTest {
 
         assertArrayEquals(V2, Files.readAllBytes(dir.resolve("mods/p.jar")));
         assertFalse(Files.exists(dir.resolve("mods/p.jar.disabled")));
+    }
+
+    /**
+     * Reuses valid staged .part files across retry attempts (like FactoryReset.arm) so a bad connection doesn't
+     * re-download completed files. Verified via download count.
+     */
+    @Test
+    void aRetryAfterAFailedDownload_reusesTheStagedPartsThatStillVerify() throws IOException {
+        FileEntry a = Fx.entry("mods/a.jar", V1, FileEntry.Side.CLIENT);
+        FileEntry b = Fx.entry("mods/b.jar", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v2", List.of(), a, b);
+        Map<String, Integer> fetches = new HashMap<>();
+        Reconciler.Fetcher wifiDiesOnB = (e, dest) -> {
+            fetches.merge(e.path(), 1, Integer::sum);
+            if (e.path().equals("mods/b.jar") && fetches.get("mods/b.jar") == 1) {
+                throw new IOException("wifi died three quarters of the way in");
+            }
+            Fx.fetcher().fetch(e, dest);
+        };
+
+        assertThrows(IOException.class, () -> rec().apply(rec().plan(m, led), m, led, wifiDiesOnB));
+        assertEquals(1, fetches.get("mods/a.jar"));
+
+        rec().apply(rec().plan(m, led), m, led, wifiDiesOnB); // the retry
+
+        assertEquals(1, fetches.get("mods/a.jar"));
+        assertEquals(2, fetches.get("mods/b.jar"));
+        assertArrayEquals(V1, Files.readAllBytes(dir.resolve("mods/a.jar")));
+        assertArrayEquals(V2, Files.readAllBytes(dir.resolve("mods/b.jar")));
+    }
+
+    /**
+     * Preserves attempt counts across re-plans instead of resetting carried ops to 0, so MAX_ATTEMPTS still
+     * trips (2 carried attempts + this run = 3) and drops the stuck journal.
+     */
+    @Test
+    void aRederivedStuckOp_keepsItsBootClock_soTheGiveUpCanFire() throws IOException {
+        FileEntry e = Fx.entry("mods/x.jar", V2, FileEntry.Side.CLIENT);
+        Files.createDirectories(dir.resolve("mods/x.jar/wedge")); // still wedged, boots later
+        Files.write(dir.resolve("mods/x.jar/wedge/f"), V1);
+        Journal kept = new Journal();
+        kept.targetVersion = "v2";
+        kept.ops.add(new Journal.Op("move", ".bamfos-updater/staging/old.part", "mods/x.jar",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V2), Journal.MAX_ATTEMPTS - 1));
+        kept.save(Journal.pathIn(dir));
+        Ledger led = new Ledger();
+        led.installedVersion = "v1";
+        Manifest m = Fx.manifest("v2", List.of(), e);
+
+        rec().apply(rec().plan(m, led), m, led, Fx.fetcher());
+
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+        assertEquals("v1", led.installedVersion);
+    }
+
+    /** Drop carried ops for paths pinned after journaling, or replay would overwrite the newly pinned file. */
+    @Test
+    void aPinAddedAfterTheJournal_dropsTheHeldOverOpForIt() throws IOException {
+        byte[] theirs = "the operator's own copy".getBytes(StandardCharsets.UTF_8);
+        Fx.write(dir, "config/mine.toml", theirs); // what the pin exists to protect
+        Fx.write(dir, ".bamfos-updater/staging/left.part", V2);
+        Journal kept = new Journal();
+        kept.targetVersion = "v2"; // same target, so only the pin can drop this op
+        kept.ops.add(new Journal.Op("move", ".bamfos-updater/staging/left.part", "config/mine.toml",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V2)));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry pinnedRow = Fx.entry("config/mine.toml", V2, FileEntry.Side.CLIENT);
+        FileEntry other = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v2", List.of(), pinnedRow, other);
+        Reconciler pinned = new Reconciler(dir, Reconciler.Side.CLIENT, List.of("config/mine.toml"));
+        pinned.apply(pinned.plan(m, led), m, led, Fx.fetcher());
+
+        assertArrayEquals(theirs, Files.readAllBytes(dir.resolve("config/mine.toml")));
+        assertArrayEquals(V1, Files.readAllBytes(dir.resolve("config/a.toml")));
+        assertNull(led.files.get("config/mine.toml"));
+    }
+
+    /** The Applying heartbeat is what the terminal's apply phase draws off, and an apply whose journal
+     *  keeps nothing (adopt-only here) moves zero files: pulsing there drew the phase over nothing. */
+    @Test
+    void anApplyThatJournalsNothing_neverPulsesApplying() throws IOException {
+        FileEntry e = Fx.entry("config/a.toml", V1, FileEntry.Side.CLIENT);
+        Fx.write(dir, "config/a.toml", V1); // bytes already right, the ledger just doesn't know: rule A2
+        Ledger led = new Ledger();
+        Manifest m = Fx.manifest("v2", List.of(), e);
+        SyncPlan p = rec().plan(m, led);
+        assertEquals(Kind.ADOPT, only(p, "config/a.toml"));
+        boolean[] pulsed = {false};
+
+        rec().apply(p, m, led, Fx.fetcher(), () -> pulsed[0] = true, false);
+
+        assertFalse(pulsed[0]);
+        assertEquals(e.sha256(), led.files.get("config/a.toml").sha256);
     }
 
     /**

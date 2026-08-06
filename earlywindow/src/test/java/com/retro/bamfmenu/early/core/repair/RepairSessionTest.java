@@ -147,18 +147,82 @@ class RepairSessionTest {
         assertEquals(1, host.closes);
     }
 
-    /** The box says "press any key", so any key has to take it, not one particular key. */
+    /** Any key dismisses the farewell prompt once its grace period has passed. */
     @Test
-    void anyKeyTakesTheFarewellImmediately() {
+    void anyKeyTakesTheFarewellOnceItHasHadTimeToBeSeen() {
         for (RepairIntent intent : new RepairIntent[]{RepairIntent.ACTIVATE, RepairIntent.BACK,
                 RepairIntent.DOWN, RepairIntent.LEFT}) {
-            RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+            long[] nanos = {0L};
+            RepairSession s = new RepairSession(new RepairRegistry(), () -> nanos[0]);
+            s.state(RepairSample.state("idle").live(1_000L, false));
             Recorder host = new Recorder();
             s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+            nanos[0] = 1_600_000_000L; // 1.6s: past the 1.5s grace period
             s.key(intent, host);
             assertEquals(1, host.closes, intent + " should close the game since the prompt accepts any key");
             assertEquals(0, host.leaves, intent + " must not walk out to SETUP instead");
         }
+    }
+
+    /**
+     * Guards against queued ENTER presses from confirmation or "Working ..." triggering
+     * "press any key" before the farewell prompt renders at least once.
+     */
+    @Test
+    void aKeyAlreadyInFlightWhenTheBoxGoesUpDoesNotTakeIt() {
+        long[] nanos = {0L};
+        RepairSession s = new RepairSession(new RepairRegistry(), () -> nanos[0]);
+        s.state(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+        nanos[0] = 50_000_000L; // 50ms later: stray keypresses still within the grace window.
+        s.key(RepairIntent.ACTIVATE, host);
+        assertEquals(0, host.closes);
+        assertNotNull(s.confirm());
+        assertEquals(0, host.leaves);
+        nanos[0] = 1_600_000_000L;
+        s.key(RepairIntent.ACTIVATE, host);
+        assertEquals(1, host.closes);
+    }
+
+    /**
+     * Countdown starts when the farewell can first draw, not when the worker finishes;
+     * otherwise the F2 volume overlay pauses stepping and expires the timer before it appears.
+     */
+    @Test
+    void theCountdownStartsWhenTheBoxCanFirstDrawNotWhenTheWorkerAnswered() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+
+        // First frame after a 30s freeze: the clock jumps ahead before tick runs.
+        s.state(s.state().live(31_000L, false));
+        s.tick(host);
+        assertEquals(0, host.closes);
+        assertEquals(10, s.closingIn());
+
+        s.state(s.state().live(31_000L + 9_999L, false));
+        s.tick(host);
+        assertEquals(0, host.closes);
+        s.state(s.state().live(31_000L + 10_000L, false));
+        s.tick(host);
+        assertEquals(1, host.closes);
+    }
+
+    /** The restart dialog uses the current action label so other ops don't wrongly mention factory reset. */
+    @Test
+    void theFarewellNamesTheActionThatNeededTheRestart() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        select(s, "factory");
+        s.key(RepairIntent.ACTIVATE, host); // box 1
+        s.key(RepairIntent.ACTIVATE, host); // Second confirmation dialog (irreversible).
+        s.key(RepairIntent.ACTIVATE, host); // Confirm; the fake host records the action.
+        assertTrue(s.busy());
+        s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+        assertEquals("A restart is needed to apply the Factory Reset. Your game will now close. "
+                        + "Press any key to continue.", s.confirm().body());
+        assertTrue(RepairSession.farewellBody("Rollback").contains("apply the Rollback"));
     }
 
     @Test

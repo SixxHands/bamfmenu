@@ -267,6 +267,60 @@ class EngineGuardTest {
     }
 
     /**
+     * The tmp collision inside that same unserialized window: rollbackUnproven and promoteStaged run before
+     * any InstanceLock exists, and copyThroughTmp shared its literal <target>.tmp name with extract, so two
+     * processes judging the same dead flag could hand one's move the other's half-written bytes, into
+     * engine.jar or, through keepKnownGood, over the .good rollback image itself. The planted file is the
+     * sibling's in-flight tmp under that old shared name; a rollback that eats it is the collision back.
+     */
+    @Test
+    void aRollbackNeverTouchesASiblingsInFlightTmp() throws Exception {
+        Path good = engineJar("known-good");
+        Path brick = engineJar("brick");
+        install(brick);
+        Files.copy(good, EngineGuard.good(enginePath()));
+        Files.writeString(EngineGuard.probation(enginePath()), EngineGuard.sha256(brick));
+        Path siblingTmp = enginePath().resolveSibling(enginePath().getFileName() + ".tmp");
+        byte[] midWrite = "half of some other process's copy".getBytes(StandardCharsets.UTF_8);
+        Files.write(siblingTmp, midWrite);
+
+        boot();
+
+        assertArrayEquals(bytes(good), bytes(enginePath()));
+        assertTrue(Files.isRegularFile(siblingTmp));
+        assertArrayEquals(midWrite, bytes(siblingTmp));
+    }
+
+    /**
+     * The pid-named tmp's other duty on the guard side: a leftover under the shared name used to get recycled
+     * by whoever wrote through it next, ours never will be, so the failure path has to delete it itself.
+     * keepKnownGood is the one copy whose refused move nobody downstream covers (a refused restore is
+     * followed by an extract that reuses and cleans the same name), so a leftover here squats a full engine
+     * copy beside .good forever. WINDOWS-ONLY for the same reason the refused-rollback test is: POSIX renames
+     * over an open file happily, so there the move lands and the failure path never runs.
+     */
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void aRefusedKnownGoodCopyLeavesNoTmpBehind() throws Exception {
+        Path current = engineJar("current");
+        Path next = engineJar("next");
+        install(current);
+        Files.copy(engineJar("old-good"), EngineGuard.good(enginePath()));
+        Files.copy(next, staged());
+        // pins .good open the way a second instance pins engine.jar, so the REPLACE move onto it is refused
+        EngineLoader.Engine holdsGood = EngineLoader.load(EngineGuard.good(enginePath()));
+        try {
+            boot();
+        } finally {
+            holdsGood.loader().close();
+        }
+        try (var siblings = Files.list(enginePath().getParent())) {
+            assertEquals(List.of(), siblings.filter(p -> p.getFileName().toString().endsWith(".tmp")).toList());
+        }
+        assertArrayEquals(bytes(next), bytes(enginePath()));
+    }
+
+    /**
      * The one branch that stops a FAILED rollback from destroying the last known-good engine, and it is reachable:
      * probation armed, the restore refused (a second instance holds engine.jar), and a staged engine.jar.new
      * waiting. Delete keepKnownGood's probation check and promoteStaged copies the UNPROVEN jar over .good, so

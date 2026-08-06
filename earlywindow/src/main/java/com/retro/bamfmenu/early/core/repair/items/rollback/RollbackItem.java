@@ -12,7 +12,7 @@ public final class RollbackItem implements RepairDef {
     @Override
     public RepairItem item() {
         return RepairItem.page("rollback", "Roll Back BAMFOS",
-                "Go back to an older release. Rolling back PINS BAMFOS to that version.",
+                "Go back to an older release. A roll back will pin BAMFOS to the selected version.",
                 RepairGate.FILE_SAFE,
                 state -> state.isPinned() ? "PINNED to " + state.pinned() : "tracking the server",
                 new RollbackPage());

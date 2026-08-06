@@ -26,7 +26,7 @@ class WatchdogStateTest {
         assertEquals(saved, WatchdogState.longProp(st, "last_restart_at"));
         // using actual persisted state: same target inside cooldown should HOLD
         assertEquals(WatchdogBrain.Decision.HOLD_COOLDOWN,
-                WatchdogBrain.decide("v0.2.6", "v0.2.4", true, st.getProperty("last_target", ""),
+                WatchdogBrain.decide("v0.2.6", "v0.2.4", "", true, st.getProperty("last_target", ""),
                         WatchdogState.longProp(st, "last_restart_at"), 1,
                         WatchdogBrain.MAX_RESTART_ATTEMPTS, saved + 60_000, 6L * 60 * 60 * 1000));
     }
@@ -40,7 +40,7 @@ class WatchdogStateTest {
         Properties st = WatchdogState.load(dir);
         assertEquals(WatchdogBrain.MAX_RESTART_ATTEMPTS, WatchdogState.attemptsFor(st, "v0.2.6"));
         assertEquals(WatchdogBrain.Decision.HOLD_GIVEUP,
-                WatchdogBrain.decide("v0.2.6", "v0.2.4", true, st.getProperty("last_target", ""),
+                WatchdogBrain.decide("v0.2.6", "v0.2.4", "", true, st.getProperty("last_target", ""),
                         WatchdogState.longProp(st, "last_restart_at"),
                         WatchdogState.attemptsFor(st, "v0.2.6"),
                         WatchdogBrain.MAX_RESTART_ATTEMPTS, wayLater, 6L * 60 * 60 * 1000));
@@ -54,10 +54,24 @@ class WatchdogStateTest {
         assertEquals(WatchdogBrain.MAX_RESTART_ATTEMPTS, WatchdogState.attemptsFor(st, "v0.2.6"));
         assertEquals(0, WatchdogState.attemptsFor(st, "v0.2.7"));
         assertEquals(WatchdogBrain.Decision.RESTART,
-                WatchdogBrain.decide("v0.2.7", "v0.2.4", true, st.getProperty("last_target", ""),
+                WatchdogBrain.decide("v0.2.7", "v0.2.4", "", true, st.getProperty("last_target", ""),
                         WatchdogState.longProp(st, "last_restart_at"),
                         WatchdogState.attemptsFor(st, "v0.2.7"),
                         WatchdogBrain.MAX_RESTART_ATTEMPTS, 1_000_000_001L, 6L * 60 * 60 * 1000));
+    }
+
+    /** Verifies recordRestart returns false when saving fails so act() refuses to arm instead of restart-storming. */
+    @Test
+    void saveAdmitsFailure_soTheArmCanBeRefusedInsteadOfStorming() throws IOException {
+        assertTrue(WatchdogState.save(dir, "v0.2.6", 1_000_000_000L, 1));
+        assertTrue(WatchdogState.recordRestart(dir, "v0.2.6", 1_000_000_000L, 0));
+        // Put a regular file at .bamfos-updater so createDirectories throws an IOException,
+        // simulating a read-only folder or full disk.
+        Path blocked = dir.resolve("blocked");
+        Files.createDirectory(blocked);
+        Files.writeString(blocked.resolve(".bamfos-updater"), "not a directory");
+        assertFalse(WatchdogState.save(blocked, "v0.2.6", 1_000_000_000L, 1));
+        assertFalse(WatchdogState.recordRestart(blocked, "v0.2.6", 1_000_000_000L, 0));
     }
 
     @Test

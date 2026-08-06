@@ -14,14 +14,20 @@ final class WatchdogBrain {
         ANNOUNCE_ONLY, // auto_restart=false: just notify, let the operator restart manually
         HOLD_COOLDOWN, // already restarted for this tag recently; wait for cooldown
         HOLD_GIVEUP,   // max restart attempts reached for this tag; wait for a newer release
-        HOLD_VETOED    // an operator ran /bamfos restart cancel for this tag; OpsBrain.vetoed, never decide()
+        HOLD_VETOED,   // an operator ran /bamfos restart cancel for this tag; OpsBrain.vetoed, never decide()
+        HOLD_PINNED    // tag= pins the server to another version, so restarting won't move to latest
     }
 
-    static Decision decide(String latestTag, String localVersion, boolean autoRestart,
+    static Decision decide(String latestTag, String localVersion, String tagPin, boolean autoRestart,
                            String lastRestartTarget, long lastRestartAt,
                            int attempts, int maxAttempts, long now, long cooldownMs) {
         if (latestTag == null || latestTag.isEmpty() || latestTag.equals(localVersion)) {
             return Decision.NOTHING;
+        }
+        // Check tag= pin before auto_restart: sync always resolves the pin first, so restarting for latest would
+        // come back on the pinned version and falsely trip the storm guard.
+        if (tagPin != null && !tagPin.isEmpty() && !tagPin.equals(latestTag)) {
+            return Decision.HOLD_PINNED;
         }
         if (!autoRestart) {
             return Decision.ANNOUNCE_ONLY;

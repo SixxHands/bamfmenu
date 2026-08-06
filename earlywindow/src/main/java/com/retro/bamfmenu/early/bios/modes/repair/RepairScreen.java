@@ -40,7 +40,8 @@ public final class RepairScreen implements Screen, RepairContext {
     private final RepairOps ops = new EngineOps();
     private final AtomicReference<UpdaterState> readState = new AtomicReference<>();
     private final AtomicReference<ReleaseList> readReleases = new AtomicReference<>();
-    private final AtomicReference<RepairResult> actionResult = new AtomicReference<>();
+    // package-private so a test can pose "a result landed while nobody was looking" without a worker race
+    final AtomicReference<RepairResult> actionResult = new AtomicReference<>();
 
     private RepairRegistry registry; // built on the FIRST open, because a boot that never opens this pays nothing
     private ExecutorService worker;  // one daemon thread, kept across opens (an idle thread costs nothing)
@@ -64,11 +65,16 @@ public final class RepairScreen implements Screen, RepairContext {
         host = ctx;
         readState.set(null);
         readReleases.set(null);
-        actionResult.set(null);
+        // a result that landed while this screen was closed still gets its say. Nulling it here ate the
+        // farewell for an armed factory reset, and the wipe then hit on a later boot with no warning shown
+        RepairResult held = actionResult.getAndSet(null);
         if (registry == null) {
             registry = new RepairRegistry();
         }
         session = new RepairSession(registry);
+        if (held != null) {
+            session.done(held);
+        }
         readState(); // the page opens on "Reading the updater ..." and fills in when the worker answers
         ctx.enterMode(Mode.REPAIR);
     }
@@ -113,6 +119,12 @@ public final class RepairScreen implements Screen, RepairContext {
         }
         RepairResult result = actionResult.getAndSet(null);
         if (result != null) {
+            if (result.kind() == RepairResult.Kind.RESTART_REQUIRED) {
+                // keys pressed at the "Working ..." screen were aimed at IT; left queued they would take
+                // the farewell the same frame it arms, before it draws once (the host hit this live)
+                input.clear();
+                typed.clear();
+            }
             s.done(result);
             readState(); // whatever it did, the snapshot it was built from is now old news
         }

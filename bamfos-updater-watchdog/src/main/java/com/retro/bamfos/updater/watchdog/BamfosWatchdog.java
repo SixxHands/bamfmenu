@@ -57,9 +57,10 @@ public final class BamfosWatchdog {
     private volatile long tick;
     private volatile long restartAtTick = -1;
     private long warnAtTick = -1;
-    /** Set by /bamfos stop before it arms the countdown, so the ONE halt in onTickPost knows which of the
-     *  two things it is doing. Server thread only, same as warnAtTick, and never cleared: the only exit from
-     *  a stop is the process ending. */
+    /** Set by /bamfos stop, and by restart now on a box with no wrapper (a halt nothing relaunches IS a
+     *  stop, whatever the operator called it), before the countdown is armed, so the ONE halt in onTickPost
+     *  knows which of the two things it is doing. Server thread only, same as warnAtTick, and never cleared:
+     *  the only exit from a stop is the process ending. */
     private boolean stopping;
     private String pendingTarget = "";
     private String announcedTag = "";
@@ -200,20 +201,33 @@ public final class BamfosWatchdog {
             }
             // Use settled version, not raw bcc-common.toml, so a partial sync with held files still triggers a restart.
             String local = Doors.settledVersion(dir).orElse("");
+            String pin = pinNow();
             Properties state = WatchdogState.load(dir);
             String lastTarget = state.getProperty("last_target", "");
             int attempts = WatchdogState.attemptsFor(state, latest); // the tag-reset rule lives with its test
-            WatchdogBrain.Decision decision = OpsBrain.vetoed(WatchdogBrain.decide(latest, local, autoRestart,
+            WatchdogBrain.Decision decision = OpsBrain.vetoed(WatchdogBrain.decide(latest, local, pin, autoRestart,
                     lastTarget, WatchdogState.longProp(state, "last_restart_at"),
                     attempts, WatchdogBrain.MAX_RESTART_ATTEMPTS,
                     System.currentTimeMillis(), COOLDOWN_MS), latest, vetoedTarget);
             if (decision != WatchdogBrain.Decision.NOTHING) {
-                s.executeIfPossible(() -> act(decision, latest, local, attempts));
+                s.executeIfPossible(() -> act(decision, latest, local, pin, attempts));
             }
-            return OpsBrain.Reply.ok(OpsBrain.newsReply(latest, local, decision, countdownSeconds));
+            return OpsBrain.Reply.ok(OpsBrain.newsReply(latest, local, pin, decision, countdownSeconds));
         } catch (Throwable t) {
             LOGGER.warn("[watchdog] poll cycle skipped: {}", t.toString()); // never kill the schedule
             return OpsBrain.Reply.bad("the poll did not finish: " + t);
+        }
+    }
+
+    /**
+     * Read the tag= pin fresh on every poll cycle so pinning a version takes effect on the next poll
+     * without needing a restart.
+     */
+    private String pinNow() {
+        try {
+            return UpdaterConfig.load(dir).tagPin();
+        } catch (Exception e) {
+            return ""; // start() already warned if the file is unreadable; fall back to unpinned
         }
     }
 
@@ -244,7 +258,7 @@ public final class BamfosWatchdog {
     }
 
     /** Server thread: chat + countdown arming. */
-    private void act(WatchdogBrain.Decision decision, String target, String local, int attempts) {
+    private void act(WatchdogBrain.Decision decision, String target, String local, String pin, int attempts) {
         // Only place we set the update MOTD, gated by UpdateMotd.takes so non-restarting decisions never leave it stuck.
         if (UpdateMotd.takes(decision)) {
             takeMotd(target);
@@ -255,10 +269,21 @@ public final class BamfosWatchdog {
                     return;
                 }
                 try {
+                    // Persist the restart attempt before halting to prevent a restart storm on a non-converging sync.
+                    // If the disk write fails, refuse to arm and let the next poll retry.
+                    if (!WatchdogState.recordRestart(dir, target, System.currentTimeMillis(), attempts)) {
+                        giveBackMotd(); // notice is sent and no restart is scheduled
+                        if (!announcedTag.equals(target)) {
+                            announcedTag = target;
+                            broadcast("Pack update " + target + " is pending but this box could not record "
+                                    + "the restart, check the server logs");
+                            LOGGER.warn("[watchdog] could not write .bamfos-updater/watchdog-state.properties, "
+                                    + "so the restart for {} is NOT armed to prevent a restart loop. Free space or "
+                                    + "fix permissions on .bamfos-updater; the next poll retries", target);
+                        }
+                        return;
+                    }
                     pendingTarget = target;
-                    // BEFORE the halt so a non-converging box can't storm; the +1 lives in recordRestart, where
-                    // a test can hold it, because the cooldown alone only spaces the bounces out
-                    WatchdogState.recordRestart(dir, target, System.currentTimeMillis(), attempts);
                     broadcast("Pack update " + target + " - restarting in " + countdownSeconds + "s");
                     LOGGER.info("[watchdog] new release {} (server on {}), restarting in {}s", target, local, countdownSeconds);
                     restartAtTick = tick + countdownSeconds * 20L;
@@ -299,6 +324,15 @@ public final class BamfosWatchdog {
                             + ".bamfos-updater/watchdog-state.properties to reset", attempts, target);
                 }
             }
+            case HOLD_PINNED -> {
+                if (!announcedTag.equals(target)) {
+                    announcedTag = target;
+                    broadcast("Pack update " + target + " is out but this box is locked to " + pin
+                            + " on purpose, so it stays put");
+                    LOGGER.info("[watchdog] release {} is out but tag= locks this box to {}; remove tag= "
+                            + "from .bamfos-updater/bamfos-updater.properties to take it", target, pin);
+                }
+            }
             case HOLD_VETOED -> {
                 // Do nothing here: /bamfos restart cancel already notified players, and re-announcing
                 // every poll would look like the cancel didn't stick. Still visible in status/check.
@@ -325,7 +359,9 @@ public final class BamfosWatchdog {
             // target can be empty when running /bamfos restart now with no update pending
             LOGGER.info("[watchdog] stopping the server{} ({})",
                     pendingTarget.isEmpty() ? " on an operator's ask" : " for " + pendingTarget,
-                    stopping ? "the wrapper reads the stop file and exits" : "the wrapper syncs + relaunches");
+                    stopping ? (wrapperPresent ? "the wrapper reads the stop file and exits"
+                            : "nothing here relaunches it")
+                            : "the wrapper syncs + relaunches");
             event.getServer().halt(false);
         }
     }
@@ -437,8 +473,12 @@ public final class BamfosWatchdog {
         boolean wasArmed = restartAtTick >= 0;
         vetoedTarget = "";
         warnAtTick = -1; // else a brought-forward countdown could still fire "Restarting in 10s" first
+        if (!wrapperPresent) {
+            // Without a wrapper nothing relaunches the server, so use stop wording instead of "back in a minute".
+            stopping = true;
+        }
         restartAtTick = tick;
-        return OpsBrain.Reply.ok(OpsBrain.restartNowReply(wasArmed));
+        return OpsBrain.Reply.ok(OpsBrain.restartNowReply(wasArmed, wrapperPresent));
     }
 
     /**

@@ -17,8 +17,9 @@ public record BetterStatus(String name, String version) {
                     && !version.isEmpty() && !"CHANGE_ME".equals(version) && !"CHANGE_ME".equals(name)) {
                 return Optional.of(new BetterStatus(name, version));
             }
-        } catch (RuntimeException notJson) {
-            // a garbage ping is a no-signal, never a crash
+        } catch (RuntimeException | StackOverflowError notJson) {
+            // Treat bad pings as no-signal, never a crash. Catch Error too: MiniJson is recursive, so a
+            // deeply nested SLP frame can throw StackOverflowError and slip past catch(Exception).
         }
         return Optional.empty();
     }

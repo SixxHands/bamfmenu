@@ -96,7 +96,8 @@ final class OpsBrain {
     }
 
     /** Reports both what the poll found and what the watchdog will do next so operators do not have to check logs. */
-    static String newsReply(String latest, String local, WatchdogBrain.Decision decision, int countdownSeconds) {
+    static String newsReply(String latest, String local, String tagPin, WatchdogBrain.Decision decision,
+                            int countdownSeconds) {
         String on = local.isEmpty() ? "an unknown version" : local;
         String found = "release " + latest + " is out and this server is on " + on + ", ";
         return switch (decision) {
@@ -108,8 +109,12 @@ final class OpsBrain {
             case HOLD_GIVEUP -> found + "but the restarts for it are spent and it never converged, so "
                     + "nothing restarts again for this tag. Fix the sync, then publish a new tag or delete "
                     + ".bamfos-updater/watchdog-state.properties.";
-            case HOLD_VETOED -> found + "and you cancelled its restart, so nothing re-arms it on its own. "
-                    + "/bamfos restart now to take it.";
+            case HOLD_VETOED -> found + "and you cancelled its restart, so it will not re-arm automatically. "
+                    + "Run /bamfos restart now to apply it.";
+            // Show the pinned tag so operators know auto-restarts are skipped because of the pin.
+            case HOLD_PINNED -> found + "but the release lock pins this server to " + tagPin + ", so nothing "
+                    + "restarts for it. Remove tag= from .bamfos-updater/bamfos-updater.properties to lift "
+                    + "the lock.";
         };
     }
 
@@ -327,7 +332,15 @@ final class OpsBrain {
         return seconds / 86400 + "d ago";
     }
 
-    static String restartNowReply(boolean wasArmed) {
+    /** Matches stopReply wording when no wrapper is present so panel operators aren't promised an auto-relaunch. */
+    static String restartNowReply(boolean wasArmed, boolean wrapperPresent) {
+        if (!wrapperPresent) {
+            return (wasArmed
+                    ? "countdown brought forward, the server stops on the next tick. "
+                    : "nothing was armed, stopping anyway. The server stops on the next tick. ")
+                    + "Nothing here relaunches it, so it stays down until you start it again (from your "
+                    + "host's panel, if that is what runs it).";
+        }
         return wasArmed
                 ? "countdown brought forward, the server stops on the next tick and the wrapper syncs and "
                         + "relaunches it."

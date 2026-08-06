@@ -52,8 +52,15 @@ public final class HttpFetcher {
         public final int code;
 
         public HttpStatusError(int code, String url) {
-            super("HTTP " + code + " from " + url);
+            super("HTTP " + code + " from " + noQuery(url));
             this.code = code;
+        }
+
+        /** Strip query parameters before logging because redirect URLs can be presigned S3 links containing
+         *  X-Amz-Signature, and these error messages end up in last-sync.json and server-sync.log. */
+        private static String noQuery(String url) {
+            int q = url.indexOf('?');
+            return q < 0 ? url : url.substring(0, q);
         }
     }
 
@@ -81,6 +88,12 @@ public final class HttpFetcher {
 
     private final long stallMs;
 
+    /** Upper cap on streamed downloads (GitHub rejects release assets over 2 GiB). Only triggers when a
+     *  response omits Content-Length, since the JDK already caps fixed-length responses. */
+    public static final long ASSET_MAX = 2L << 30; // 2 GiB per-asset limit matching GitHub releases
+
+    private final long assetMax;
+
     /** Byte progress callback for an active download (`total` is -1 when Content-Length is absent). */
     @FunctionalInterface
     public interface Bytes {
@@ -88,12 +101,18 @@ public final class HttpFetcher {
     }
 
     public HttpFetcher() {
-        this(STALL_MS);
+        this(STALL_MS, ASSET_MAX);
     }
 
     /** Test constructor so tests can override STALL_MS instead of waiting out the real timeout. */
     HttpFetcher(long stallMs) {
+        this(stallMs, ASSET_MAX);
+    }
+
+    /** Test constructor so tests can override the size cap without streaming 2 GiB. */
+    HttpFetcher(long stallMs, long assetMax) {
         this.stallMs = stallMs;
+        this.assetMax = assetMax;
     }
 
     /** GET with up to 5 manual auth-stripped hops; retries transient failures 3x with backoff. */
@@ -211,8 +230,12 @@ public final class HttpFetcher {
             int code = resp.statusCode();
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                 resp.body().close();
-                current = resp.headers().firstValue("Location")
+                // filter because a present-but-blank Location is a PRESENT Optional, and letting it through
+                // hands newBuilder a string that throws IAE, unchecked, past every typed catch above us
+                String loc = resp.headers().firstValue("Location")
+                        .filter(v -> !v.isBlank())
                         .orElseThrow(() -> new TransportFault("redirect without Location"));
+                current = resolveHop(current, loc);
                 auth = false; // Never forward Authorization when redirecting off the API host.
                 continue;
             }
@@ -242,6 +265,23 @@ public final class HttpFetcher {
         throw new TransportFault("too many redirects from " + url);
     }
 
+    /** Resolves a redirect Location header into an absolute URI, wrapping bad values in TransportFault
+     *  so server-sent headers trigger retry/offline handling instead of IllegalArgumentException. */
+    private static String resolveHop(String from, String location) throws TransportFault {
+        try {
+            URI next = URI.create(from).resolve(location); // Resolve relative Location headers against the responding URI.
+            String scheme = next.getScheme();
+            boolean usable = next.getHost() != null
+                    && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+            if (!usable) {
+                throw new TransportFault("redirect to an unusable Location (" + location + ")");
+            }
+            return next.toString();
+        } catch (RuntimeException hostile) {
+            throw new TransportFault("redirect to an unusable Location (" + location + ")", hostile);
+        }
+    }
+
     /** Streams a GET to dest via a .dl sibling and atomic move (caller verifies hash). Retries mid-body
      *  drops using HTTP Range (206 appends, 200 restarts from byte 0). */
     public void download(String url, String bearer, String accept, Path dest) throws IOException, InterruptedException {
@@ -264,13 +304,16 @@ public final class HttpFetcher {
                 long tail = contentLength(resp); // Don't call firstValueAsLong directly; see the helper note on malformed header values.
                 long base = append ? have : 0;
                 long total = tail < 0 ? -1 : base + tail;
+                // Fixed-length responses are already bounded by the JDK, so this cap mainly guards chunked
+                // streams that keep trickling data and resetting the stall timer.
+                long cap = tail < 0 ? assetMax : tail;
                 try (InputStream in = resp.body();
                      java.io.OutputStream out = Files.newOutputStream(part,
                              java.nio.file.StandardOpenOption.CREATE,
                              java.nio.file.StandardOpenOption.WRITE,
                              append ? java.nio.file.StandardOpenOption.APPEND
                                     : java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
-                    copyBounded(in, out, stallMs, -1, copied -> onBytes.at(base + copied, total));
+                    copyBounded(in, out, stallMs, cap, copied -> onBytes.at(base + copied, total));
                 }
                 Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
                 return;
@@ -315,18 +358,9 @@ public final class HttpFetcher {
         return buf.toByteArray();
     }
 
-    /**
-     * Copies a response body with a STALL deadline, reset by every chunk that lands, because NOTHING above this
-     * line has one: HttpRequest.timeout stops covering the exchange the moment the headers arrive, and a read
-     * off an ofInputStream body then blocks forever on a path that broke without an RST (AP roam, router
-     * reboot, laptop resume, a hotel portal holding the socket open). No TCP keepalive, no FML discovery
-     * watchdog, no total budget on the door: on the client that is a game that never opens a window while the
-     * terminal keeps spinning a Fetching line that looks alive, and on the server the wrapper never reaches
-     * its launcher line, so an unattended box stays down until a human kills the JVM.
-     * The copy rides a daemon thread we are willing to abandon and we CLOSE the body to break it, because a
-     * wedged socket read ignores interrupt. maxBytes < 0 means no size cap (a payload's size is the
-     * manifest's business and the caller's hash check is what judges the bytes).
-     */
+    /** Copies a response body with a per-chunk stall deadline (HttpRequest.timeout stops once headers
+     *  arrive, so dropped connections without RST would block boot forever). Runs on a daemon thread
+     *  and closes the stream on stall since blocked socket reads ignore interrupt. maxBytes < 0 is uncapped. */
     private static void copyBounded(InputStream in, java.io.OutputStream out, long stallMs, long maxBytes,
                                     java.util.function.LongConsumer onCopied)
             throws IOException, InterruptedException {

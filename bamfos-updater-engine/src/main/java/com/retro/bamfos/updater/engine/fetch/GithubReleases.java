@@ -150,21 +150,16 @@ public final class GithubReleases implements Reconciler.Fetcher {
         return java.nio.file.Files.readString(tmp, StandardCharsets.UTF_8);
     }
 
-    /**
-     * The release caches from every PREVIOUS sync, swept. Both names here are tag-unique and nothing ever
-     * removed either, so the real pack (which sources the whole config bucket out of one release zip) left a
-     * fresh copy of that zip in staging per release: twenty releases, twenty copies plus twenty manifest
-     * jsons, hundreds of MB inside the instance folder that no UI names and the player cannot know is safe to
-     * delete. Free to drop, because these files are only ever re-read through the in-memory zipCache, which lives
-     * exactly one sync, so a file from an older run is already dead weight rather than a saved download.
-     * Runs from manifestJson, which is the first thing every sync does, so nothing this sync wrote can be in
-     * the sweep. Staged .part files are NOT touched: those are 's bytes and only the Reconciler knows
-     * when a journal is done with them.
-     */
+    /** Sweeps old tag-scoped manifest JSONs and release zips from staging (in-memory zipCache only lasts
+     *  one sync, so older files are dead weight). Spares staged .part files (owned by Reconciler/journal)
+     *  and the current tag's zip .dl partial so interrupted downloads can resume. */
     private void pruneCaches() {
         try (java.nio.file.DirectoryStream<Path> ds = java.nio.file.Files.newDirectoryStream(cacheDir)) {
             for (Path p : ds) {
                 String n = p.getFileName().toString();
+                if (n.startsWith("zip-" + tag + "-") && n.endsWith(".dl")) {
+                    continue; // keep the partial download file for the current tag
+                }
                 if (n.startsWith("zip-") || (n.startsWith("manifest-") && n.endsWith(".json"))) {
                     java.nio.file.Files.deleteIfExists(p);
                 }

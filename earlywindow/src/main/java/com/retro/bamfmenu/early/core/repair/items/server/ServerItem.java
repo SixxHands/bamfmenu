@@ -25,8 +25,21 @@ public final class ServerItem implements RepairDef {
                 RepairGate.FILE_SAFE,
                 state -> state.serverCell(),
                 "New server address (host or host:port)",
-                UpdaterState::serverCell,
+                ServerItem::prefill,
                 (ops, typed) -> apply(ops, typed));
+    }
+
+    /*
+     * Raw prefill for the edit field (empty if unset), matching what apply() parses.
+     * Don't use serverCell() here: its fallback prose contains spaces that the engine rejects.
+     */
+    private static String prefill(UpdaterState state) {
+        if (state.serverHost().isEmpty()) {
+            return "";
+        }
+        return state.serverPort() == 25565 || state.serverPort() == 0
+                ? state.serverHost()
+                : state.serverHost() + ":" + state.serverPort();
     }
 
     /**

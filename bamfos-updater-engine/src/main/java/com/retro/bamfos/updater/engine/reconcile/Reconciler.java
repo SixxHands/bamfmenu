@@ -245,15 +245,27 @@ public final class Reconciler {
         Files.createDirectories(staging);
         Map<String, Path> stagedFiles = new HashMap<>();
         int stageIdx = 0;
+        int reused = 0;
         for (Action a : plan.downloads()) {
             // Stage one temp file per manifest path, not per hash. Otherwise two identical files at
             // different paths would share a staged file and moving the first one would consume it.
             Path part = staging.resolve(a.entry().sha256() + "-" + (stageIdx++) + ".part");
+            // Resume interrupted downloads: finished .part files survive failed runs (only pruned after a
+            // completed apply), so any part matching its target sha skips re-downloading.
+            if (Files.isRegularFile(part) && HashUtils.sha256(part).equals(a.entry().sha256())) {
+                stagedFiles.put(a.path(), part);
+                reused++;
+                continue;
+            }
             fetcher.fetch(a.entry(), part);
             if (!HashUtils.sha256(part).equals(a.entry().sha256())) {
                 throw new IOException("staged bytes for " + a.path() + " failed hash verification");
             }
             stagedFiles.put(a.path(), part);
+        }
+        if (reused > 0) {
+            System.out.println("[updater] resuming an interrupted sync: " + reused + " of "
+                    + plan.downloads().size() + " files were already downloaded and still verify");
         }
 
         dupeGuard(plan, manifest, ledger, stagedFiles);
@@ -339,11 +351,19 @@ public final class Reconciler {
             }
         }
         journal.ops.addAll(0, carryOver(journal.targetVersion, deferred, journal.ops));
-        journal.save(Journal.pathIn(dir));
+        if (journal.ops.isEmpty()) {
+            // Delete any leftover journal.json when there are no ops, otherwise an empty ops:[] file
+            // makes later boots think a journal is still pending.
+            Files.deleteIfExists(Journal.pathIn(dir));
+        } else {
+            journal.save(Journal.pathIn(dir));
+        }
         if (staged) {
             return;
         }
-        pulse.applying();
+        if (!journal.ops.isEmpty()) {
+            pulse.applying(); // Only emit the apply phase when there are files to apply.
+        }
         Journal.Result replayed = journal.replay(dir);
         if (!replayed.retryable().isEmpty()) {
             // Keep retryable ops in the journal (counting this run as an attempt) and drop abandoned ones.
@@ -497,9 +517,30 @@ public final class Reconciler {
         for (Journal.Op kept : leftover.ops) {
             // Match by logical path rather than on-disk name (.jar vs .disabled) so a carried op and a fresh
             // op with a flipped enable bit don't both run and strand a duplicate.
-            boolean rederived = fresh.stream()
-                    .anyMatch(o -> o.kind().equals(kept.kind()) && strip(o.to()).equals(strip(kept.to())));
-            if (!rederived && !deferred.contains(strip(kept.to()))) {
+            int rederived = -1;
+            for (int i = 0; i < fresh.size(); i++) {
+                if (fresh.get(i).kind().equals(kept.kind()) && strip(fresh.get(i).to()).equals(strip(kept.to()))) {
+                    rederived = i;
+                    break;
+                }
+            }
+            if (rederived >= 0) {
+                // Carry the old op's attempt count into the fresh op, or re-planning every online boot would
+                // reset the counter to 0 forever and MAX_ATTEMPTS would never trip.
+                Journal.Op o = fresh.get(rederived);
+                if (kept.attempts() > o.attempts()) {
+                    fresh.set(rederived, new Journal.Op(o.kind(), o.from(), o.to(), o.sha256(), kept.attempts()));
+                }
+                continue;
+            }
+            if (pins.pinned(strip(kept.to()))) {
+                // Drop carried ops for paths pinned since they were journaled so replay doesn't overwrite the
+                // pinned file; log the drop.
+                System.out.println("[updater] " + strip(kept.to())
+                        + " is pinned now, dropping the held-over op for it");
+                continue;
+            }
+            if (!deferred.contains(strip(kept.to()))) {
                 carried.add(kept);
             }
         }

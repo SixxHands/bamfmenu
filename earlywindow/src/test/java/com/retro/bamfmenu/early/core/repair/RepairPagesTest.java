@@ -35,7 +35,7 @@ class RepairPagesTest {
         List<PageRow> rows = new RollbackPage().rows(offline, WIDTH);
         assertEquals(1, count(rows, "v0.2.6"));
         assertTrue(text(rows).contains("INSTALLED"));
-        assertTrue(text(rows).contains("Offline. Only the installed version can be shown."));
+        assertTrue(text(rows).contains("Offline. Only the current installed version can be shown."));
         assertEquals(0, picks(rows));
         for (int i = 0; i < rows.size(); i++) {
             assertNull(new RollbackPage().activate(i, offline, WIDTH));
@@ -140,7 +140,7 @@ class RepairPagesTest {
         assertTrue(first >= 0);
         RepairEffect.Act act = page.activate(first, live, WIDTH);
         assertNotNull(act);
-        assertEquals("Roll back to v0.2.5? This pins BAMFOS to it.", act.confirms().get(0).body());
+        assertEquals("Roll back to v0.2.5? This pins BAMFOS to the selected version.", act.confirms().get(0).body());
         RepairSessionTest.FakeOps ops = new RepairSessionTest.FakeOps();
         RepairResult result = act.action().run(ops);
         assertEquals("v0.2.5", ops.syncedTag);

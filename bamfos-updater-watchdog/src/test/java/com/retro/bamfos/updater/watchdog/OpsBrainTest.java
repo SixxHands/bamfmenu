@@ -53,20 +53,23 @@ class OpsBrainTest {
     /** Verifies /bamfos check reports both the found release and whether the watchdog will restart. */
     @Test
     void newsReply_saysWhatTheWatchdogIsAboutToDo_notJustWhatItFound() {
-        assertTrue(OpsBrain.newsReply("v2", "v2", WatchdogBrain.Decision.NOTHING, 60)
+        assertTrue(OpsBrain.newsReply("v2", "v2", "", WatchdogBrain.Decision.NOTHING, 60)
                 .contains("no new release"));
-        assertTrue(OpsBrain.newsReply("v2", "v1", WatchdogBrain.Decision.RESTART, 90)
+        assertTrue(OpsBrain.newsReply("v2", "v1", "", WatchdogBrain.Decision.RESTART, 90)
                 .contains("countdown is arming now (90s)"));
-        assertTrue(OpsBrain.newsReply("v2", "v1", WatchdogBrain.Decision.ANNOUNCE_ONLY, 60)
+        assertTrue(OpsBrain.newsReply("v2", "v1", "", WatchdogBrain.Decision.ANNOUNCE_ONLY, 60)
                 .contains("auto_restart is off"));
-        assertTrue(OpsBrain.newsReply("v2", "v1", WatchdogBrain.Decision.HOLD_COOLDOWN, 60)
+        assertTrue(OpsBrain.newsReply("v2", "v1", "", WatchdogBrain.Decision.HOLD_COOLDOWN, 60)
                 .contains("cooldown"));
-        String giveup = OpsBrain.newsReply("v2", "v1", WatchdogBrain.Decision.HOLD_GIVEUP, 60);
+        String giveup = OpsBrain.newsReply("v2", "v1", "", WatchdogBrain.Decision.HOLD_GIVEUP, 60);
         assertTrue(giveup.contains("watchdog-state.properties"));
-        assertTrue(OpsBrain.newsReply("v2", "v1", WatchdogBrain.Decision.HOLD_VETOED, 60)
+        assertTrue(OpsBrain.newsReply("v2", "v1", "", WatchdogBrain.Decision.HOLD_VETOED, 60)
                 .contains("/bamfos restart now"));
-        assertTrue(OpsBrain.newsReply("v2", "", WatchdogBrain.Decision.RESTART, 60)
+        assertTrue(OpsBrain.newsReply("v2", "", "", WatchdogBrain.Decision.RESTART, 60)
                 .contains("an unknown version"));
+        String pinned = OpsBrain.newsReply("v2", "v1", "v1", WatchdogBrain.Decision.HOLD_PINNED, 60);
+        assertTrue(pinned.contains("release lock pins this server to v1"), String.valueOf(pinned));
+        assertTrue(pinned.contains("tag="), String.valueOf(pinned));
     }
 
     /**
@@ -84,7 +87,7 @@ class OpsBrainTest {
         // Non-restarting decisions pass through unchanged so the veto does not hide the real reason.
         for (WatchdogBrain.Decision d : List.of(WatchdogBrain.Decision.NOTHING,
                 WatchdogBrain.Decision.ANNOUNCE_ONLY, WatchdogBrain.Decision.HOLD_COOLDOWN,
-                WatchdogBrain.Decision.HOLD_GIVEUP)) {
+                WatchdogBrain.Decision.HOLD_GIVEUP, WatchdogBrain.Decision.HOLD_PINNED)) {
             assertEquals(d, OpsBrain.vetoed(d, "v2", "v2"), d + " restarts nothing already");
         }
     }
@@ -307,12 +310,24 @@ class OpsBrainTest {
 
     @Test
     void restartReplies_tellHimWhatJustHappenedToTheBox() {
-        assertTrue(OpsBrain.restartNowReply(true).contains("brought forward"));
-        assertTrue(OpsBrain.restartNowReply(false).contains("nothing was armed"));
-        assertTrue(OpsBrain.restartNowReply(false).contains("wrapper"));
+        assertTrue(OpsBrain.restartNowReply(true, true).contains("brought forward"));
+        assertTrue(OpsBrain.restartNowReply(false, true).contains("nothing was armed"));
+        assertTrue(OpsBrain.restartNowReply(false, true).contains("wrapper"));
         assertTrue(OpsBrain.restartCancelReply("v0.2.6").contains("v0.2.6"));
         assertTrue(OpsBrain.restartCancelReply("v0.2.6").contains("not re-arm"));
         assertEquals("restart cancelled.", OpsBrain.restartCancelReply(""));
+    }
+
+    /** Verifies restartNowReply omits wrapper relaunch promises on panel or direct-start servers. */
+    @Test
+    void restartNowReply_neverPromisesAWrapperTheBoxDoesNotHave() {
+        String down = OpsBrain.restartNowReply(false, false);
+        assertFalse(down.contains("wrapper"), String.valueOf(down));
+        assertTrue(down.contains("stays down"), String.valueOf(down));
+        assertTrue(down.contains("panel"), String.valueOf(down));
+        String armed = OpsBrain.restartNowReply(true, false);
+        assertTrue(armed.contains("brought forward") && armed.contains("stays down"), armed);
+        assertFalse(armed.contains("wrapper"), armed);
     }
 
     /**

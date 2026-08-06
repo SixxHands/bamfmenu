@@ -13,7 +13,7 @@ public final class VerifyItem implements RepairDef {
     @Override
     public RepairItem item() {
         return RepairItem.act("verify", "Verify and Repair Files",
-                "Hash-check every managed file and put back what drifted.",
+                "Check every managed file and restore potentially damaged files.",
                 RepairGate.FILE_SAFE,
                 state -> "Last sync: " + state.lastSyncCell(),
                 "Verify and repair every managed file?",

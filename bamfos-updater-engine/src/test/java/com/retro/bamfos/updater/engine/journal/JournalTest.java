@@ -153,6 +153,23 @@ class JournalTest {
         assertFalse(Files.exists(dir.resolve("mods/b.jar")));
     }
 
+    /** Catch unchecked InvalidPathException per op (using a NUL byte, invalid on Windows and POSIX)
+     * so one bad path in journal.json cannot break step 0 on every boot. */
+    @Test
+    void aPathTheOsRefuses_isReportedAbandoned_neverThrown() {
+        Journal j = new Journal();
+        j.ops.add(new Journal.Op("move", ".bamfos-updater/staging/p", "mods/bad\0name.jar",
+                HashUtils.sha256(NEW)));
+        j.ops.add(new Journal.Op("delete", "", "mods/fine.jar", ""));
+
+        Journal.Result r = assertDoesNotThrow(() -> j.replay(dir),
+                "one garbage op must not poison the whole replay");
+
+        assertEquals(1, r.abandoned().size());
+        assertEquals("mods/bad\0name.jar", r.abandoned().get(0).to());
+        assertTrue(r.retryable().isEmpty());
+    }
+
     /** Managed file placements still overwrite existing files since upgrades replace the old version. */
     @Test
     void managedMove_stillReplacesTheOldFile() throws IOException {

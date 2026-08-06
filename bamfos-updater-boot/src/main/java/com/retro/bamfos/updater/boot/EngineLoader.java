@@ -113,14 +113,25 @@ public final class EngineLoader {
     /** Atomic extract: temp file beside the target, then move -- a crash never leaves a half jar. */
     static void extract(Path target, Supplier<InputStream> baseline) throws IOException {
         Files.createDirectories(target.getParent());
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        try (InputStream in = baseline.get()) {
-            if (in == null) {
-                throw new IOException("embedded baseline engine resource is missing from the shim jar");
+        // the tmp carries our pid, NOT a shared name: slot maintenance runs before any InstanceLock exists,
+        // so a double-launch has two processes in here at once, and one shared <target>.tmp let A's move
+        // promote B's half-written bytes into the slot (EngineGuard.copyThroughTmp, same rule)
+        Path tmp = target.resolveSibling(target.getFileName() + "." + ProcessHandle.current().pid() + ".tmp");
+        try {
+            try (InputStream in = baseline.get()) {
+                if (in == null) {
+                    throw new IOException("embedded baseline engine resource is missing from the shim jar");
+                }
+                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
             }
-            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException disk) {
+            try {
+                Files.deleteIfExists(tmp); // ours alone now, so nothing else ever recycles a leftover
+            } catch (IOException ignored) {
+            }
+            throw disk;
         }
-        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         // the baseline is the shim's own twin, so it is known good by shipping and never inherits the verdict
         // that was hanging over the jar it just replaced
         EngineGuard.disarm(target);

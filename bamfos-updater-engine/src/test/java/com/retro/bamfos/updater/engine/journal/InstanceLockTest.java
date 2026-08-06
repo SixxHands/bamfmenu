@@ -76,4 +76,20 @@ class InstanceLockTest {
 
         assertEquals(Long.toString(ProcessHandle.current().pid()), Files.readString(file, StandardCharsets.UTF_8));
     }
+
+    /** Closing any fd on a file drops all POSIX record locks for the process, so a failed acquire must
+     * share the canonical channel and never close it while the winner is active. */
+    @Test
+    void aLosingAcquireNeverCostsTheHolderItsLock() throws IOException {
+        InstanceLock holder = InstanceLock.acquire(dir).orElseThrow();
+
+        assertTrue(InstanceLock.acquire(dir).isEmpty());
+
+        assertDoesNotThrow(holder::close,
+                "the losing acquire cost the holder its channel, which on POSIX is the winner's OS lock "
+                        + "gone mid-sync with nothing red anywhere");
+
+        InstanceLock after = InstanceLock.acquire(dir).orElseThrow();
+        after.close();
+    }
 }

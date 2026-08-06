@@ -74,7 +74,7 @@ class ReleasePollTest {
         assertFalse(poll.rateLimited);
         // make sure the tag is passed through to the decision so announcements fire
         assertEquals(WatchdogBrain.Decision.RESTART,
-                WatchdogBrain.decide(poll.latestTag().orElse(""), "v0.2.4", true, "", 0L, 0,
+                WatchdogBrain.decide(poll.latestTag().orElse(""), "v0.2.4", "", true, "", 0L, 0,
                         WatchdogBrain.MAX_RESTART_ATTEMPTS, System.currentTimeMillis(), COOLDOWN_MS));
     }
 
@@ -98,7 +98,7 @@ class ReleasePollTest {
         assertTrue(poll.tokenDead);
         assertEquals(401, poll.deadCode);
         assertEquals(WatchdogBrain.Decision.NOTHING,
-                WatchdogBrain.decide("", "v0.2.4", true, "", 0L, 0,
+                WatchdogBrain.decide("", "v0.2.4", "", true, "", 0L, 0,
                         WatchdogBrain.MAX_RESTART_ATTEMPTS, System.currentTimeMillis(), COOLDOWN_MS));
     }
 
