@@ -27,13 +27,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Join-guard Q2's mod half: on a registry/channel-mismatch kick FROM THE PACK'S OWN
- * SERVER, write the one observation file the menu is allowed to write (last-disconnect.json) and
- * replace the disconnect screen with the blue screen. Every actual fix happens in the engine at the
- * NEXT boot, this class renders theater and records one breadcrumb, nothing else.
- * Random third-party servers never trigger this, their kicks keep the vanilla screen.
- */
+// Watches for pack-server mismatch kicks, writes last-disconnect.json for the updater, and shows the BSOD. Ignores third-party servers.
 public final class KickWatch {
 
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -41,14 +35,10 @@ public final class KickWatch {
     private static volatile String lastHost = "";
     private static boolean demoFired;
 
-    /* Armed by a real connect attempt, disarmed the moment the blue screen hands the vanilla screen back.
-       Without this the restored mismatch table's Back button opens its parent DisconnectedScreen, whose
-       details still carry multiplayer.disconnect.incompatible, so we would intercept a screen nobody was
-       kicked to: a second blue screen, and last-disconnect.json rewritten with a reason that names no
-       channels, which leaves the engine NOTHING to quarantine. */
+    // Armed on connect and disarmed when returning to the original screen so pressing Back doesn't re-trigger the BSOD or overwrite the breadcrumb.
     private static boolean armed = true;
 
-    /** A server-supplied component tree walks itself; bound the walk rather than trust the sender. */
+    /** Max nodes to visit when walking a server component tree so bad input can't loop forever. */
     private static final int MAX_DEPTH = 8;
 
     /** Stashed by ConnectScreenMixin: the config-phase kick has no other address source. */
@@ -63,9 +53,7 @@ public final class KickWatch {
             if (!armed) {
                 return;
             }
-            /* The offline demo hook: BAMFMENU_BSOD_DEMO=extra|missing|skew|unclassified|platform|terminal|recurrence
-               swaps the FIRST title screen for that variant, no server and no kick needed. Fires ONCE per
-               session (ESC hands the title back, which must not re-trigger the swap). */
+            // Offline demo hook: BAMFMENU_BSOD_DEMO=extra|missing|skew|unclassified|platform|terminal|recurrence replaces the first title screen once.
             String demo = System.getenv("BAMFMENU_BSOD_DEMO");
             if (demo != null && !demoFired && s instanceof TitleScreen) {
                 demoFired = true;
@@ -77,8 +65,8 @@ public final class KickWatch {
             List<Bugcheck.Failure> failures = List.of();
             boolean mismatch = false;
             if (s instanceof ModMismatchDisconnectedScreen mm) {
-                // NeoForge only builds this screen when the server sent per-channel failure data,
-                // its existence IS the mismatch signal, and the channel ids name the culprit mods
+                // NeoForge only opens this screen when the server sent per-channel failure data,
+                // so it's always a mismatch and the channel IDs give us the culprit mods
                 Map<ResourceLocation, Component> data = channelData(mm);
                 reason = flatten(data);
                 failures = failures(data);
@@ -86,8 +74,8 @@ public final class KickWatch {
             } else if (s instanceof DisconnectedScreen ds) {
                 Component c = reasonOf(ds);
                 reason = c == null ? "" : c.getString();
-                // the whole key chain, not just the root's: NeoForge builds the mandatory-data-map refusal as
-                // translatable SIBLINGS of an empty literal root, so the root alone reads as plain text
+                // collect all translation keys, not just the root: NeoForge builds mandatory data map kicks as
+                // translatable siblings under an empty literal root
                 List<String> keys = keys(c);
                 failures = List.of(new Bugcheck.Failure("", keys));
                 mismatch = KickReason.isMismatch(keys, reason);
@@ -97,32 +85,29 @@ public final class KickWatch {
             }
             Path dir = FMLPaths.GAMEDIR.get();
             String fingerprint = fingerprint(reason);
-            boolean recorded = writeBreadcrumb(dir, reason, fingerprint); // RAW reason: the engine harvests culprit modids from it
+            boolean recorded = writeBreadcrumb(dir, reason, fingerprint); // raw kick text so the engine can extract culprit mod IDs
             Bugcheck check = Bugcheck.of(failures, reason, recurredUnchanged(dir, fingerprint));
             if (!recorded) {
-                // the crumb IS the change the CAPS order promises, so with no crumb the order is a lie: no
-                // quarantine next boot, no history entry, and the recurrence escalation never arms either
+                // without writing the breadcrumb, restarting won't quarantine mods, record history, or escalate repeats
                 check = check.unrecorded();
             }
             LOGGER.info("[bamfmenu] mismatch kick from the pack server, blue screen up ({}): {}",
                     check.stopCode(), fingerprint);
             event.setNewScreen(new BsodScreen(check, s));
         } catch (Throwable t) {
-            // spirit: a broken interceptor must never eat the vanilla disconnect screen
+            // a broken interceptor must never eat the vanilla disconnect screen
             LOGGER.warn("[bamfmenu] kick interceptor skipped: {}", t.toString());
         }
     }
 
-    /** Hand back the exact screen the blue screen displaced, the one carrying the channel table and its
-     *  own log and mods-folder buttons. Disarms first: re-entering this interceptor from a screen nobody
-     *  was kicked to would overwrite the breadcrumb with a reason that names no channels. */
+    // Restores the original disconnect screen (disarms first so Back doesn't re-enter this interceptor).
     static void restore(Screen back) {
         armed = false;
         Minecraft.getInstance().setScreen(back == null ? new TitleScreen() : back);
     }
 
-    /** The kick came from OUR server? properties server_host first, else the first saved server,
-     *  the same resolution order the engine pings. */
+    /** True if the kick came from the pack server (properties server_host first, else first saved
+     *  server, matching the updater engine). */
     private static boolean fromPackServer() {
         String host = lastHost;
         if (host.isEmpty()) {
@@ -146,7 +131,7 @@ public final class KickWatch {
                     }
                 }
             }
-            // mod floor has the real ServerList parser; the engine reads the same file with its own NBT straw
+            // use Minecraft's ServerList parser here; the updater engine parses the same file directly from NBT
             ServerList list = new ServerList(Minecraft.getInstance());
             list.load();
             if (list.size() > 0) {
@@ -174,8 +159,8 @@ public final class KickWatch {
         }
     }
 
-    /** The per-channel failure map. Empty when the field is gone: the screen alone still proves the
-     *  mismatch, the engine just has less to quarantine by and the screen reads unclassified. */
+    /** Per-channel failure map. If the field is missing we return empty, so we still show the mismatch
+     *  screen (just unclassified, with less info for the engine to quarantine). */
     @SuppressWarnings("unchecked")
     private static Map<ResourceLocation, Component> channelData(ModMismatchDisconnectedScreen screen) {
         try {
@@ -187,8 +172,8 @@ public final class KickWatch {
         }
     }
 
-    /** The breadcrumb's raw text, channel ids included ON PURPOSE: their namespaces are the modids the
-     *  engine's token harvest quarantines by. */
+    /** Breadcrumb raw text with channel ids included so the engine can match culprit modids by
+     *  namespace. */
     private static String flatten(Map<ResourceLocation, Component> data) {
         StringBuilder b = new StringBuilder("Mod channels failed to negotiate with the server.");
         for (Map.Entry<ResourceLocation, Component> e : data.entrySet()) {
@@ -197,8 +182,8 @@ public final class KickWatch {
         return b.toString();
     }
 
-    /** Per-channel evidence for the classifier: the namespace is the modid, and the key chain is what
-     *  says whether the server lacked the channel, lacked the version, or refused the flow. */
+    /** Per-channel data for the classifier: the namespace is the mod ID, and the translation keys show
+     *  whether the server was missing the channel, had a version mismatch, or rejected the flow. */
     private static List<Bugcheck.Failure> failures(Map<ResourceLocation, Component> data) {
         List<Bugcheck.Failure> out = new ArrayList<>();
         for (Map.Entry<ResourceLocation, Component> e : data.entrySet()) {
@@ -207,9 +192,7 @@ public final class KickWatch {
         return out;
     }
 
-    /** Every translation key in a reason component, outermost first: the classifying key hides under
-     *  MOD_WRAPPER whenever ModList could name the mod, and a whole-tree walk beats trusting one arg
-     *  index if NeoForge ever wraps it twice. */
+    // Walks the full component tree for translation keys since NeoForge wraps channel reasons under MOD_WRAPPER.
     private static List<String> keys(Component c) {
         List<String> out = new ArrayList<>();
         collectKeys(c, out, 0);
@@ -233,9 +216,7 @@ public final class KickWatch {
         }
     }
 
-    /** False = the one file this class is allowed to write did not land (a read-only instance folder, a
-     *  synced-folder lock, a full disk), which the screen has to know: the CAPS restart order promises a
-     *  change that only this crumb can deliver. */
+    // Returns false if writing last-disconnect.json failed so the BSOD omits the restart prompt.
     private static boolean writeBreadcrumb(Path dir, String reason, String fingerprint) {
         try {
             JsonObject o = new JsonObject();
@@ -253,9 +234,7 @@ public final class KickWatch {
         }
     }
 
-    /** The anti-loop read: engine-written history says the last cycle for this exact
-     *  fingerprint changed NOTHING, no quarantine, no version move, so a restart provably will not help
-     *  and the screen says so instead of asking for the same restart again. */
+    // Anti-loop check: true if the last recovery boot for this fingerprint changed nothing.
     private static boolean recurredUnchanged(Path dir, String fingerprint) {
         try {
             Path p = dir.resolve(".bamfos-updater").resolve("disconnect-history.json");

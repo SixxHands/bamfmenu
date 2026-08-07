@@ -2,9 +2,9 @@ package com.retro.bamfmenu.client;
 
 import net.minecraft.client.gui.GuiGraphics;
 
-/* A tiny self-contained bitmap font, drawn with GuiGraphics.fill rectangles -- no texture, no resource
+/* A tiny self-contained bitmap font, drawn with GuiGraphics.fill rectangles, no texture, no resource
    pack, no font atlas. The glyphs ARE Minecraft's own default font (its legacy ascii.png sheet) baked to
-   a 1 bit-per-pixel table, so on screen it is indistinguishable from in-game text -- but it needs nothing
+   a 1 bit-per-pixel table, so on screen it is indistinguishable from in-game text, but it needs nothing
    loaded. The point is timing: Minecraft's Font builds its glyph atlas DURING the very resource reload the
    loading screen is displaying, so early in that reload its text renders as missing-glyph boxes. This font
    is available from the first frame because it depends only on the embedded table.

@@ -6,14 +6,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import org.lwjgl.glfw.GLFW;
 
-/**
- * The blue screen: full-screen override of a pack-server mismatch kick, framed like a
- * classic Win9x BSOD over an NT bugcheck body. A dead end on purpose, every key and click is swallowed
- * and the only way out is ESC, which hands back the exact vanilla/NeoForge disconnect screen this
- * replaced, the one still carrying the channel table and its own log and mods-folder buttons.
- * Never auto-reopens: a launcher cleans up LWJGL natives when its child exits, so a self-respawn can
- * find them gone and hard-crash. All wording lives in {@link Bugcheck}.
- */
+// Full-screen BSOD override for pack mismatch kicks (wording lives in Bugcheck). ESC restores the original disconnect screen.
 public final class BsodScreen extends Screen {
 
     private static final int BSOD_BLUE = 0xFF0000AA;
@@ -23,9 +16,7 @@ public final class BsodScreen extends Screen {
     private static final int BOX_TEXT = 0xFF000000;
 
     private final Bugcheck check;
-    /** The screen this one displaced, handed back on ESC. Never init()ed and never removed(), because
-     *  setScreen posts Opening BEFORE it touches either, so re-showing it runs the normal first-show
-     *  path and ModMismatchDisconnectedScreen's ctor does not fire twice. */
+    // Original disconnect screen restored on ESC. Never init()'d before the swap to get it to start/run on normal path.
     private final Screen back;
 
     public BsodScreen(Bugcheck check, Screen back) {
@@ -53,8 +44,8 @@ public final class BsodScreen extends Screen {
         int colW = Math.min(this.width - 40, 460);
         int left = (this.width - colW) / 2;
         int top = boxY + boxH + lh * 2;
-        // the two exit keys are bottom-pinned and are the last thing allowed to fall off the screen, so
-        // the body gets whatever is left above them and Bugcheck.fit sheds the rest
+        // keep the two exit keys pinned at the bottom; give the body whatever height is left above them
+        // and let Bugcheck.fit drop anything that doesn't fit
         int exitsY = Math.max(top + lh * 2, this.height - lh * 3);
         int y = top;
         for (Bugcheck.Block block : Bugcheck.fit(check.body(), b -> wrap(b, colW), (exitsY - top) / lh)) {
@@ -65,7 +56,7 @@ public final class BsodScreen extends Screen {
         g.drawString(this.font, Bugcheck.EXIT_ENTER, left, exitsY + lh, BODY, false);
     }
 
-    /** Physical lines one block costs at this column, which is what the fit ladder budgets against. */
+    /** Number of wrapped lines a block takes at this column width, used by Bugcheck.fit. */
     private int wrap(Bugcheck.Block block, int colW) {
         return block.text().isEmpty() ? 1
                 : this.font.split(Component.literal(block.text()), colW - block.indent()).size();
@@ -83,11 +74,7 @@ public final class BsodScreen extends Screen {
         return y;
     }
 
-    /* Every input override returns true, handled, including the ones we ignore. NeoForge lets any mod push
-       a widget into any screen's children list through ScreenEvent.Init, and the Screen defaults would
-       happily click, focus and type into it. render() never walks renderables, so an injected widget is
-       invisible here, and an invisible button that still takes clicks is exactly the "it opened some other
-       screen while I was clicking around" bug. Swallow it all, exit on two keys. */
+    // Swallow all inputs so injected mod widgets can't be clicked behind the BSOD; only ESC/Enter exit.
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
@@ -130,8 +117,8 @@ public final class BsodScreen extends Screen {
 
     @Override
     public boolean shouldCloseOnEsc() {
-        // keyPressed never reaches super, so nothing consults this today; it stays flipped so an edit that
-        // DOES call super cannot hand ESC back to the default popGuiLayer path
+        // keyPressed doesn't call super right now, but keep this false so ESC won't fall back to popGuiLayer
+        // if super is ever called later
         return false;
     }
 

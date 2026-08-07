@@ -30,7 +30,7 @@ public final class QuitWatchdog {
             return false; // double-registered or the event re-fired, either way one timer
         }
         Thread t = new Thread(() -> watch(graceMs), "bamfmenu-quit-watchdog");
-        // Daemon is the whole trick: the JVM never waits on a daemon thread, so the watchdog can never be the holder it exists to kill.
+        // Must be a daemon thread so the watchdog itself never keeps the JVM alive.
         t.setDaemon(true);
         t.start();
         return true;
@@ -50,7 +50,7 @@ public final class QuitWatchdog {
         Runtime.getRuntime().halt(0); // halt, NOT exit: exit waits on shutdown hooks, and whatever wedged the quit can wedge those too
     }
 
-    /** The one line we leave behind: who we are, and who was still holding the JVM open. */
+    /** Log who triggered the forced exit and which non-daemon threads kept the JVM alive. */
     static String report(long graceMs, Collection<Thread> threads) {
         List<String> holders = new ArrayList<>();
         for (Thread t : threads) {

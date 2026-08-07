@@ -7,11 +7,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The front door to the blue screen AND to the breadcrumb, so this is the gate that decides whether the engine
- * gets to rename jars on the next boot. Every key string here is verbatim from the game (vanilla en_us or
- * neoforge-21.1.235's own lang), and the literal cases are the shapes a proxy or an operator really sends.
- */
+// Tests KickReason mismatch detection against real NeoForge keys and operator/proxy literal kicks.
 class KickReasonTest {
 
     @Test
@@ -24,14 +20,14 @@ class KickReasonTest {
                 "Incompatible client! Please use 1.21.1"));
         assertTrue(KickReason.isMismatch(List.of("multiplayer.disconnect.missing_tags"),
                 "Incomplete set of tags received from server."));
-        // the mandatory-data-map refusal builds translatable SIBLINGS under an empty literal root, so the root
-        // reads as plain text and only the collected key chain proves what it is
+        // mandatory data map kicks put translatable siblings under an empty literal root, so we have to
+        // walk the full component tree to find the keys
         assertTrue(KickReason.isMismatch(List.of("neoforge.network.data_maps.missing_their"),
                 "Cannot connect to server as it has mandatory registry data maps not present on the client: x"));
     }
 
-    /** An ordinary kick keeps the vanilla screen: it carries its own key, and a keyed reason never gets a
-     *  second vote off its prose however many mismatch words the prose happens to contain. */
+    /** Normal kicks stay on the vanilla screen: once a kick has a translation key, we don't fall back to
+     *  scanning its text even if it mentions mismatch words. */
     @Test
     void anOrdinaryKeyedKick_isNotAMismatch() {
         assertFalse(KickReason.isMismatch(List.of("multiplayer.disconnect.kicked"), "Kicked by an operator"));
@@ -39,13 +35,7 @@ class KickReasonTest {
                 "You are banned: registry mismatch talk in chat"));
     }
 
-    /**
-     * The one that mattered. `/kick Jordy restarting to fix a registry mismatch, back in 2` is a LITERAL
-     * component, and the old text fallback matched on the bare word `registry`. That wrote the breadcrumb, and
-     * the engine's harvest has no channel to narrow by in prose, so it falls to a whole-word sweep of the whole
-     * sentence and disables any untracked jar whose modid is one of those words. Two of the five old keywords
-     * are in this sentence, so a count of keywords would not have closed it either.
-     */
+    // Plain-text operator kicks like `/kick Jordy restarting to fix a registry mismatch, back in 2` must never trigger quarantine.
     @Test
     void anOperatorsProseKick_neverArmsTheQuarantine() {
         assertFalse(KickReason.isMismatch(List.of(),
@@ -56,15 +46,12 @@ class KickReasonTest {
         assertFalse(KickReason.isMismatch(List.of(), null));
     }
 
-    /** A literal kick that names a CHANNEL is real evidence, because a namespace is a mod on disk. The two false
-     *  namespace shapes are the ones a proxy kick actually carries: a link and a reconnect address. */
+    // Kicks naming a mod channel count as mismatch evidence; URLs and host:port proxy addresses don't.
     @Test
     void aLiteralKickNamingAChannel_isStillAMismatch() {
         assertTrue(KickReason.isMismatch(List.of(),
                 "Mod channels failed: chipped:main is missing on the server side"));
-        assertFalse(KickReason.isMismatch(List.of(), "You were kicked, see https://wiki.example/rules"),
-                "a url's scheme is not a namespace");
-        assertFalse(KickReason.isMismatch(List.of(), "reconnect to play.example.net:25565"),
-                "a host:port is not a channel, a channel path is never all digits");
+        assertFalse(KickReason.isMismatch(List.of(), "You were kicked, see https://wiki.example/rules"));
+        assertFalse(KickReason.isMismatch(List.of(), "reconnect to play.example.net:25565"));
     }
 }

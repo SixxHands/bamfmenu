@@ -22,10 +22,10 @@ class QuitWatchdogTest {
 
     @Test
     void armsExactlyOnce_andTheTimerThreadIsADaemon() throws Exception {
-        assertTrue(QuitWatchdog.arm(NEVER_FIRES_MS), "first arm must take");
+        assertTrue(QuitWatchdog.arm(NEVER_FIRES_MS));
         Thread dog = byNameWithin("bamfmenu-quit-watchdog", 2000);
-        assertNotNull(dog, "the timer thread must exist under its own name");
-        assertTrue(dog.isDaemon(), "a non-daemon watchdog would itself hold the JVM open");
+        assertNotNull(dog);
+        assertTrue(dog.isDaemon());
         // a second registration (or the event firing twice) must not stack a second timer
         assertFalse(QuitWatchdog.arm(NEVER_FIRES_MS));
         assertEquals(1, countByName("bamfmenu-quit-watchdog"));
@@ -41,12 +41,11 @@ class QuitWatchdogTest {
         bystander.start();
         try {
             String line = QuitWatchdog.report(10_000L, List.of(holder, bystander, neverStarted));
-            assertTrue(line.contains("bamfmenu-quit-watchdog"), "the line must name its writer");
+            assertTrue(line.contains("bamfmenu-quit-watchdog"));
             assertTrue(line.contains("test-quit-holder"));
-            assertFalse(line.contains("test-quit-bystander"),
-                    "daemons cannot hold a JVM, naming one sends the reader hunting the wrong thread");
-            assertFalse(line.contains("test-quit-dead"), "a dead thread holds nothing");
-            assertFalse(line.contains("\n"), "one line, grep finds it whole");
+            assertFalse(line.contains("test-quit-bystander"));
+            assertFalse(line.contains("test-quit-dead"));
+            assertFalse(line.contains("\n"));
         } finally {
             hold.countDown();
             holder.join(2000);
@@ -57,8 +56,7 @@ class QuitWatchdogTest {
     @Test
     void noVisibleHolder_stillProducesOneSelfNamedLine() {
         String line = QuitWatchdog.report(10_000L, List.of());
-        assertTrue(line.contains("bamfmenu-quit-watchdog"),
-                "even with nothing to name, the halt must leave a signed line behind");
+        assertTrue(line.contains("bamfmenu-quit-watchdog"));
         assertFalse(line.contains("\n"));
     }
 
@@ -73,7 +71,7 @@ class QuitWatchdogTest {
         return t;
     }
 
-    /** started threads can lag into the enumeration by a scheduler beat, so poll instead of asserting the instant */
+    /** New threads can take a moment to appear in thread enumeration, so poll instead of checking immediately. */
     private static Thread byNameWithin(String name, long ms) throws InterruptedException {
         long deadline = System.currentTimeMillis() + ms;
         while (System.currentTimeMillis() < deadline) {

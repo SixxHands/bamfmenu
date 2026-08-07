@@ -47,7 +47,7 @@ public final class BamfSplashes {
                         Integer color = null;
                         String text = line;
                         /* Color prefix: #RRGGBB| or #RRGGBBAA| (the trailing alpha byte is accepted but
-                           ignored -- the splash renderer applies the title-screen fade alpha itself, so
+                           ignored, the splash renderer applies the title-screen fade alpha itself, so
                            a hand-written AA would just fight it). The '|' sits at index 7 for 6 hex
                            digits, index 9 for 8. */
                         if (line.length() > 1 && line.charAt(0) == '#') {

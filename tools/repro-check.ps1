@@ -18,7 +18,7 @@ $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
 $JARS = @(
-    "build\libs\bamfmenu-1.0.0.jar",
+    "mainmenu\build\libs\bamfmenu-1.0.0.jar",
     "earlywindow\build\libs\bamfmenu-earlywindow-1.0.0.jar",
     "bamfos-updater-boot\build\libs\bamfos-updater-boot-0.1.0.jar",
     "bamfos-updater-engine\build\libs\bamfos-updater-engine-0.1.0.jar",

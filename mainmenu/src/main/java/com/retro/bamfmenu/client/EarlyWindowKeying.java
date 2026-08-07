@@ -13,9 +13,9 @@ import java.util.List;
 
 /* Makes sure the early window actually boots into OUR BIOS terminal. FML reads config/fml.toml at boot
    (BEFORE any mod loads) to pick the ImmediateWindowProvider by name, so this can only correct the file
-   for the NEXT launch -- it cannot redirect the current boot. Run once on the client: if
+   for the NEXT launch, it cannot redirect the current boot. Run once on the client: if
    earlyWindowProvider isn't "bamfmenu_terminal" or earlyWindowControl isn't true, back the file up
-   (fml.toml.bak) and rewrite ONLY those two keys, leaving everything else untouched. Idempotent -- a
+   (fml.toml.bak) and rewrite ONLY those two keys, leaving everything else untouched. Idempotent, a
    file that is already correct is not rewritten. Best-effort: any failure is logged and swallowed so it
    never blocks startup.
 

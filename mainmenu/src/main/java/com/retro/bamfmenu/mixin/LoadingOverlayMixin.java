@@ -45,7 +45,7 @@ public abstract class LoadingOverlayMixin {
         float fade;
         if (f >= 0.0F) {
             /* Ease-out dissolve over ~2s: opacity drops FAST at the start (so it begins blending into
-               the menu immediately -- no late feel) then eases to nothing, staying visible the whole
+               the menu immediately, no late feel) then eases to nothing, staying visible the whole
                span so it reads as a crossfade, not a cut. The 2s span is what made it look "together";
                the squared curve is what removes the slow-start "too late" feel. */
             float t = Mth.clamp(f / 2.0F, 0.0F, 1.0F);
@@ -57,7 +57,7 @@ public abstract class LoadingOverlayMixin {
         }
 
         /* Render the menu (title screen: background + logo + buttons) behind for the ENTIRE fade-out, so
-           as the loading screen fades out the full menu fades in at the same time -- one unified
+           as the loading screen fades out the full menu fades in at the same time, one unified
            crossfade, everything together. */
         if (f >= 0.0F && this.minecraft.screen != null) {
             this.minecraft.screen.render(graphics, 0, 0, partialTick);

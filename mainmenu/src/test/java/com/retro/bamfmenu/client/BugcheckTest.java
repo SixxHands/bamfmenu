@@ -10,13 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The blue screen's classification and its copy, tested off the REAL NeoForge keys (every key string
- * here is verbatim from neoforge-21.1.235's assets/neoforge/lang/en_us.json).
- * Two of these guard reported bugs, not hypotheticals: the old screen appended "present on your client
- * but missing on the server" to EVERY case (Jordy's kick was a newer JourneyMap, so he would have read a
- * false diagnosis), and a plain package mismatch that recurred once went straight to the terminal screen.
- */
+// Tests Bugcheck classification and copy against real NeoForge translation keys (including Jordy's JourneyMap mismatch case).
 class BugcheckTest {
 
     private static final String WRAPPER = "neoforge.network.negotiation.failure.mod";
@@ -45,8 +39,7 @@ class BugcheckTest {
                 "journeymap:main: The client wants the payload to be version: 2,"
                         + " but the server wants it to be version: 1!", false);
         assertEquals("BAMF_PACKAGE_REVISION_MISMATCH", c.stopCode());
-        assertFalse(c.text().contains("not present on the server"),
-                "a revision skew means both sides HAVE the package");
+        assertFalse(c.text().contains("not present on the server"));
         assertFalse(c.text().contains("Unexpected packages"), () -> c.text());
     }
 
@@ -56,8 +49,7 @@ class BugcheckTest {
                 "journeymap:main: The client wants the payload to be version: 2,"
                         + " but the server wants it to be version: 1!", false);
         assertEquals(List.of("journeymap"), c.rows());
-        assertFalse(c.text().contains("version: 2"),
-                "those are payload protocol versions, printing them sends someone hunting a mod 2.0");
+        assertFalse(c.text().contains("version: 2"));
     }
 
     @Test
@@ -70,8 +62,8 @@ class BugcheckTest {
 
     @Test
     void wrappedReason_classifiesTheKeyUnderTheWrapper() {
-        // ModMismatchDisconnectedScreen's ctor re-wraps every reason it can name a mod for, so the
-        // wrapper alone must not decide anything
+        // ModMismatchDisconnectedScreen wraps every reason that names a mod, so don't classify based on
+        // the wrapper key alone
         Bugcheck wrapped = Bugcheck.of(List.of(fail("chipped", WRAPPER, EXTRA)), "raw", false);
         Bugcheck bare = Bugcheck.of(List.of(fail("chipped", EXTRA)), "raw", false);
         assertEquals(bare.stopCode(), wrapped.stopCode());
@@ -96,9 +88,8 @@ class BugcheckTest {
     void plainPackageMismatchThatRecurs_isNotTheTerminalScreen() {
         Bugcheck c = Bugcheck.of(List.of(fail("supplementaries", EXTRA)), "raw", true);
         assertEquals("BAMF_SYNC_CONVERGENCE_FAILED", c.stopCode());
-        assertFalse(c.text().contains("cannot handle"),
-                "recurrence may sharpen the wording, it may never reclassify a package mismatch");
-        assertFalse(c.text().contains("cannot repair"), "the owner rejected that wording outright");
+        assertFalse(c.text().contains("cannot handle"));
+        assertFalse(c.text().contains("cannot repair"));
     }
 
     @Test
@@ -107,7 +98,7 @@ class BugcheckTest {
         Bugcheck again = Bugcheck.of(List.of(fail("supplementaries", EXTRA)), "raw", true);
         assertEquals(first.listHeader(), again.listHeader());
         assertEquals(first.rows(), again.rows());
-        assertEquals("", again.action(), "asking for the same restart again is the loop this screen ends");
+        assertEquals("", again.action());
         assertTrue(again.consequence().contains("logs/latest.log"));
     }
 
@@ -122,8 +113,7 @@ class BugcheckTest {
         Bugcheck c = Bugcheck.of(List.of(fail("chipped", EXTRA), fail("journeymap", MISSING)),
                 "raw", false);
         assertEquals("BAMF_SYNC_REQUIRED", c.stopCode());
-        assertEquals("Packages involved:", c.listHeader(),
-                "a row must never sit under a header that names the wrong fault");
+        assertEquals("Packages involved:", c.listHeader());
     }
 
     @Test
@@ -159,9 +149,7 @@ class BugcheckTest {
         assertEquals("+4 more", c.rows().get(8));
     }
 
-    /** A game-version refusal is the PLATFORM's handshake and not a channel at all. It used to sit in the skew
-     *  set, so a player on a stale profile read "Client package revision mismatch detected." with the CAPS
-     *  restart order under it, and nothing the updater does can honor that: it syncs packages, not Minecraft. */
+    // Game-version mismatch must not tell the player to restart for a package sync.
     @Test
     void aGameVersionRefusal_isNeitherARevisionSkewNorARestart() {
         for (String key : List.of("multiplayer.disconnect.outdated_client",
@@ -177,10 +165,7 @@ class BugcheckTest {
         }
     }
 
-    /** ONE reason really can carry two opposite faults: NeoForge appends BOTH data-map directions into a single
-     *  disconnect component when mandatory data maps differ each way, and reading only the first key printed
-     *  "These packages are not present on the server." directly under a row saying the server had ones this
-     *  client does not. That is the Jordy shape again, so two faults means neither is the whole story. */
+    // Mixed opposite data-map faults (Jordy case) must fall back to the generic sync message.
     @Test
     void oneReasonCarryingBothDataMapDirections_dropsToTheMixedDefault() {
         String raw = "Cannot connect to server as it is missing mandatory registry data maps present on the"
@@ -195,8 +180,7 @@ class BugcheckTest {
         assertFalse(c.text().contains("The server is running these and your client is not."), () -> c.text());
     }
 
-    /** The consequence may not deny what the rows show. A repairable channel can be listed two lines above it,
-     *  so "This is not a package or revision difference" was disproved by the screen's own evidence. */
+    /** Don't claim "not a package or revision difference" when a repairable channel is listed right above it. */
     @Test
     void terminalVariant_neverDeniesTheRepairableSiblingInItsOwnRows() {
         Bugcheck c = Bugcheck.of(List.of(fail("chipped", EXTRA), fail("bamfnether", WRAPPER, FLOW)),
@@ -204,14 +188,12 @@ class BugcheckTest {
                         + "\nchipped:main: This channel is missing on the server side, but required on the client!"
                         + "\nbamfnether:main: The client wants the payload to flow: PLAY_TO_SERVER,"
                         + " but the server does not support it!", false);
-        assertTrue(c.rows().stream().anyMatch(r -> r.contains("chipped:main")), "the repairable row is on screen");
+        assertTrue(c.rows().stream().anyMatch(r -> r.contains("chipped:main")));
         assertFalse(c.text().contains("not a package or revision difference"), () -> c.text());
         assertTrue(c.consequence().startsWith("A sync will not clear this on its own."), c.consequence());
     }
 
-    /** The CAPS order promises a change only the breadcrumb can deliver. With no crumb the next boot
-     *  quarantines nothing AND writes no history entry, so the recurrence escalation never arms either and the
-     *  friend restarts into this exact screen forever. */
+    // Drops the restart prompt when the breadcrumb couldn't be written so the player doesn't loop forever.
     @Test
     void anUnwrittenBreadcrumb_dropsTheRestartOrderForTheContactLine() {
         Bugcheck c = Bugcheck.of(List.of(fail("chipped", EXTRA)), "raw", false).unrecorded();
@@ -219,11 +201,10 @@ class BugcheckTest {
         assertTrue(c.body().stream().noneMatch(b -> b.role() == Bugcheck.Role.ACTION));
         assertFalse(c.text().contains("RESTART YOUR GAME"));
         assertTrue(c.consequence().contains("logs/latest.log"));
-        assertEquals("BAMF_CLIENT_PACKAGE_UNEXPECTED", c.stopCode(), "same fault, only the instruction changes");
+        assertEquals("BAMF_CLIENT_PACKAGE_UNEXPECTED", c.stopCode());
         assertEquals(List.of("chipped"), c.rows());
         Bugcheck terminal = Bugcheck.sample("terminal");
-        assertEquals(terminal.consequence(), terminal.unrecorded().consequence(),
-                "a screen that never had an order keeps its own sentence, it already says contact the owner");
+        assertEquals(terminal.consequence(), terminal.unrecorded().consequence());
     }
 
     @Test
@@ -238,8 +219,7 @@ class BugcheckTest {
         Bugcheck c = Bugcheck.of(List.of(fail("bamfnether", FLOW)), "raw", false);
         assertEquals("", c.action());
         assertTrue(c.body().stream().noneMatch(b -> b.role() == Bugcheck.Role.ACTION));
-        assertFalse(c.text().contains("RESTART YOUR GAME"),
-                "a restart cannot clear a protocol fault, so the CAPS order would be a lie");
+        assertFalse(c.text().contains("RESTART YOUR GAME"));
     }
 
     @Test
@@ -252,8 +232,7 @@ class BugcheckTest {
 
     @Test
     void serverAnnouncedRegistriesItNeverSent_isNotTerminal() {
-        // the server said "expect these" and then did not send them, which is neither a package set nor
-        // a revision, so it must not claim to be either and must not claim to be unhandleable
+        // server advertised registries it never sent: not a mod/version mismatch and not unhandleable either
         Bugcheck c = Bugcheck.of(List.of(fail("", "neoforge.network.registries.sync.missing")),
                 "Not all expected registries were received from the server! (missing: x)", false);
         assertEquals("BAMF_SYNC_REQUIRED", c.stopCode());
@@ -290,8 +269,8 @@ class BugcheckTest {
 
     @Test
     void everySampleLandsOnTheVariantItsNameClaims() {
-        // the demo hook and the offline renderer both read these, so a sample that classifies somewhere
-        // else means the pack host signed off on a screen no player can get
+        // the demo hook and offline renderer both read these, so a misclassified sample means the
+        // offline preview shows a screen no player can actually hit
         assertEquals("BAMF_CLIENT_PACKAGE_UNEXPECTED", Bugcheck.sample("extra").stopCode());
         assertEquals("BAMF_CLIENT_PACKAGE_MISSING", Bugcheck.sample("missing").stopCode());
         assertEquals("BAMF_PACKAGE_REVISION_MISMATCH", Bugcheck.sample("skew").stopCode());
@@ -345,8 +324,8 @@ class BugcheckTest {
 
     @Test
     void fit_keepsTheContactInstructionWhenThereIsNoActionLine() {
-        // the cannot-handle screen has no CAPS order, so its consequence is the only thing that tells the
-        // player what to do; a cramped window may not be what deletes it
+        // cannot-handle has no restart prompt, so the consequence text is the only instruction and shouldn't
+        // get dropped on small windows
         Bugcheck c = Bugcheck.sample("terminal");
         List<Bugcheck.Block> kept = Bugcheck.fit(c.body(), ONE_LINE, 2);
         assertTrue(kept.stream().anyMatch(b -> b.role() == Bugcheck.Role.CONSEQUENCE
@@ -368,13 +347,7 @@ class BugcheckTest {
         return Bugcheck.of(many, "raw", false);
     }
 
-    /**
-     * cap() and fit() both shorten the row list, and their counts have to COMPOSE: whatever the window, the
-     * names on screen plus the number in "+N more" is the number of culprits the kick named. cap()'s remainder
-     * row sits last, so it is the first thing the collapse loop reaches, and shedding it as an ordinary row
-     * replaced the honest count with a smaller one on every window that collapsed at all. 1080p at GUI scale 4
-     * is one of them, so the pack host reads a screenshot and chases the wrong number of mods.
-     */
+    // cap() and fit() counts must compose so displayed names + "+N more" always equals total culprits.
     @Test
     void everyWindow_accountsForAllTwelveCulprits() {
         for (int budget = 10; budget <= 15; budget++) {
@@ -390,14 +363,12 @@ class BugcheckTest {
                     named++;
                 }
             }
-            assertEquals(12, named + hidden, "budget " + budget + " printed " + rows);
-            assertTrue(kept.size() <= budget, "and it still fits: budget " + budget + " kept " + kept.size());
+            assertEquals(12, named + hidden, String.valueOf(budget) + " / " + String.valueOf(rows));
+            assertTrue(kept.size() <= budget, String.valueOf(budget) + " / " + String.valueOf(kept.size()));
         }
     }
 
-    /** A body that lands exactly on budget after the TECH shed keeps every row: the line the "+N more" row
-     *  costs may only be reserved once a drop has actually HAPPENED, else the screen trades a real culprit for a
-     *  row whose whole job is to say one is missing. */
+    // Only reserve a line for "+N more" once a row is actually dropped.
     @Test
     void fit_keepsEveryRowWhenTheBodyLandsExactlyOnBudget() {
         List<Bugcheck.Block> body = eightRows().body();

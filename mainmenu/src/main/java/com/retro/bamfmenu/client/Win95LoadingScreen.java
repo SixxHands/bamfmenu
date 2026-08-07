@@ -16,7 +16,7 @@ import java.util.List;
    blocks. This is deliberately the GUI-era counterpart to the early window's DOS terminal: boot =
    terminal, game load = Win95 dialog. Progress comes from the overlay (accurate); the status text
    comes from FancyModLoader's StartupNotificationManager. All text uses PixelFont (the embedded
-   Monocraft bitmap) so it is readable from the first frame -- Minecraft's own Font is not loaded yet
+   Monocraft bitmap) so it is readable from the first frame, Minecraft's own Font is not loaded yet
    this early in the reload. Fades with the overlay. */
 public final class Win95LoadingScreen {
 
@@ -49,18 +49,15 @@ public final class Win95LoadingScreen {
         int w = g.guiWidth();
         int h = g.guiHeight();
 
-        /* The whole loading screen -- desktop, dialog and all -- is drawn at the overlay's fade alpha
+        /* The whole loading screen, desktop, dialog and all, is drawn at the overlay's fade alpha
            (a), so it ALL fades out together. The loading overlay renders the full title screen (menu
            background + logo + buttons) behind us during its fade-out, so as we fade out the complete
-           menu fades in at the same time -- one unified crossfade, no element popping in. */
+           menu fades in at the same time, one unified crossfade, no element popping in. */
         if (!drawBackground(g, w, h, a)) {
             g.fill(0, 0, w, h, argb(TEAL, a)); // plain Win95 desktop fallback
         }
 
-        /* All text here uses PixelFont (the embedded Monocraft bitmap), NOT Minecraft's Font: this dialog
-           is shown DURING the resource reload that builds MC's font atlas, so MC text renders as
-           missing-glyph boxes early in the reload. PixelFont depends on nothing but its baked table, so
-           the status is readable from the very first frame -- which is the whole point. */
+        // Use PixelFont instead of Minecraft's Font since MC's font atlas isn't ready early in resource reload.
         int dw = Math.min(w - 40, 280);
         int dh = 78;
         int dx = (w - dw) / 2;
@@ -153,7 +150,7 @@ public final class Win95LoadingScreen {
         }
         /* The GuiGraphics.blit path uses the POSITION_TEX shader: its ColorModulator honours the
            setColor alpha, but that innerBlit overload does NOT enable blending (unlike fill(), which
-           is why the dialog faded while the image didn't -- it was drawn opaque, then cut at a<=4).
+           is why the dialog faded while the image didn't, it was drawn opaque, then cut at a<=4).
            Enable blend explicitly so the alpha actually composites the image over the menu behind it,
            giving a real crossfade. Reset state afterwards so we don't leak it into later draws. */
         RenderSystem.enableBlend();
