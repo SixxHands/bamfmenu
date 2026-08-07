@@ -70,6 +70,9 @@ public final class UpdaterOps {
             Ledger ledger = Ledger.load(Ledger.pathIn(dir));
             UpdaterConfig cfg = UpdaterConfig.load(dir);
             out.put("version", Doors.localVersion(dir).orElse(ledger.installedVersion));
+            // Version with the ledger veto applied (via Doors.settledVersion). Fall back to the same default as
+            // above when unstamped so downstream doesn't read a disagreement from missing data.
+            out.put("settled", Doors.settledVersion(dir).orElse(ledger.installedVersion));
             out.put("pinned", cfg.tagPin());
             out.put("reset_target", pinnedOrInstalled(cfg, ledger));
             out.put("token_dead", Doors.tokenDead(dir));
@@ -85,6 +88,10 @@ public final class UpdaterOps {
             if (Files.isRegularFile(last) && MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8)) instanceof Map<?, ?> m) {
                 out.put("last_sync_at", m.get("at") instanceof Long l ? l : 0L);
                 out.put("last_sync_result", m.get("result") instanceof String s ? s : "");
+                // off the SAME parse as the two rows above, because a second read of the file could catch a
+                // rewrite halfway and hand one surface a result and a held flag from two different syncs.
+                // An older record with no field reads false, same as SyncCore.lastSyncHeldFiles
+                out.put("last_sync_held", Boolean.TRUE.equals(m.get("held")));
             }
         } catch (Exception e) {
             out.put("error", String.valueOf(e));

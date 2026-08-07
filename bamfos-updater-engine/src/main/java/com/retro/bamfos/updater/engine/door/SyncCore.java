@@ -6,6 +6,7 @@ import com.retro.bamfos.updater.engine.console.ConsoleBar;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
 import com.retro.bamfos.updater.engine.json.MiniJson;
@@ -206,6 +207,12 @@ final class SyncCore {
         return String.join(", ", shown) + (ops.size() > shown.size() ? ", ..." : "");
     }
 
+    /** Same capped filename formatter as names(), for given-up strike paths that no longer have journal ops. */
+    private static String capped(List<String> paths) {
+        List<String> shown = paths.stream().limit(6).toList();
+        return String.join(", ", shown) + (paths.size() > shown.size() ? ", ..." : "");
+    }
+
     /** Runs sync from a door; doors always run the promoted engine, so provesEngine=true below. */
     static int sync(Path dir, UpdaterConfig cfg, String tag, boolean repair, Reconciler.Side side,
                     String apiBase) throws Exception {
@@ -291,7 +298,7 @@ final class SyncCore {
             consoleBar.finish();
             bus.fileDone(fileName(e.path()));
         };
-        rec.apply(plan, filtered, ledger, feed, bus::applying, staged);
+        Reconciler.Applied applied = rec.apply(plan, filtered, ledger, feed, bus::applying, staged);
 
         boolean pendingSelf = false;
         List<String> refusedEngines = EngineHealth.rejectedEngines(dir);
@@ -348,16 +355,36 @@ final class SyncCore {
         }
 
         cacheManifest(dir, manifestJson);
-        // apply() mutates this ledger in place and only claims the new version when EVERY row landed, so a
-        // mismatch here is the honest witness that something is still pending. The journal alone is not:
-        // when every unfinished op is abandoned it gets deleted, and the summary then went into last-sync.json
-        // as a flat "updated v1 -> v2" while installed_version was deliberately held at v1, which is the line
-        // UpdaterOps.status() shows and the watchdog echoes into logs/latest.log
-        boolean heldBack = !ledger.installedVersion.equals(manifest.pack().version());
-        boolean pending = staged || pendingSelf || heldBack || Files.exists(Journal.pathIn(dir));
+        // Use apply()'s explicit outcome instead of inferring from version/journal (same-version repairs and
+        // deferred/abandoned rows leave neither changed). Keep apply() updating strikes and scrubbing given-up
+        // ops before returning so the journal check below doesn't promise REBOOT TO APPLY for dropped rows.
+        boolean journalKept = Files.exists(Journal.pathIn(dir));
+        // include any active strike (spent or not): once strikes are exhausted, a normal plan skips the
+        // rule-A row since the ledger sha matches, so without this check we'd overwrite the record with ok
+        int strikeCount = HeldStrikes.currentCount(dir, manifest);
+        boolean strikesHeld = strikeCount > 0;
+        boolean heldBack = !applied.converged()
+                || !ledger.installedVersion.equals(manifest.pack().version())
+                || strikesHeld;
+        // Only set rebootApplies when a reboot actually applies work (a saved journal or staged self-entry).
+        // Don't key off `staged` or `heldBack`: a staged run that deferred every row has no journal to replay.
+        boolean rebootApplies = pendingSelf || journalKept;
+        boolean pending = staged || pendingSelf || heldBack || journalKept;
+        List<String> givenUp = HeldStrikes.exhaustedNow(dir, System.currentTimeMillis());
+        if (!givenUp.isEmpty()) {
+            // check the strike file directly rather than plan seeding, since a diverged rule-A row isn't in a
+            // normal plan at all
+            String gaveUp = givenUp.size() + " file(s) held back and given up on: " + capped(givenUp)
+                    + " (run the repair pass to retry)";
+            if (serverSide) {
+                serverLog(dir, gaveUp);
+            } else {
+                System.out.println("[updater] " + gaveUp);
+            }
+        }
         String was = fromVersion.isEmpty() ? "?" : fromVersion;
         String summary;
-        if (plan.isNoop() && !pendingSelf) {
+        if (plan.isNoop() && !pendingSelf && !strikesHeld) {
             summary = "already current (" + manifest.pack().version() + ")";
             System.out.println("[updater] pack current (" + manifest.pack().version() + ", "
                     + plan.actions.size() + " actions)");
@@ -367,24 +394,53 @@ final class SyncCore {
         } else {
             String now = manifest.pack().version();
             int moved = plan.downloads().size();
-            String tail = pending ? ", some apply on next boot" : "";
+            // shortfall is planned files minus applied files; staged runs stop at the journal so shortfall is 0
+            int shortfall = staged ? 0 : moved - applied.recorded();
+            // use plan shortfall if non-zero, otherwise fall back to active strikes so rule-A divergences don't
+            // display as "0 file(s) held back"
+            int heldCount = Math.max(staged ? applied.deferred() : shortfall, strikeCount);
+            // if we're in a held state with no countable plan shortfall or strike (e.g. a carried op no longer
+            // in the plan), still report it as held instead of saying "0 file(s) held back"
+            String heldPhrase = heldCount > 0 ? heldCount + " file(s) held back" : "not everything landed";
+            // Only append ", some apply on next boot" when a reboot will apply staged changes; held-back rows
+            // use separate wording instead.
+            String tail = rebootApplies ? ", some apply on next boot"
+                    : heldBack ? ", " + heldPhrase
+                    : "";
             // Only use "updated/rolled back" wording when the pack version actually changed; same-version repairs
             // and self-entry-only updates shouldn't claim "UPDATED FROM vX TO vX".
             if (!was.equals(now)) {
                 summary = "updated " + was + " -> " + now + " (" + moved + " files)" + tail;
             } else if (moved > 0) {
-                summary = "repaired " + moved + " file(s) on " + now + tail;
+                // report actual applied count on a shortfall, not the planned count, so logs/latest.log doesn't
+                // claim a file was repaired when it wasn't
+                summary = shortfall > 0
+                        ? "repaired " + applied.recorded() + " of " + moved + " file(s) on " + now
+                                + ", " + shortfall + " held back"
+                                + (rebootApplies ? ", some apply on next boot" : "")
+                        : "repaired " + moved + " file(s) on " + now + tail;
+            } else if (plan.isNoop() && strikesHeld) {
+                // a DISTINCT prefix, machine-matched: UpdaterOps.stagedSync maps "already current (" to the
+                // BIOS's done code, and this state is NOT done, it is a box whose held rows ran out of
+                // retries with nothing left to plan. Change these words and change stagedSync's matcher too
+                summary = "current with " + heldCount + " file(s) held back (" + now + ")";
             } else {
                 summary = "staged the updater's own files on " + now + tail;
             }
             if (!was.equals(now) || moved > 0) {
-                bus.synced(was, now, pending);
-            } else if (pending) {
+                // Pass actual applied count for the final summary; use -1 on staged runs (not measured yet) so
+                // in-session updates don't show as incomplete with 0 applied.
+                bus.synced(was, now, rebootApplies, staged ? -1 : applied.recorded());
+            } else if (rebootApplies) {
                 bus.pendingOnly();
             }
             if (serverSide) {
+                // Gate the "apply on next boot" note on rebootApplies, not pending, so held-only boots don't
+                // promise a reboot that won't apply anything.
                 serverLog(dir, "server synced to " + now
-                        + (pending ? " (staged files apply on the next boot)" : "") + ", launching");
+                        + (rebootApplies ? " (staged files apply on the next boot)"
+                                : heldBack ? " (" + heldPhrase + ")" : "")
+                        + ", launching");
             } else {
                 // the client's own console copy, which BootBus.synced used to print for both sides in the
                 // BIOS's voice. latest.log is the file a player pastes when he wants help, so the result has
@@ -392,16 +448,10 @@ final class SyncCore {
                 System.out.println("[updater] " + summary);
             }
         }
-        // `pending` and not `ok` for a sync that did not converge: the summary two lines up already says
-        // ", some apply on next boot", but UpdaterState.lastSyncCell renders the RESULT WORD only, so the BIOS
-        // UPDATE AND REPAIR row read "ok, just now" on every boot of a box the engine itself knows is holding a
-        // row back (a player marking a managed jar read only yields AccessDeniedException forever)
-        // heldBack OR a journal that outlived replay: the two halves of `pending` that mean bytes on disk do
-        // not match the manifest, as opposed to the two that just mean "the next boot finishes this".
-        // NEVER for a staged run: there the journal is the healthy applies-next-boot state and heldBack is
-        // structural (the ledger commit was skipped on purpose), so recording held=true bought every routine
-        // in-session update a full re-hash, a false alarm in the log, and a rejected-engine amnesty next boot
-        boolean heldFiles = !staged && (heldBack || Files.exists(Journal.pathIn(dir)));
+        // Write `pending` (not `ok`) whenever work remains, since UpdaterState.lastSyncCell only shows the
+        // result word. Set heldFiles only when disk bytes are truly stuck (heldBack or leftover journal on
+        // normal runs; deferred rows or active strikes on staged runs, where a journal is expected).
+        boolean heldFiles = staged ? applied.deferred() > 0 || strikesHeld : heldBack || journalKept;
         lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary,
                 heldFiles);
         return 0;

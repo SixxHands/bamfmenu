@@ -144,8 +144,8 @@ class RepairPagesTest {
         RepairSessionTest.FakeOps ops = new RepairSessionTest.FakeOps();
         RepairResult result = act.action().run(ops);
         assertEquals("v0.2.5", ops.syncedTag);
-        assertEquals(RepairResult.Kind.STAGED, result.kind());
-        assertEquals("Changes staged. Applies on next boot.", result.message());
+        assertEquals(RepairResult.Kind.RESTART_REQUIRED, result.kind());
+        assertEquals("Update staged. It applies the next time you start the game.", result.message());
     }
 
     @Test

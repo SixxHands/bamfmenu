@@ -375,6 +375,56 @@ class UpdaterFeedTest {
         assertEquals("BAMFOS UPDATED FROM v0.2.4 TO v0.2.6.", lastOf(moved));
     }
 
+    /**
+     * Issue #189: finale uses the 4th SYNCED field (applied count) rather than plan count,
+     * reporting shortfalls and omitting the banner when zero files were applied.
+     */
+    @Test
+    void theFinaleWordsTheLandedCount_neverThePlan() throws IOException {
+        UpdaterFeed none = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t1", "SYNCED\tv0.2.6\tv0.2.6\t0", "END\tok");
+        List<UpdaterFeed.Line> block = none.postBlock(0);
+        assertTrue(block.stream().noneMatch(l -> l.text().startsWith("BAMFOS REPAIRED")), String.valueOf(block));
+        assertTrue(block.stream().anyMatch(l -> l.text().equals("Update stopped ....... INCOMPLETE")), String.valueOf(block));
+        assertTrue(block.stream().anyMatch(l -> l.text().equals("1 FILE HELD BACK.")), block.toString());
+        assertTrue(block.stream().noneMatch(l -> l.text().startsWith("BIOS UPDATE COMPLETE")), String.valueOf(block));
+
+        UpdaterFeed shortfall = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t3", "SYNCED\tv0.2.6\tv0.2.6\t2", "END\tok");
+        List<UpdaterFeed.Line> rows = shortfall.postBlock(0);
+        assertTrue(rows.stream().anyMatch(l -> l.text().equals("BAMFOS REPAIRED 2 OF 3 FILES ON v0.2.6.")), rows.toString());
+        assertEquals("1 FILE HELD BACK.", lastOf(shortfall));
+
+        UpdaterFeed whole = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t1", "SYNCED\tv0.2.6\tv0.2.6\t1", "END\tok");
+        assertEquals("BAMFOS REPAIRED 1 FILE ON v0.2.6.", lastOf(whole));
+
+        // a rollback whose whole plan is rule-E deletes downloads NOTHING and still converges, so zero
+        // recorded there is the honest count of a move that really happened
+        UpdaterFeed rollback = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.4",
+                "MANIFEST\t412", "PLAN\t0", "SYNCED\tv0.2.6\tv0.2.4\t0", "END\tok");
+        assertEquals("BAMFOS UPDATED FROM v0.2.6 TO v0.2.4.", lastOf(rollback));
+    }
+
+    /**
+     * Staged in-session syncs stop at the journal and send -1 so the reader keeps plan wording
+     * instead of INCOMPLETE; older 3-field engines fall into the same compatibility branch.
+     */
+    @Test
+    void anUnmeasuredCount_keepsTodaysWording() throws IOException {
+        UpdaterFeed staged = feedOn("SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t3", "SYNCED\tv0.2.4\tv0.2.6\t-1", "PENDING", "END\tok");
+        List<UpdaterFeed.Line> block = staged.postBlock(0);
+        assertEquals("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", lastOf(staged));
+        assertTrue(block.stream().anyMatch(l -> l.text().equals("BAMFOS UPDATED FROM v0.2.4 TO v0.2.6.")), block.toString());
+        assertTrue(block.stream().noneMatch(l -> l.text().contains("INCOMPLETE")), String.valueOf(block));
+        assertTrue(block.stream().noneMatch(l -> l.text().contains("HELD BACK")), block.toString());
+
+        UpdaterFeed older = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t3", "SYNCED\tv0.2.6\tv0.2.6", "END\tok");
+        assertEquals("BAMFOS REPAIRED 3 FILES ON v0.2.6.", lastOf(older));
+    }
+
     /** When only the updater jars changed, the engine skips SYNCED and just prints REBOOT TO APPLY.
      *  Don't synthesize an extra summary row here. */
     @Test

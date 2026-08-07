@@ -158,6 +158,70 @@ class UpdaterOpsTest {
         assertEquals("v0.2.1", ops().status().get("reset_target"));
     }
 
+    /**
+     * When a sync updates bcc-common.toml but defers another row, `version` keeps the new stamp (what gets
+     * broadcast) while `settled` reports the ledger's older installed_version.
+     */
+    @Test
+    void status_settledIsTheLedgersVeto_whenASyncHeldAFileBack() throws IOException {
+        Fx.write(dir, "config/bcc-common.toml", "modpackVersion = \"v3\"\n".getBytes());
+        Ledger led = new Ledger();
+        led.installedVersion = "v2";
+        led.save(Ledger.pathIn(dir));
+
+        Map<String, Object> s = ops().status();
+        assertEquals("v3", s.get("version"));
+        assertEquals("v2", s.get("settled"));
+    }
+
+    /** With no stamp present, both keys fall back to the ledger so a healthy install doesn't look mismatched. */
+    @Test
+    void status_settledFallsBackToTheLedgerWhenBccIsAbsent() throws IOException {
+        Ledger led = new Ledger();
+        led.installedVersion = "v2";
+        led.save(Ledger.pathIn(dir));
+
+        Map<String, Object> s = ops().status();
+        assertEquals("v2", s.get("version"));
+        assertEquals("v2", s.get("settled"));
+    }
+
+    /** An empty installed_version means the updater has never managed this install, so
+     *  Doors.settledVersion treats it as unmanaged instead of a mismatch (otherwise manual installs
+     *  with only a bcc file would trigger a false warning). */
+    @Test
+    void status_handInstalledBoxAnswersOneVersionOnBothKeys() throws IOException {
+        Fx.write(dir, "config/bcc-common.toml", "modpackVersion = \"v3\"\n".getBytes());
+
+        Map<String, Object> noLedger = ops().status();
+        assertEquals("v3", noLedger.get("version"));
+        assertEquals("v3", noLedger.get("settled"));
+
+        new Ledger().save(Ledger.pathIn(dir)); // a ledger file that has never recorded a finished sync
+        Map<String, Object> emptyLedger = ops().status();
+        assertEquals("v3", emptyLedger.get("version"));
+        assertEquals("v3", emptyLedger.get("settled"));
+    }
+
+    /**
+     * Parses the held flag from the same record as result and timestamp. Omit the key when no record exists
+     * instead of defaulting to false.
+     */
+    @Test
+    void status_lastSyncHeldRidesTheSameRecordRead() throws IOException {
+        assertFalse(ops().status().containsKey("last_sync_held"));
+
+        Fx.write(dir, ".bamfos-updater/last-sync.json",
+                "{\"at\":1,\"tag\":\"v3\",\"result\":\"pending\",\"summary\":\"posed\",\"held\":true}".getBytes());
+        Map<String, Object> held = ops().status();
+        assertEquals(Boolean.TRUE, held.get("last_sync_held"));
+        assertEquals("pending", held.get("last_sync_result"));
+
+        Fx.write(dir, ".bamfos-updater/last-sync.json",
+                "{\"at\":1,\"tag\":\"v3\",\"result\":\"ok\",\"summary\":\"posed\"}".getBytes());
+        assertEquals(Boolean.FALSE, ops().status().get("last_sync_held"));
+    }
+
     @Test
     void listOptional_mergesManifestOptionals_andQuarantinedWithReasons() throws IOException {
         Fx.write(dir, ".bamfos-updater/manifest-current.json", ("{"
@@ -833,7 +897,7 @@ class UpdaterOpsTest {
         bus.plan(12);
         bus.fileStart("cm.jar");
         bus.applying();
-        bus.synced("v1", "v2", true);
+        bus.synced("v1", "v2", true, 3);
         bus.end("ok");
 
         assertEquals(List.of(
@@ -847,7 +911,7 @@ class UpdaterOpsTest {
                 "PLAN\t12",
                 "FILE\tcm.jar",
                 "PHASE\tApplying",
-                "SYNCED\tv1\tv2",
+                "SYNCED\tv1\tv2\t3", // Applied count goes in the 4th field so the final summary doesn't just show the planned count.
                 "PENDING",
                 "END\tok"), Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")));
         // a new boot truncates

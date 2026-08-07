@@ -282,6 +282,8 @@ class ClientDoorTest {
         // sync() used to infer pending status from the journal alone, so an all-deferred run wrote
         // "updated vOLD -> vNEW" to last-sync.json even though installed_version stayed at vOLD.
         assertTrue(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
+                        .contains("file(s) held back"));
+        assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
                         .contains("some apply on next boot"));
         assertEquals("pending", lastSync().get("result"));
         assertArrayEquals(theirBuild, Files.readAllBytes(dir.resolve("mods/cm.jar")));
@@ -301,6 +303,36 @@ class ClientDoorTest {
         assertFalse(Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"))
                         .contains("some apply on next boot"));
         assertEquals("ok", lastSync().get("result"));
+    }
+
+    /** A deferred row with no journal shouldn't emit PENDING (REBOOT TO APPLY), even though last-sync
+     * records pending. The control case checks that an actual staged sync still emits PENDING. */
+    @Test
+    void heldRow_neverPromisesReboot() throws IOException {
+        bcc("vOLD");
+        byte[] theirBuild = "the player's own build of cm".getBytes(StandardCharsets.UTF_8);
+        Fx.write(dir, "mods/cm.jar", theirBuild); // edited AND the pack moved it: this rule, so a .bak is owed
+        Ledger led = new Ledger();
+        led.installedVersion = "vOLD";
+        led.files.put("mods/cm.jar", new Ledger.Entry("the-sha-we-placed-back-then"));
+        led.save(Ledger.pathIn(dir));
+        Files.createDirectories(dir.resolve("mods/cm.jar.bak-vOLD/wedge")); // Simulate an AV file lock, with shim and engine already current so pendingSelf can't trigger PENDING.
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, SHIM_NEW);
+        Fx.write(dir, SyncCore.ENGINE_PATH, ENGINE_NEW);
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.stream().anyMatch(l -> l.startsWith("SYNCED\t")), String.valueOf(bus));
+        assertFalse(bus.contains("PENDING"), String.valueOf(bus));
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+
+        // Same locked file, except this boot also stages an update that actually needs a reboot.
+        Fx.write(dir, SyncCore.ENGINE_PATH, "an engine older than the release".getBytes(StandardCharsets.UTF_8));
+        assertEquals(0, new ClientDoor(base).run(dir));
+
+        assertTrue(Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")).contains("PENDING"));
     }
 
     /** Log the failing path for both stuck and abandoned ops so unrecoverable targets can be diagnosed
@@ -936,7 +968,7 @@ class ClientDoorTest {
         assertEquals("repaired 1 file(s) on vNEW", lastSync().get("summary"));
         assertFalse(out.contains("vNEW TO vNEW"), String.valueOf(out));
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
-        assertTrue(bus.contains("SYNCED\tvNEW\tvNEW"), String.valueOf(bus));
+        assertTrue(bus.contains("SYNCED\tvNEW\tvNEW\t1"), String.valueOf(bus));
         assertTrue(bus.contains("PLAN\t1"), String.valueOf(bus));
     }
 
@@ -972,7 +1004,7 @@ class ClientDoorTest {
         assertFalse(out.contains("BAMFOS UPDATED FROM"), String.valueOf(out));
         assertTrue(out.contains("[updater] updated vOLD -> vNEW"), String.valueOf(out));
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
-        assertTrue(bus.contains("SYNCED\tvOLD\tvNEW"), String.valueOf(bus));
+        assertTrue(bus.stream().anyMatch(l -> l.startsWith("SYNCED\tvOLD\tvNEW\t")), String.valueOf(bus));
         assertTrue(bus.contains("PENDING"), bus.toString());
     }
 

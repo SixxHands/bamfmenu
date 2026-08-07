@@ -225,6 +225,46 @@ class RepairSessionTest {
         assertTrue(RepairSession.farewellBody("Rollback").contains("apply the Rollback"));
     }
 
+    /**
+     * Staged syncs only apply on the next boot, so the window must show the restart notice and trigger quit.
+     * Uses the result noun rather than the row verb label so the message reads naturally.
+     */
+    @Test
+    void aStagedSyncClosesTheGameToo_andTheBoxSaysWhy() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        select(s, "sync");
+        s.key(RepairIntent.ACTIVATE, host); // the are-you-sure
+        s.key(RepairIntent.ACTIVATE, host); // proceed
+        s.done(RepairResult.ofSync(0));
+
+        assertNotNull(s.confirm());
+        assertEquals("A restart is needed to apply the update. Your game will now close. "
+                + "Press any key to continue.", s.confirm().body());
+        // The first tick resets the timer using a fresh timestamp (the download blocked the frame loop,
+        // so the timestamp from done() is stale); after that the countdown runs normally.
+        s.tick(host);
+        assertEquals(0, host.closes);
+        s.state(s.state().live(1_000L + 10_000L, false));
+        s.tick(host);
+        assertEquals(1, host.closes);
+    }
+
+    /**
+     * Toggling an optional mod stages changes but must NOT close the game,
+     * since players usually toggle multiple rows in one visit.
+     */
+    @Test
+    void anOptionalModToggleStagesWithoutClosingTheGame() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        s.done(RepairResult.ofToggle(true, "iris.jar", true));
+        assertNull(s.confirm());
+        s.state(s.state().live(1_000L + 30_000L, false)); // Still open even after 3x the normal restart countdown.
+        s.tick(host);
+        assertEquals(0, host.closes);
+    }
+
     @Test
     void escWalksOneDepthAtATimeAndOnlyLeavesFromTheList() {
         RepairSession s = RepairSample.session("optional");

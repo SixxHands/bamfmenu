@@ -281,6 +281,65 @@ class OpsBrainTest {
     }
 
     /**
+     * Verifies a held sync warns directly under the bcc version headline and advises restart now (not
+     * /bamfos repair, which would target the old ledger version and discard staged ops).
+     */
+    @Test
+    void statusLines_flagAHeldBackApply_andSayRestartNowAlone() {
+        List<String> lines = OpsBrain.statusLines(heldBack("v3", "v2"), true, 300, 120, -1, "", NOW);
+
+        assertTrue(lines.get(0).startsWith("version v3 |"), String.valueOf(lines.get(0)));
+        String flag = lines.get(1);
+        assertTrue(flag.contains("v3") && flag.contains("v2"), String.valueOf(flag));
+        assertTrue(flag.contains("bcc-common.toml") && flag.contains("ledger"), String.valueOf(flag));
+        assertTrue(flag.contains("/bamfos restart now"), flag);
+        assertFalse(flag.contains("repair"), String.valueOf(flag));
+        assertFalse(flag.contains("/bamfos sync"), flag);
+        assertEquals(flag.indexOf("/bamfos"), flag.lastIndexOf("/bamfos"), String.valueOf(flag));
+        assertFalse(flag.contains("finishes"), String.valueOf(flag));
+        assertTrue(lines.get(2).startsWith("last sync"));
+    }
+
+    /**
+     * Verifies the warning is gated on the held record, not a raw bcc/ledger mismatch, so hand-edited
+     * bcc files do not nag operators into pointless restarts.
+     */
+    @Test
+    void statusLines_heldGateKeepsOrdinaryDisagreementsQuiet() {
+        Map<String, Object> converged = heldBack("v3", "v2");
+        converged.put("last_sync_held", false);
+        List<String> quiet = OpsBrain.statusLines(converged, true, 300, 120, -1, "", NOW);
+        assertTrue(quiet.get(0).startsWith("version v3 |"), quiet.get(0));
+        assertTrue(quiet.get(1).startsWith("last sync"));
+        assertFalse(String.join(" | ", quiet).contains("bcc-common.toml"), String.join(" | ", quiet));
+
+        Map<String, Object> older = heldBack("v3", "v2");
+        older.remove("last_sync_held"); // a record written before the field existed, or none at all
+        List<String> alsoQuiet = OpsBrain.statusLines(older, true, 300, 120, -1, "", NOW);
+        assertTrue(alsoQuiet.get(1).startsWith("last sync"));
+        assertFalse(String.join(" | ", alsoQuiet).contains("bcc-common.toml"), String.join(" | ", alsoQuiet));
+    }
+
+    /** Regression test: status shouldn't claim we're on v3 while also saying a restart to v3 is pending. */
+    @Test
+    void statusLines_theVetoedBoardReadsCoherently() {
+        List<String> lines = OpsBrain.statusLines(heldBack("v3", "v2"), true, 300, 120, -1, "v3", NOW);
+
+        assertTrue(lines.get(0).startsWith("version v3 |"), lines.get(0));
+        assertTrue(lines.get(1).contains("v2") && lines.get(1).contains("/bamfos restart now"), String.valueOf(lines.get(1)));
+        String all = String.join(" | ", lines);
+        assertTrue(all.contains("You cancelled v3"), all);
+    }
+
+    /** Tests statusLines when a stamp is present, blocked by the ledger, and skipped by the last sync. */
+    private static Map<String, Object> heldBack(String stamp, String settled) {
+        Map<String, Object> m = state(stamp, "", false, "pending", NOW - 60_000);
+        m.put("settled", settled);
+        m.put("last_sync_held", true);
+        return m;
+    }
+
+    /**
      * Verifies statusLines surfaces UpdaterOps.status() errors without turning unread keys (token_dead,
      * last_sync_result) into false "ok" or "never" claims.
      */

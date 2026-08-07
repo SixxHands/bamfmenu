@@ -267,6 +267,17 @@ final class OpsBrain {
         out.add("version " + orUnknown(str(ops.get("version")))
                 + " | release lock " + (pin.isEmpty() ? "none" : pin)
                 + " | auto_restart " + (autoRestart ? "on" : "off"));
+        String stamp = str(ops.get("version"));
+        String settled = str(ops.get("settled"));
+        // Show the bcc version first, then warn below if a sync left pending files behind.
+        // Check the held-files record instead of a raw bcc/ledger mismatch so hand-edited bcc files don't nag,
+        // and tell admins to restart rather than run /bamfos repair (which would target the old ledger and drop staged ops).
+        if (Boolean.TRUE.equals(ops.get("last_sync_held")) && !settled.isEmpty() && !stamp.isEmpty()
+                && !settled.equals(stamp)) {
+            out.add("the ledger has this server on " + settled + ": the last sync could not replace every file, "
+                    + "so " + stamp + " is only what bcc-common.toml stamps. /bamfos restart now re-runs "
+                    + "the apply.");
+        }
         out.add("last sync " + lastSync(ops, now));
         out.add(!ops.containsKey("token_dead")
                 ? "token unknown, the read did not get that far."

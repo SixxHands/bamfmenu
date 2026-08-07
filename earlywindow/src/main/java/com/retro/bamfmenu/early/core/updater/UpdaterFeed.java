@@ -66,6 +66,8 @@ public final class UpdaterFeed {
     private boolean ended;
     private String syncedFrom;
     private String syncedTo;
+    /** Actual file count recorded by the engine (-1 when not reported, such as older engines or staged runs). */
+    private int landed = -1;
     private boolean pendingSwaps;
     private String closingRow; // Final status line when END isn't ok (null while still running).
     private final boolean shimPresent;
@@ -252,6 +254,8 @@ public final class UpdaterFeed {
             case "SYNCED" -> {
                 syncedFrom = f.length > 1 ? f[1] : "";
                 syncedTo = f.length > 2 ? f[2] : "";
+                // Older engines only send three fields; use -1 so we fall back to the planned count instead of 0.
+                landed = f.length > 3 ? parseInt(f, 3) : -1;
             }
             case "PENDING" -> pendingSwaps = true;
             case "END" -> {
@@ -379,6 +383,11 @@ public final class UpdaterFeed {
         }
         if (syncedFrom != null) {
             out.add(new Line(finale(), true));
+            // Also show below a version change so partial failures aren't hidden by "UPDATED FROM X TO Y".
+            int held = landed >= 0 ? planned - landed : 0;
+            if (held > 0) {
+                out.add(new Line(held + (held == 1 ? " FILE HELD BACK." : " FILES HELD BACK."), true));
+            }
         }
         if (pendingSwaps) {
             out.add(new Line("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", true));
@@ -450,16 +459,25 @@ public final class UpdaterFeed {
         return label + " " + ".".repeat(Math.max(3, 21 - label.length())) + " " + value;
     }
 
-    /** The pack host's CAPS finale, worded off whether the VERSION actually moved. A converged box runs a whole
-     *  sync on the routine repair path (an antivirus ate one managed jar), with the tag set to the version it
-     *  is already on, and the block used to close on BAMFOS UPDATED FROM v0.2.6 TO v0.2.6, which is the
-     *  brightest row on the screen saying nothing true. The engine sends no SYNCED at all when only its own
-     *  jars moved, so a zero here cannot happen. */
+    /**
+     * Builds the uppercase final status line from whether the version changed and how many files landed.
+     * Avoids printing "UPDATED FROM X TO X" on same-version repairs, and falls back to planned counts when `landed == -1`.
+     */
     private String finale() {
+        if (landed == 0 && planned > 0) {
+            // Planned downloads > 0 with zero landed: close on INCOMPLETE.
+            // `planned > 0` is required because delete-only rollbacks converge cleanly with zero downloads.
+            return "Update stopped ....... INCOMPLETE";
+        }
         if (!syncedFrom.equals(syncedTo)) {
             return "BAMFOS UPDATED FROM " + syncedFrom + " TO " + syncedTo + ".";
         }
-        return "BAMFOS REPAIRED " + planned + (planned == 1 ? " FILE ON " : " FILES ON ") + syncedTo + ".";
+        if (landed > 0 && landed < planned) {
+            return "BAMFOS REPAIRED " + landed + " OF " + planned + " FILES ON " + syncedTo + ".";
+        }
+        // The engine doesn't send SYNCED when only updater jars changed, so planned is always > 0 here.
+        int count = landed < 0 ? planned : landed;
+        return "BAMFOS REPAIRED " + count + (count == 1 ? " FILE ON " : " FILES ON ") + syncedTo + ".";
     }
 
     private static String dotted(String name) {

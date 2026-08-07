@@ -120,12 +120,16 @@ public final class RepairSession {
 
     /** Applies the worker result, clears the busy state, and displays the returned status line. */
     public void done(RepairResult result) {
-        if (result != null && result.kind() == RepairResult.Kind.RESTART_REQUIRED) {
+        if (result != null && result.kind().closesTheGame()) {
             // Start the exit countdown here rather than in the item since this session displays the countdown.
             closeAt = state.nowMillis() + FAREWELL_MS;
             rearmFarewell = true;
             farewellNanos = nanoClock.getAsLong();
-            if (!working.isEmpty()) {
+            if (result.restartCause() != null) {
+                // Prefer the restart cause from the result over the row label, since the label is a verb phrase
+                // ("Rolling back to v0.2.5") and the farewell text needs a noun.
+                closeCause = result.restartCause();
+            } else if (!working.isEmpty()) {
                 closeCause = working; // action label so the farewell dialog names what it is closing for
             }
         }

@@ -3,10 +3,13 @@ package com.retro.bamfos.updater.engine.door;
 import com.retro.bamfos.updater.engine.Fx;
 import com.retro.bamfos.updater.engine.bus.BootBus;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.JsonWriter;
 import com.retro.bamfos.updater.engine.json.MiniJson;
+import com.retro.bamfos.updater.engine.ledger.Ledger;
+import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.util.HashUtils;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -46,6 +49,9 @@ class ServerDoorTest {
     private static final byte[] ENGINE_NEW = "brand new engine".getBytes(StandardCharsets.UTF_8);
     private byte[] zip;
     private final java.util.concurrent.atomic.AtomicInteger goneHits = new java.util.concurrent.atomic.AtomicInteger();
+    /** Asset 3 is mods/m1.jar. Count requests to prove we skipped fetching a backed-off file instead of
+     * downloading and discarding it. */
+    private final java.util.concurrent.atomic.AtomicInteger m1Fetches = new java.util.concurrent.atomic.AtomicInteger();
 
     @BeforeEach
     void start() throws IOException {
@@ -77,6 +83,9 @@ class ServerDoorTest {
             if (ex.getRequestHeaders().getFirst("Authorization") != null) {
                 ex.sendResponseHeaders(400, -1);
                 return;
+            }
+            if (ex.getRequestURI().getPath().substring(4).equals("3")) {
+                m1Fetches.incrementAndGet();
             }
             byte[] body = switch (ex.getRequestURI().getPath().substring(4)) {
                 case "1" -> manifestT;
@@ -124,6 +133,7 @@ class ServerDoorTest {
     @AfterEach
     void stop() {
         server.stop(0);
+        HeldStrikes.PROBE_MILLIS = HeldStrikes.PROBE_DEFAULT; // Static fixture state, so reset it after tests that modify it.
     }
 
     @Test
@@ -597,6 +607,277 @@ class ServerDoorTest {
 
         assertFalse(Files.exists(engineDir.resolve("engine-rejected")));
         assertFalse(Files.exists(engineDir.resolve("engine-strikes")));
+    }
+
+    // #189: an incomplete same-version sync must never report ok.
+
+    private static final byte[] THEIR_M1 = "the operator's own build of m1".getBytes(StandardCharsets.UTF_8);
+
+    /** Pre-satisfy shim and engine and run one clean sync so the assertions below only test pack files
+     * (not pendingSelf). */
+    private void convergeOnVT() throws IOException {
+        Files.writeString(dir.resolve(ServerDoor.SHIM_PATH), new String(SHIM_NEW, StandardCharsets.UTF_8));
+        Files.createDirectories(dir.resolve(ServerDoor.ENGINE_PATH).getParent());
+        Files.writeString(dir.resolve(ServerDoor.ENGINE_PATH), new String(ENGINE_NEW, StandardCharsets.UTF_8));
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+        assertEquals("ok", lastSync().get("result"));
+    }
+
+    /** Setup helper: converges on vT, then wedges a .bak target with a non-empty directory so the
+     * same-version sync genuinely defers the row. */
+    private void wedgeOneRowOnVT() throws IOException {
+        Files.write(dir.resolve("mods/m1.jar"), THEIR_M1);
+        Ledger led = Ledger.load(Ledger.pathIn(dir));
+        led.files.get("mods/m1.jar").sha256 = "the-sha-we-placed-back-then";
+        led.save(Ledger.pathIn(dir));
+        // Remove the .bak file from the prior sync so we can put a non-empty directory there to make the copy fail.
+        Files.deleteIfExists(dir.resolve("mods/m1.jar.bak-vT"));
+        Files.createDirectories(dir.resolve("mods/m1.jar.bak-vT/wedge"));
+    }
+
+    private void clearTheWedge() throws IOException {
+        Files.delete(dir.resolve("mods/m1.jar.bak-vT/wedge"));
+        Files.delete(dir.resolve("mods/m1.jar.bak-vT"));
+    }
+
+    private Path strikesFile() {
+        return dir.resolve(".bamfos-updater").resolve("held-strikes");
+    }
+
+    /** A deferred row on a same-version sync leaves no journal and equal versions, yet last-sync.json
+     * must still record held/pending instead of ok so self-heal retries. */
+    @Test
+    void sameVersionDeferredRow_recordsPendingAndHeld() throws IOException {
+        convergeOnVT();
+        wedgeOneRowOnVT();
+
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false)); // Same tag on a normal boot (no repair flag).
+
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+        assertArrayEquals(THEIR_M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+        Ledger after = Ledger.load(Ledger.pathIn(dir));
+        assertEquals("vT", after.installedVersion);
+        assertEquals("the-sha-we-placed-back-then", after.files.get("mods/m1.jar").sha256);
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+    }
+
+    /** Abandoned journal ops delete the journal even on equal versions, so SyncCore's converged flag
+     * must stay false; called directly to bypass step 0. */
+    @Test
+    void abandonedOpErasesJournal_recordStaysPending() throws Exception {
+        convergeOnVT();
+        Journal leftover = new Journal();
+        leftover.targetVersion = "vT";
+        leftover.ops.add(new Journal.Op("move", ".bamfos-updater/staging/gone.part", "mods/dropped.jar",
+                HashUtils.sha256(M1)));
+        leftover.save(Journal.pathIn(dir));
+
+        assertEquals(0, SyncCore.sync(dir, UpdaterConfig.load(dir), "vT", "vT", false, false,
+                Reconciler.Side.SERVER, base, BootBus.headless(), true));
+
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+    }
+
+    /** Row-keyed strikes survive re-planned journals so a permanently blocked file settles without full
+     * re-audits every boot while keeping last-sync pending. */
+    @Test
+    void heldRow_givesUpDurably_repairRearms() throws IOException {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        wedgeOneRowOnVT();
+        ServerDoor door = new ServerDoor(base);
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS; boot++) {
+            assertEquals(0, door.run(dir, "vT", false));
+        }
+        int fetchesBefore = m1Fetches.get();
+        Files.writeString(serverLogPath(), ""); // Only check log lines from the final boot onward.
+
+        assertEquals(0, door.run(dir, "vT", false)); // the boot AFTER the last chance was spent
+
+        String log = Files.readString(serverLogPath(), StandardCharsets.UTF_8);
+        assertTrue(log.contains("exhausted their " + Journal.MAX_ATTEMPTS + " retries"), String.valueOf(log));
+        assertFalse(log.contains("full hash check"), String.valueOf(log));
+        assertEquals(fetchesBefore, m1Fetches.get());
+        assertTrue(log.contains("mods/m1.jar"), String.valueOf(log));
+        assertTrue(log.contains("manual repair"), String.valueOf(log));
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+
+        // Running with the repair flag should still retry even if the file is blocked.
+        assertEquals(0, door.run(dir, "vT", true));
+        assertTrue(m1Fetches.get() > fetchesBefore);
+
+        clearTheWedge();
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+        assertArrayEquals(THEIR_M1, Files.readAllBytes(dir.resolve("mods/m1.jar.bak-vT")));
+        assertEquals("ok", lastSync().get("result"));
+        assertEquals(Boolean.FALSE, lastSync().get("held"));
+        assertFalse(Files.exists(strikesFile()));
+    }
+
+    /** Strike keys include the op kind so strikes on a wedged .bak (REPLACE_BAK) never block restoring
+     * that jar if it later goes missing. */
+    @Test
+    void restoreIsNeverMaskedByReplaceBakStrikes() throws IOException {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        wedgeOneRowOnVT();
+        ServerDoor door = new ServerDoor(base);
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS; boot++) {
+            assertEquals(0, door.run(dir, "vT", false)); // spend every chance under REPLACE_BAK
+        }
+        // Switch to a different failure on the same file: ledger matches the manifest sha, but the jar is missing.
+        Ledger led = Ledger.load(Ledger.pathIn(dir));
+        led.files.get("mods/m1.jar").sha256 = HashUtils.sha256(M1);
+        led.save(Ledger.pathIn(dir));
+        Files.delete(dir.resolve("mods/m1.jar"));
+
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+        assertEquals("ok", lastSync().get("result"));
+        assertFalse(Files.exists(strikesFile()));
+    }
+
+    /** Spent rows self-heal once the .bak blocker clears or the re-probe interval elapses (shortened
+     * here instead of waiting a day). */
+    @Test
+    void clearedBlockerSelfHeals() throws IOException {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        wedgeOneRowOnVT();
+        ServerDoor door = new ServerDoor(base);
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS; boot++) {
+            assertEquals(0, door.run(dir, "vT", false));
+        }
+        assertEquals("pending", lastSync().get("result"));
+
+        clearTheWedge();
+        assertEquals(0, door.run(dir, "vT", false)); // Normal boot without the repair flag.
+
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+        assertEquals("ok", lastSync().get("result"));
+
+        // With a blocker that doesn't clear the .bak path, retries should wait until the backoff interval elapses.
+        wedgeOneRowOnVT();
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS; boot++) {
+            assertEquals(0, door.run(dir, "vT", false));
+        }
+        Files.delete(dir.resolve("mods/m1.jar.bak-vT/wedge")); // Clear the lock while leaving the .bak path occupied.
+        int fetchesBefore = m1Fetches.get();
+        assertEquals(0, door.run(dir, "vT", false));
+        assertEquals(fetchesBefore, m1Fetches.get());
+
+        HeldStrikes.PROBE_MILLIS = 0; // the interval elapses
+        assertEquals(0, door.run(dir, "vT", false));
+
+        assertArrayEquals(M1, Files.readAllBytes(dir.resolve("mods/m1.jar")));
+        assertEquals("ok", lastSync().get("result"));
+    }
+
+    /** When repair mode finds diverged on-disk bytes despite matching version and ledger sha, the run
+     * must still report non-converged. */
+    @Test
+    void repairModeDivergence_recordsPending() throws IOException {
+        convergeOnVT();
+        Files.writeString(dir.resolve("mods/m1.jar"), "drifted bytes nobody planned");
+        Files.createDirectories(dir.resolve("mods/m1.jar.bak-vT/wedge"));
+
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", true));
+
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+        Ledger after = Ledger.load(Ledger.pathIn(dir));
+        assertEquals(HashUtils.sha256(M1), after.files.get("mods/m1.jar").sha256);
+        assertEquals("vT", after.installedVersion);
+        assertEquals("drifted bytes nobody planned", Files.readString(dir.resolve("mods/m1.jar")));
+        assertFalse(Files.exists(Journal.pathIn(dir)));
+    }
+
+    /** After a diverged row exhausts strikes and non-repair sync skips it, last-sync must still read
+     * strike memory rather than flipping back to ok. */
+    @Test
+    void exhaustedRuleAShape_neverRewritesOk() throws IOException {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        Files.writeString(dir.resolve("mods/m1.jar"), "drifted bytes nobody planned");
+        Files.createDirectories(dir.resolve("mods/m1.jar.bak-vT/wedge"));
+        ServerDoor door = new ServerDoor(base);
+        assertEquals(0, door.run(dir, "vT", true)); // Repair run detects the drift (first strike).
+        for (int boot = 1; boot < Journal.MAX_ATTEMPTS; boot++) {
+            assertEquals(0, door.run(dir, "vT", false)); // selfHeal keeps re-deriving, and it keeps refusing
+        }
+        Files.writeString(serverLogPath(), "");
+
+        assertEquals(0, door.run(dir, "vT", false)); // settled, so this plan cannot even SEE the row
+
+        assertEquals("pending", lastSync().get("result"));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+        String summary = (String) lastSync().get("summary");
+        assertFalse(summary.startsWith("already current ("), String.valueOf(summary));
+        assertTrue(summary.contains("held back"), summary);
+        assertTrue(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("mods/m1.jar"));
+    }
+
+    /** Strikes are counted per boot, so an in-session staged /bamfos sync must neither increment nor
+     * clear them. */
+    @Test
+    void stagedRunsNeverTouchTheCounters() throws Exception {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        wedgeOneRowOnVT();
+        ServerDoor door = new ServerDoor(base);
+        UpdaterConfig cfg = UpdaterConfig.load(dir);
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS - 1; boot++) {
+            assertEquals(0, door.run(dir, "vT", false));
+            assertEquals(0, Doors.stagedServerSync(dir, cfg, "vT", "vT", false, base, BootBus.headless()));
+            assertEquals(Boolean.TRUE, lastSync().get("held"));
+        }
+
+        assertFalse(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("given up on"));
+
+        assertEquals(0, door.run(dir, "vT", false)); // the THIRD boot, and the bound is boots
+
+        assertTrue(Files.readString(serverLogPath(), StandardCharsets.UTF_8).contains("given up on"));
+    }
+
+    /** server-sync.log only adds a "next boot" note when a reboot will actually apply staged files,
+     * never for a held row. */
+    @Test
+    void aHeldRowsServerLine_promisesNoNextBoot() throws IOException {
+        convergeOnVT();
+        wedgeOneRowOnVT();
+        Files.writeString(serverLogPath(), "");
+
+        assertEquals(0, new ServerDoor(base).run(dir, "vT", false));
+
+        String log = Files.readString(serverLogPath(), StandardCharsets.UTF_8);
+        assertFalse(log.contains("staged files apply on the next boot"), String.valueOf(log));
+        assertTrue(log.contains("file(s) held back"), String.valueOf(log));
+    }
+
+    /** In-session staged syncs emit landed=-1 ("not measured") on the bus so the boot terminal does not
+     * misread 0 as an incomplete apply. */
+    @Test
+    void aStagedRun_sendsAnUnmeasuredLandedCount() throws Exception {
+        convergeOnVT();
+
+        assertEquals(0, Doors.stagedServerSync(dir, UpdaterConfig.load(dir), "vT2", "vT", false, base,
+                BootBus.at(dir)));
+
+        List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
+        assertTrue(bus.contains("SYNCED\tvT\tvT2\t-1"), String.valueOf(bus));
+        assertTrue(bus.contains("PENDING"), String.valueOf(bus));
+        assertEquals("staged", lastSync().get("result"));
+        assertEquals(Boolean.FALSE, lastSync().get("held"));
+        String summary = (String) lastSync().get("summary");
+        assertTrue(summary.startsWith("updated vT -> vT2 ("), String.valueOf(summary));
+        assertTrue(summary.endsWith(", some apply on next boot"), summary);
     }
 
     private Path serverLogPath() {

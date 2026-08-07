@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.reconcile;
 
 import com.retro.bamfos.updater.engine.factory.DiskSpace;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.jar.JarInfo;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.ledger.Ledger;
@@ -231,26 +232,61 @@ public final class Reconciler {
     // ---------------------------------------------------------------- apply
 
     /**
+     * Outcome of one apply(), exported so callers don't guess from version comparisons. `converged` is the
+     * exact predicate gating installedVersion; `recorded` counts vouched downloads, `deferred` untouched rows.
+     */
+    public record Applied(boolean converged, int recorded, int deferred) {
+    }
+
+    /**
      * Stages, verifies, runs dupe-modid guard, journals, replays, commits ledger, and deletes the journal.
      * A crash anywhere leaves either untouched disk or a completable local journal.
      */
-    public void apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher) throws IOException {
-        apply(plan, manifest, ledger, fetcher, Pulse.NONE, false);
+    public Applied apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher) throws IOException {
+        return apply(plan, manifest, ledger, fetcher, Pulse.NONE, false);
     }
 
     /**
      * In staged mode we stop after writing the journal (no replay or ledger); next boot's step 0 finishes
      * from staged bytes. Skips MERGE_SERVERS because a running session rewrites servers.dat.
      */
-    public void apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher, Pulse pulse, boolean staged) throws IOException {
+    public Applied apply(SyncPlan plan, Manifest manifest, Ledger ledger, Fetcher fetcher, Pulse pulse, boolean staged) throws IOException {
         Path staging = dir.resolve(".bamfos-updater").resolve("staging");
         Files.createDirectories(staging);
+        // Paths skipped in this run (already hit the failure limit, or backup failed). We don't
+        // download them, journal destructive ops for them, or update their ledger entries.
+        Set<String> deferred = new HashSet<>();
+        // the strike-seeded subset, kept apart because a seeded row never RAN this boot: there is no new
+        // evidence to count against it, and a probe run is exactly the boot where a row is NOT in this set
+        Set<String> seeded = new HashSet<>();
+        long now = System.currentTimeMillis();
+        for (Action a : plan.actions) {
+            String key = strikeSha(a);
+            if (key == null || !HeldStrikes.exhausted(dir, a.path(), key, a.kind().name(), now)) {
+                continue;
+            }
+            // Since the .bak filename stays the same on a fixed installedVersion, once the blocking
+            // file is gone we can retry immediately instead of waiting for the cooldown.
+            if (a.kind() == Kind.REPLACE_BAK
+                    && !Files.exists(dir.resolve(a.path() + ".bak-" + safe(ledger.installedVersion)))) {
+                continue;
+            }
+            // Seed inside apply instead of masking out of the plan, or installedVersion could commit over
+            // unlanded bytes.
+            deferred.add(a.path());
+            seeded.add(a.path());
+            System.out.println("[updater] " + a.path() + " held back, its " + Journal.MAX_ATTEMPTS
+                    + " retries are spent: run the repair pass to retry it now, or the next release re-arms it");
+        }
         Map<String, Path> stagedFiles = new HashMap<>();
         Map<Action, Path> toFetch = new LinkedHashMap<>();
         int stageIdx = 0;
         int reused = 0;
         long owed = 0;
         for (Action a : plan.downloads()) {
+            if (deferred.contains(a.path())) {
+                continue; // Skip downloading files we already gave up on.
+            }
             // Stage one temp file per manifest path, not per hash. Otherwise two identical files at
             // different paths would share a staged file and moving the first one would consume it.
             Path part = staging.resolve(a.entry().sha256() + "-" + (stageIdx++) + ".part");
@@ -295,12 +331,11 @@ public final class Reconciler {
 
         dupeGuard(plan, manifest, ledger, stagedFiles);
 
-        // paths this apply gives up on, so the journal never carries their destructive op and the ledger
-        // commit never speaks for them. Filled by the two courtesies that are allowed to fail below
-        Set<String> deferred = new HashSet<>();
-
         // .bak courtesies happen before the journal: a crash after a bak is only litter, never damage
         for (Action a : plan.actions) {
+            if (deferred.contains(a.path())) {
+                continue; // Don't create a .bak copy for a path we're already skipping.
+            }
             // Back up edited non-mod files before a rule-E delete (no replacement follows). Skip mods/ so we
             // don't hash and copy large removed jars.
             boolean bak = a.kind() == Kind.REPLACE_BAK
@@ -384,7 +419,9 @@ public final class Reconciler {
             journal.save(Journal.pathIn(dir));
         }
         if (staged) {
-            return;
+            // Staged runs don't apply changes yet, so report converged=false and 0 applied (callers
+            // summarize staged runs from the plan). The journal saved above will apply on reboot.
+            return new Applied(false, 0, deferred.size());
         }
         if (!journal.ops.isEmpty()) {
             pulse.applying(); // Only emit the apply phase when there are files to apply.
@@ -413,15 +450,22 @@ public final class Reconciler {
             unfinished.add(strip(op.to()));
         }
         boolean skipped = false;
+        // Derive the download set directly from plan.downloads() so counts stay in sync;
+        // refused and committed track failures for strike bookkeeping below.
+        Set<String> downloadPaths = new HashSet<>();
+        for (Action d : plan.downloads()) {
+            downloadPaths.add(d.path());
+        }
+        int recorded = 0;
+        List<Action> refused = new ArrayList<>();
+        Set<String> committed = new HashSet<>();
 
         for (Action a : plan.actions) {
             if (deferred.contains(a.path())) {
-                // FIRST, because a deferred row journaled nothing at all: the replay report below cannot speak
-                // for it and landed() would say true, since a deferred REPLACE_BAK left the player's file
-                // exactly where it was and a stat at that name sees a regular file. The ledger would then
-                // record the NEW sha over their OLD bytes and this rule would stop hashing that path, which is
-                // the one write nothing walks back. Both defer sites already printed their own why-line
+                // Skip deferred rows first: they weren't journaled, so landed() would stat the old file and
+                // wrongly commit the new sha over old bytes.
                 skipped = true;
+                refused.add(a);
                 continue;
             }
             if (unfinished.contains(a.path())) {
@@ -429,6 +473,7 @@ public final class Reconciler {
                 // overwrites, and a stuck delete must keep its ledger row so it isn't misread as untracked.
                 System.out.println("[updater] " + notRecorded(a));
                 skipped = true;
+                refused.add(a);
                 continue;
             }
             boolean placer = switch (a.kind()) {
@@ -438,7 +483,13 @@ public final class Reconciler {
             if (placer && !landed(a)) {
                 System.out.println("[updater] " + notRecorded(a));
                 skipped = true;
+                refused.add(a);
                 continue;
+            }
+            if (downloadPaths.contains(a.path())) {
+                // Count actions that reached commit. MERGE_SERVERS failures are intentionally contained
+                // and still counted here.
+                recorded++;
             }
             switch (a.kind()) {
                 case ADOPT, INSTALL, REPLACE, REPLACE_BAK, RESTORE -> {
@@ -482,13 +533,20 @@ public final class Reconciler {
                         en.orphanOnRemove = a.entry().onRemove() == FileEntry.OnRemove.ORPHAN;
                         en.mergeName = name;
                         ledger.files.put(a.path(), en);
+                        committed.add(a.path());
                     } catch (IOException e) {
                         System.out.println("[updater] servers.dat merge skipped: " + e.getMessage());
                     }
                 }
             }
+            if (a.kind() != Kind.MERGE_SERVERS) {
+                committed.add(a.path()); // MERGE_SERVERS adds itself to committed inside the try block; skipped merges aren't committed.
+            }
         }
-        if (replayed.allLanded() && !skipped) {
+        // Compute convergence once and use it both for the return value and the ledger commit
+        // so callers and the ledger never disagree.
+        boolean converged = replayed.allLanded() && !skipped;
+        if (converged) {
             // Only advance installed_version when every row landed: SyncCore.ledgerAgrees trusts it as the
             // pack-is-current shortcut even when bcc-common.toml updated ahead of a stuck sibling.
             ledger.installedVersion = manifest.pack().version();
@@ -500,6 +558,60 @@ public final class Reconciler {
             Files.deleteIfExists(Journal.pathIn(dir));
             pruneStaging(staging);
         }
+        strikes(plan, journal, replayed, refused, seeded, committed, now);
+        return new Applied(converged, recorded, deferred.size());
+    }
+
+    /**
+     * Updates held-file strikes after non-staged applies (skipped when staged so BIOS clicks don't burn
+     * boot attempts). Bumps refused rows, clears committed ones, and scrubs given-up ops from the journal.
+     */
+    private void strikes(SyncPlan plan, Journal journal, Journal.Result replayed, List<Action> refused,
+                         Set<String> seeded, Set<String> committed, long now) throws IOException {
+        Set<String> crossed = new HashSet<>();
+        for (Action a : refused) {
+            String key = strikeSha(a);
+            if (key == null || seeded.contains(a.path())) {
+                continue; // Skip actions without a strike key or that didn't run this boot.
+            }
+            if (HeldStrikes.bump(dir, a.path(), key, a.kind().name(), now)) {
+                crossed.add(a.path());
+            }
+        }
+        // Track failures for carried-over ops that aren't in the current plan. Key them by the
+        // journal op kind so they don't collide with planned action kinds.
+        Set<String> planPaths = new HashSet<>();
+        for (Action a : plan.actions) {
+            planPaths.add(a.path());
+        }
+        List<Journal.Op> unfinishedOps = new ArrayList<>(replayed.retryable());
+        unfinishedOps.addAll(replayed.abandoned());
+        for (Journal.Op op : unfinishedOps) {
+            String path = strip(op.to());
+            if (!planPaths.contains(path) && HeldStrikes.bump(dir, path, op.sha256(), op.kind(), now)) {
+                crossed.add(path);
+            }
+        }
+        HeldStrikes.clear(dir, committed);
+        if (!crossed.isEmpty() && Files.exists(Journal.pathIn(dir))) {
+            // Drop abandoned ops from the saved journal before returning, matching how stepZero drops
+            // pinned ops, so callers don't think a reboot still has pending work.
+            journal.ops.removeIf(op -> crossed.contains(strip(op.to())));
+            if (journal.ops.isEmpty()) {
+                Files.deleteIfExists(Journal.pathIn(dir));
+            } else {
+                journal.save(Journal.pathIn(dir));
+            }
+        }
+    }
+
+    /** Returns the hash portion of a strike key: manifest sha256 for downloads, the quarantine tag
+     *  for Q1 actions (where entry() is null), or null for actions that aren't strike-tracked. */
+    private static String strikeSha(Action a) {
+        if (a.entry() != null) {
+            return a.entry().sha256();
+        }
+        return a.kind() == Kind.QUARANTINE ? HeldStrikes.QUARANTINE_SHA : null;
     }
 
     /**

@@ -5,7 +5,9 @@ import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
+import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.ping.PortHold;
 import com.retro.bamfos.updater.engine.ping.UpdatingNotice;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
@@ -41,20 +43,20 @@ public final class ServerDoor {
         }
     }
 
-    /**
-     * The box repairing itself after a sync that did not land. A server has no BIOS and nobody watching it,
-     * so without this the honest `pending` in last-sync.json was written and then read by nothing: the box
-     * went on serving a half-applied pack until a human typed /bamfos status, and the only thing that would
-     * ever have re-tried is a restart the watchdog stops granting after two attempts.
-     * It is not extra github traffic. A repair fetches the same manifest an ordinary cycle does and
-     * downloads only the files that actually differ; what it adds is hashing every managed file locally,
-     * which is the work that finds bytes rule A skips. It stops on its own: the moment a cycle converges the
-     * record says ok and the next boot is ordinary again.
-     */
+    /** Enables self-heal repair after a partial or failed sync so an unattended server re-hashes
+     *  managed files and retries without extra downloads. Clears automatically once a sync converges. */
     private static boolean selfHeal(Path dir) {
         String last = SyncCore.lastSyncResult(dir);
         boolean held = SyncCore.lastSyncHeldFiles(dir);
         if (!SyncCore.needsRepair(last, held)) {
+            return false;
+        }
+        if (!"failed".equals(last) && HeldStrikes.allExhausted(dir, System.currentTimeMillis())) {
+            // All blocked rows have exhausted retries, so skip full re-hashing until a probe is due or manual
+            // repair runs (`failed` stays exempt since disk state is unknown). Log it so it isn't silent.
+            SyncCore.loud(dir, "blocked files have exhausted their "
+                    + Journal.MAX_ATTEMPTS + " retries (" + HeldStrikes.names(dir)
+                    + "), skipping them until manual repair or the next release");
             return false;
         }
         SyncCore.loud(dir, "last sync recorded \"" + last + "\""
@@ -82,6 +84,9 @@ public final class ServerDoor {
                     // Only an explicit repair flag clears engine/core refusals (checked before self-heal sets repair=true),
                     // so automatic self-heal never re-arms a known-bad engine into a rollback loop.
                     EngineHealth.forgiveRejectedEngines(dir);
+                    // Reset exhausted retry counters on a repair run so skipped files get 3 fresh attempts (automatic
+                    // self-heal never reaches this path, only an explicit repair or a new release).
+                    HeldStrikes.forgive(dir);
                 }
                 repair = repair || unproven || selfHeal(dir);
                 String tag = !tagOverride.isEmpty() ? tagOverride

@@ -156,18 +156,10 @@ public final class BootBus {
         emit("ADONE", state);
     }
 
-    /**
-     * The finale, owner-authored CAPS: hot result now, pending line only when swaps are staged.
-     * NO stdout mirror, unlike every other line on this bus, and that is the fix and not an oversight: the
-     * dedicated server runs this exact code from the wrapper's pre-JVM shim, so it printed
-     * BIOS UPDATE COMPLETE. REBOOT TO APPLY. into the wrapper console and logs/latest.log, on a box
-     * with no BIOS, at an operator who is not the one who reboots. Each side words its own console: the
-     * server has SyncCore.serverLog, the client prints the neutral summary, and the CAPS belong to the one
-     * surface that has a boot terminal to draw them on (UpdaterFeed.postBlock, which words these events).
-     */
-    public void synced(String from, String to, boolean pending) {
-        emit("SYNCED", from, to);
-        if (pending) {
+    // Final BIOS status lines (hot result + pending reboot notice if swaps were staged). Not mirrored to stdout so dedicated servers don't print BIOS lines.
+    public void synced(String from, String to, boolean rebootApplies, int landed) {
+        emit("SYNCED", from, to, Integer.toString(landed));
+        if (rebootApplies) {
             emit("PENDING");
         }
     }

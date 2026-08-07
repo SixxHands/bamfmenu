@@ -6,7 +6,12 @@ import com.retro.bamfmenu.early.core.updater.OpsBridge;
  * One-line action result for the panel.
  * This is the ONLY place raw engine return codes become user-facing text.
  */
-public record RepairResult(Kind kind, String message) {
+public record RepairResult(Kind kind, String message, String restartCause) {
+
+    /** Overload with no restart cause (used for everything except RESTART_REQUIRED). */
+    public RepairResult(Kind kind, String message) {
+        this(kind, message, null);
+    }
 
     /** Outcome category used by the page to pick a text color. */
     public enum Kind {
@@ -22,14 +27,23 @@ public record RepairResult(Kind kind, String message) {
          * Succeeded, and the game must close before it takes effect.
          * Separate kind (not a boolean on DONE) so callers cannot miss the farewell and exit flow.
          */
-        RESTART_REQUIRED
+        RESTART_REQUIRED;
+
+        /** True if this result requires closing the game. Stored on the enum so any new kind
+         *  has to declare it explicitly. */
+        public boolean closesTheGame() {
+            return this == RESTART_REQUIRED;
+        }
     }
 
     /* Exit codes for sync ops (repair, syncNow, syncTo). Code 5 gets a separate message because
        GitHub rate limits clear on their own within an hour and shouldn't look like a broken updater. */
     public static RepairResult ofSync(int code) {
         return switch (code) {
-            case 0 -> new RepairResult(Kind.STAGED, "Changes staged. Applies on next boot.");
+            // 0 stages bytes that only step 0 can place, so close the game now
+            // instead of leaving the player in the menu waiting on a next-boot update.
+            case 0 -> new RepairResult(Kind.RESTART_REQUIRED,
+                    "Update staged. It applies the next time you start the game.", "update");
             case 1 -> new RepairResult(Kind.REFUSED, "No release to sync to.");
             case 3 -> new RepairResult(Kind.REFUSED, "Another sync holds the lock.");
             case 4 -> new RepairResult(Kind.FAILED, "UPDATE TOKEN EXPIRED. Sync is dead until it is replaced.");

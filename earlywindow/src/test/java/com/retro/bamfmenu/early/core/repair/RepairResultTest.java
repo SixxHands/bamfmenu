@@ -14,8 +14,10 @@ class RepairResultTest {
 
     @Test
     void everySyncCodeGetsItsOwnHonestLine() {
-        assertEquals("Changes staged. Applies on next boot.", RepairResult.ofSync(0).message());
-        assertEquals(RepairResult.Kind.STAGED, RepairResult.ofSync(0).kind());
+        assertEquals("Update staged. It applies the next time you start the game.",
+                RepairResult.ofSync(0).message());
+        assertEquals(RepairResult.Kind.RESTART_REQUIRED, RepairResult.ofSync(0).kind());
+        assertEquals("update", RepairResult.ofSync(0).restartCause());
         assertEquals("No release to sync to.", RepairResult.ofSync(1).message());
         assertEquals("Sync failed. See the log.", RepairResult.ofSync(2).message());
         assertEquals("Another sync holds the lock.", RepairResult.ofSync(3).message());
