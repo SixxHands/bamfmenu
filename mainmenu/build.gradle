@@ -1,0 +1,88 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' // version inherited from root (1.0.11) - do NOT repeat it here
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+repositories {
+    mavenCentral()
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = project.neo_version
+
+    /* Client only: this mod is purely cosmetic and registers nothing on the server. */
+    runs {
+        client {
+            client()
+            // Keep dev run/ at the repo root so we don't boot into an empty folder and re-download the pack.
+            gameDirectory = rootProject.file('run')
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    // :earlywindow must ship as its own top-level jar in mods/ so FML discovers the early-window provider before mods load.
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Plain JUnit only: the tested classes here don't import Minecraft.
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+/* Build the early-window jar whenever the client run is prepared, and drop it into run/mods/ so the
+   dev run discovers it as a top-level provider jar (mirroring the production two-jar layout).
+   rootProject.file, same reason as gameDirectory above: the run folder did not move with this module. */
+tasks.register('copyEarlyWindowToRunMods', Copy) {
+    dependsOn ':earlywindow:jar'
+    from project(':earlywindow').tasks.named('jar')
+    into rootProject.file('run/mods')
+}
+tasks.matching { it.name == 'prepareClientRun' || it.name == 'prepareRunClient' }.configureEach {
+    dependsOn 'copyEarlyWindowToRunMods'
+}
+
+// Keep internal .md docs out of the shipped jar.
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties
+    }
+}

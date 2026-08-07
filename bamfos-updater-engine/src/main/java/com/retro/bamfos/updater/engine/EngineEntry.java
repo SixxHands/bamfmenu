@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine;
 
+import com.retro.bamfos.updater.engine.cargo.CoreCargo;
 import com.retro.bamfos.updater.engine.door.ClientDoor;
 import com.retro.bamfos.updater.engine.door.ServerDoor;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
@@ -36,6 +37,9 @@ public final class EngineEntry {
                 }
             }
         }
+        // extract the bundled core before running either door so baseline installs, manual drops, and
+        // factory resets still get a core even if no sync runs
+        CoreCargo.place(dir);
         if (server) {
             return new ServerDoor(GithubReleases.realApi()).run(dir, tag, repair);
         }

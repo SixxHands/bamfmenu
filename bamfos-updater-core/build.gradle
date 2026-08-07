@@ -1,0 +1,78 @@
+// Hot-updatable core loaded by the frozen stub. Manages the engine slot and ships embedded inside the engine jar so releases can update it.
+plugins {
+    id 'java-library'
+}
+
+version = updater_version
+group = mod_group_id
+
+base {
+    archivesName = 'bamfos-updater-core'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+repositories {
+    mavenCentral()
+}
+
+// core_generation must be 4 zero-padded digits (stub sorts lexically) and never 0000 (reserved for the bundled fallback).
+if (!(core_generation ==~ /\d{4}/) || core_generation == '0000') {
+    throw new GradleException("core_generation must be four digits and not the reserved floor 0000, got '"
+            + core_generation + "' (gradle.properties)")
+}
+
+// Test-only baseline engine jar for EngineGuard/EngineLoader tests (at runtime the core reads this from the stub jar).
+configurations {
+    baselineEngine {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+}
+
+dependencies {
+    baselineEngine project(':bamfos-updater-engine')
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def testBaselineDir = layout.buildDirectory.dir('generated-test-baseline')
+
+tasks.register('copyTestBaseline', Copy) {
+    from(configurations.baselineEngine) {
+        // Fixed resource path matching the stub: EngineLoader reads /baseline/bamfos-updater-engine.jar.
+        rename { 'bamfos-updater-engine.jar' }
+    }
+    into testBaselineDir.map { it.dir('baseline') }
+}
+
+sourceSets.test.resources.srcDir(testBaselineDir)
+
+tasks.named('processTestResources') {
+    dependsOn 'copyTestBaseline'
+}
+
+// Keep package README.md files out of the shipped jar.
+tasks.withType(ProcessResources).configureEach {
+    exclude '**/*.md'
+}
+tasks.named('jar') {
+    exclude '**/*.md'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// The boot stub reflects into CoreEntry.enter by name across an isolated classloader.
+tasks.named('jar') {
+    manifest {
+        attributes 'Implementation-Version': project.version
+    }
+}

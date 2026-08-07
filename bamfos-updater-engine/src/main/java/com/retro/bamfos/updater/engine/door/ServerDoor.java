@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.bus.BootBus;
+import com.retro.bamfos.updater.engine.cargo.CoreCargo;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
@@ -84,6 +85,8 @@ public final class ServerDoor {
                     // Only an explicit repair flag clears engine/core refusals (checked before self-heal sets repair=true),
                     // so automatic self-heal never re-arms a known-bad engine into a rollback loop.
                     EngineHealth.forgiveRejectedEngines(dir);
+                    // clear the refused-gen marker on repair so a previously rejected core can be retried on the next boot
+                    CoreCargo.forgiveRejectedCores(dir);
                     // Reset exhausted retry counters on a repair run so skipped files get 3 fresh attempts (automatic
                     // self-heal never reaches this path, only an explicit repair or a new release).
                     HeldStrikes.forgive(dir);

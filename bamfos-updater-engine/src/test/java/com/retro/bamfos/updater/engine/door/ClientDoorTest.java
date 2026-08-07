@@ -176,6 +176,28 @@ class ClientDoorTest {
                 Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log")));
     }
 
+    /** Sweep stale identical shim .new files on the packages-current fast path (SyncCore never runs here),
+     * while keeping a .new whose bytes actually differ. */
+    @Test
+    void aStagedShimThatIsAlreadyTheInstalledJar_isSweptOnACurrentBox() throws IOException {
+        bcc("vNEW");
+        Fx.write(dir, ".bamfos-updater/manifest-current.json", "{}".getBytes(StandardCharsets.UTF_8));
+        Ledger led = new Ledger();
+        led.installedVersion = "vNEW";
+        led.save(Ledger.pathIn(dir));
+        byte[] running = "the shim this box actually runs".getBytes(StandardCharsets.UTF_8);
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH, running);
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH + ".new", running);
+
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertFalse(Files.exists(dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new")));
+        assertArrayEquals(running, Files.readAllBytes(dir.resolve(SyncCore.SHIM_CLIENT_PATH)));
+
+        Fx.write(dir, SyncCore.SHIM_CLIENT_PATH + ".new", SHIM_NEW);
+        assertEquals(0, new ClientDoor(base).run(dir));
+        assertArrayEquals(SHIM_NEW, Files.readAllBytes(dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new")));
+    }
+
     /** Emit IDENT before taking the OS lock so a second instance doesn't leave the row stuck on
      * "Detecting ...". */
     @Test

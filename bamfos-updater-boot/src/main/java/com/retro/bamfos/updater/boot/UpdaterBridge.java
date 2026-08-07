@@ -2,17 +2,13 @@ package com.retro.bamfos.updater.boot;
 
 import java.util.function.BiFunction;
 
-/**
- * The shim's one same-floor handle (service floor may share classes; everything else
- * rides the file bus). The earlywindow's BIOS reaches the engine's UpdaterOps through here,
- * Class.forName this, call ops(...). Progress display does NOT come through here on purpose: it
- * tails .bamfos-updater/bus.log, which survives every classloader topology this can't.
- */
+/* Service-layer bridge so earlywindow's BIOS can call engine ops via reflection (progress bars tail
+ * bus.log instead). Do NOT move or rename this class, OpsBridge looks it up by literal string. */
 public final class UpdaterBridge {
 
     private static volatile BiFunction<String, Object[], Object> ops;
 
-    /** Bound by ClientLocator after the engine loads; absent engine or old engine = never bound. */
+    /** Bound by CoreSlot from the returned ops handle; stays unbound if no core or an older version ran. */
     static void bindOps(BiFunction<String, Object[], Object> invoker) {
         ops = invoker;
     }

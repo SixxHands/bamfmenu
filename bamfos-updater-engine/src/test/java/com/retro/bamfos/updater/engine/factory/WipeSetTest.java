@@ -116,6 +116,16 @@ class WipeSetTest {
         assertTrue(gone.contains(".bamfos-updater/staging/abc.part"));
     }
 
+    /** Core generation jars stay out of the wipe set because the stub runs from them during replay;
+     * tested directly so widening the walk to all of .bamfos-updater fails here. */
+    @Test
+    void aResetNeverNamesTheCoreLadder() throws IOException {
+        file(".bamfos-updater/core/core-0000.jar", "the floor, written out of the stub's own resources");
+        file(".bamfos-updater/core/core-0007.jar", "the generation this very JVM is running");
+        file(".bamfos-updater/core/core-unproven", "v1\tcore-0007.jar\t1\t2\t-");
+        assertTrue(deleted().stream().noneMatch(p -> p.startsWith(".bamfos-updater/core/")));
+    }
+
     /** Verify safe() rejects any finalized wipe list that contains a keeper path. */
     @Test
     void aKeeperInTheListIsRefusedNotQuietlyDropped() {

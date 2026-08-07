@@ -20,10 +20,69 @@ repositories {
     mavenCentral()
 }
 
+// Core jar ships embedded here as a resource and CoreCargo writes it to .bamfos-updater/core/ at runtime.
+// Resolvable config keeps this configuration-cache friendly.
+configurations {
+    cargoCore {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+}
+
 dependencies {
+    cargoCore project(':bamfos-updater-core')
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def cargoDir = layout.buildDirectory.dir('generated-cargo')
+
+tasks.register('copyCargoCore', Copy) {
+    from(configurations.cargoCore) {
+        // fixed resource name: CoreCargo reads /core/bamfos-updater-core.jar by this exact path, and the stub
+        // packs its own floor copy under the matching one
+        rename { 'bamfos-updater-core.jar' }
+    }
+    into cargoDir.map { it.dir('core') }
+}
+
+sourceSets.main.resources.srcDir(cargoDir)
+
+tasks.named('processResources') {
+    dependsOn 'copyCargoCore'
+}
+
+// Compile core_generation from gradle.properties into a constant so tests (classes dir) and shipped jars see the same value.
+def genDir = layout.buildDirectory.dir('generated-core-gen')
+
+tasks.register('generateCoreGen') {
+    def gen = core_generation.toString()
+    inputs.property('gen', gen)
+    outputs.dir(genDir)
+    def outDir = genDir
+    doLast {
+        File pkg = new File(outDir.get().asFile, 'com/retro/bamfos/updater/engine/cargo')
+        pkg.mkdirs()
+        new File(pkg, 'CoreGen.java').setText("""package com.retro.bamfos.updater.engine.cargo;
+
+/** Generated from core_generation in gradle.properties. Edit that, never this. */
+final class CoreGen {
+
+    static final String GEN = "${gen}";
+
+    private CoreGen() {
+    }
+}
+""", 'UTF-8')
+    }
+}
+
+sourceSets.main.java.srcDir(genDir)
+
+tasks.named('compileJava') {
+    dependsOn 'generateCoreGen'
 }
 
 // Keep package README.md files out of the shipped jar.
@@ -38,11 +97,11 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
-/* The boot shim reflects into this exact class+method; a rename here silently breaks the handoff.
-   Record the ABI level in the manifest so the shim can sanity-log what it loaded. */
+// Manifest metadata read by the boot shim, CoreCargo (before running a new engine), and release.py.
 tasks.named('jar') {
     manifest {
         attributes 'Updater-Abi': '1',
+                   'Updater-Core-Gen': core_generation,
                    'Implementation-Version': project.version,
                    // Stable module name for the watchdog's jar-in-jar embed.
                    'Automatic-Module-Name': 'bamfos.updater.engine'

@@ -1,22 +1,17 @@
 package com.retro.bamfos.updater.boot;
 
 /**
- * The shim's compiled ABI level -- the ONE ordered comparison in the whole system:
- * a manifest whose pack.updater_abi exceeds this is relaunch-class, because the running shim cannot be
- * trusted to process it. Bump ONLY when the shim<->engine handoff contract itself changes shape.
+ * Frozen stub ABI names. FML keeps this jar loaded for the entire session, so renaming keys breaks existing installs.
+ * Engine-specific names are in CoreAbi with their original string values unchanged.
  */
 public final class UpdaterAbi {
 
+    /** Compiled ABI level for the boot stub. Unused for now; only bump if the handoff signature changes. */
     public static final int ABI = 1;
 
-    /** The handoff contract the shim reflects into; EngineEntry documents the other side. */
-    public static final String ENGINE_ENTRY_CLASS = "com.retro.bamfos.updater.engine.EngineEntry";
-    public static final String ENGINE_ENTRY_METHOD = "enter";
-
-    /** The ops doorway, looked up ABSENCE-TOLERANT: an older engine without it just
-     *  leaves the BIOS surface unbound -- additive, so no ABI bump. */
-    public static final String OPS_GATEWAY_CLASS = "com.retro.bamfos.updater.engine.ops.OpsGateway";
-    public static final String OPS_INVOKE_METHOD = "invoke";
+    /** Entry method the boot stub calls via reflection; see CoreEntry for the implementation. */
+    static final String CORE_ENTRY_CLASS = "com.retro.bamfos.updater.core.CoreEntry";
+    static final String CORE_ENTRY_METHOD = "enter";
 
     private UpdaterAbi() {
     }

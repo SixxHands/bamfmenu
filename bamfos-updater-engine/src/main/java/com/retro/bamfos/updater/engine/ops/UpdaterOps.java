@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.ops;
 
 import com.retro.bamfos.updater.engine.bus.BootBus;
+import com.retro.bamfos.updater.engine.cargo.CoreCargo;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.door.Doors;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
@@ -176,6 +177,7 @@ public final class UpdaterOps {
                 return 1; // never synced, so there is no manifest to audit against and nothing to repair to
             }
             EngineHealth.forgiveRejectedEngines(dir); // Same engine-rejection reset as BIOS repair; see repair().
+            CoreCargo.forgiveRejectedCores(dir);
             return stagedSync(cfg, tag, true, true);
         } catch (IOException e) {
             return 2;
@@ -449,6 +451,8 @@ public final class UpdaterOps {
             // Clear rejected-engine strikes on repair so a false-positive probation failure doesn't pin this
             // install to an older engine until a new build ships.
             EngineHealth.forgiveRejectedEngines(dir);
+            // Also clear rejected core jars so the engine can re-download them on the next boot.
+            CoreCargo.forgiveRejectedCores(dir);
             return stagedSync(cfg, tag, true, false);
         } catch (IOException e) {
             return 2;

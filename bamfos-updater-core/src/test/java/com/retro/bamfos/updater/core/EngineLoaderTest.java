@@ -1,4 +1,4 @@
-package com.retro.bamfos.updater.boot;
+package com.retro.bamfos.updater.core;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -20,9 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The M0 handoff proof. Uses the REAL embedded baseline resource (the engine jar the build packed
- * into this module's resources), so a green run means: baseline embedding works, atomic extraction
- * works, the isolated classloader finds EngineEntry, and enter() round-trips.
+ * End-to-end EngineLoader check against the real embedded baseline jar: verifies atomic
+ * extraction, isolated classloading of EngineEntry, and enter() round-trip.
  */
 class EngineLoaderTest {
 
@@ -46,16 +45,22 @@ class EngineLoaderTest {
         Files.createDirectories(enginePath().getParent());
         Files.write(enginePath(), new byte[]{0x00, 0x01, 0x02, 0x03}); // not a jar at all
         EngineLoader.Engine engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
-        assertEquals(0, engine.enter(new String[]{}));
+        // pass a temp dir to all enter() calls; without it, the real engine defaults to "."
+        // and CoreCargo.place writes .bamfos-updater/core/core-0001.jar into the repo
+        assertEquals(0, engine.enter(new String[]{"--dir", tmp.toString()}));
         engine.loader().close();
     }
 
+    /**
+     * Verifies the engine classloader cannot see core classes. Uses CoreAbi (present on this test
+     * classpath) so ClassNotFoundException proves isolation rather than an absent class.
+     */
     @Test
-    void engineIsIsolatedFromBootClasses() throws Exception {
+    void engineIsIsolatedFromCoreClasses() throws Exception {
         EngineLoader.Engine engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
-        // the engine's loader must NOT see boot classes: platform parent, no delegation to us
+        // engine classloader must NOT see core classes (platform parent, no delegation to core)
         assertThrows(ClassNotFoundException.class,
-                () -> Class.forName("com.retro.bamfos.updater.boot.UpdaterAbi", false, engine.loader()));
+                () -> Class.forName("com.retro.bamfos.updater.core.CoreAbi", false, engine.loader()));
         engine.loader().close();
     }
 
@@ -67,21 +72,13 @@ class EngineLoaderTest {
     }
 
     /**
-     * The promotion itself, and it is the ONE hinge of the whole hot-updatable-engine design: SyncCore stages
-     * bamfos-updater-engine.jar.new and nothing else on the client ever swaps it in. Deleting that call left
-     * every other test in here green, because four of them never stage a .new at all and the locked-swap one
-     * asserts the staged file SURVIVES, which is also exactly what "never attempted" looks like. Shipped that
-     * way the engine is frozen on whatever jar is on disk forever while every sync re-stages the same .new,
-     * pendingSelf stays true, and the POST block ends on "BIOS UPDATE COMPLETE. REBOOT TO APPLY." with
-     * from == to for as long as the player keeps rebooting.
-     * The baseline supplier is the witness that tells a real promotion from the corrupt-jar re-extract: junk
-     * sits in the engine slot, so only the swap can produce a loadable engine, and asking for the baseline
-     * proves the fallback ran instead.
+     * Proves ensureAndLoad promotes a staged .new jar rather than leaving it untouched.
+     * Puts junk in the engine slot and fails if the baseline supplier runs, proving the swap won.
      */
     @Test
     void stagedNew_isPromotedIntoTheEngineSlot_withoutFallingBackToTheBaseline() throws Exception {
         Files.createDirectories(enginePath().getParent());
-        Files.write(enginePath(), new byte[]{0x00, 0x01, 0x02, 0x03}); // not a jar: only the swap saves this
+        Files.write(enginePath(), new byte[]{0x00, 0x01, 0x02, 0x03}); // invalid jar; only the fallback swap can recover from this
         Path staged = enginePath().resolveSibling(enginePath().getFileName() + ".new");
         try (InputStream real = EngineLoader.embeddedBaseline().get()) {
             Files.copy(real, staged);
@@ -94,7 +91,7 @@ class EngineLoaderTest {
         });
         try {
             assertFalse(Files.exists(staged));
-            assertEquals(0, engine.enter(new String[]{}));
+            assertEquals(0, engine.enter(new String[]{"--dir", tmp.toString()}));
             assertFalse(askedForBaseline.get());
         } finally {
             engine.loader().close();
@@ -102,11 +99,8 @@ class EngineLoaderTest {
     }
 
     /**
-     * The double-launch tmp collision: everything ensureAndLoad does to the slot runs before any InstanceLock
-     * exists, and extract used to share one literal <target>.tmp with EngineGuard's copyThroughTmp, so process
-     * A's move could promote process B's half-written bytes into engine.jar (and from there over .good). The
-     * planted file below is the sibling's in-flight tmp under that old shared name: not ours to write through
-     * or consume, and a run that ate it is the shared name back.
+     * Verifies extract uses a pid-scoped temp file instead of <target>.tmp so siblings running
+     * before InstanceLock cannot consume each other's half-written bytes.
      */
     @Test
     void extractNeverTouchesASiblingsInFlightTmp() throws Exception {
@@ -124,12 +118,7 @@ class EngineLoaderTest {
         assertArrayEquals(midWrite, Files.readAllBytes(siblingTmp));
     }
 
-    /**
-     * The other half of owning the tmp name: a leftover under the shared name used to get recycled by the
-     * next extract's REPLACE_EXISTING, but a pid-named tmp is ours alone and nothing else will ever take it,
-     * so the failure path has to delete it or every failed extract squats another half-jar in the engine
-     * folder forever.
-     */
+    /** Failed extracts must delete their pid-scoped temp file rather than leaking half-written jars. */
     @Test
     void aFailedExtractCleansUpItsOwnTmp() throws Exception {
         Files.createDirectories(enginePath().getParent());
@@ -148,15 +137,9 @@ class EngineLoaderTest {
     }
 
     /**
-     * The second-window case, and the reason the swap is not allowed to throw: instance A holds engine.jar
-     * open through the URLClassLoader load() deliberately never closes, so instance B's swap of a staged
-     * engine.jar.new hits a Windows sharing violation. That has to cost the SWAP and nothing else, because the
-     * jar on disk was fine the whole time and letting it escape means no sync, no ops binding and a BIOS
-     * reading NOT INSTALLED for the whole session.
-     * WINDOWS-ONLY as a declared fact, NOT an assumeTrue on the file's survival: POSIX renames over an open
-     * file happily, so there is no refusal to survive there, and reading the staged file's absence as "the
-     * platform took it" would swallow a real regression, a promoteStaged that LOSES that file on its failure
-     * path aborts the run and JUnit reports the whole thing green.
+     * When another instance locks engine.jar on Windows, a refused swap must not throw: keep
+     * loading the current engine and leave .new intact for next boot. Windows-only (not assumeTrue
+     * on .new survival) because POSIX renames over open files and would hide regressions.
      */
     @Test
     @EnabledOnOs(OS.WINDOWS)
@@ -168,7 +151,7 @@ class EngineLoaderTest {
         try {
             engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
             assertTrue(Files.isRegularFile(staged));
-            assertEquals(0, engine.enter(new String[]{}));
+            assertEquals(0, engine.enter(new String[]{"--dir", tmp.toString()}));
         } finally {
             if (engine != null) {
                 engine.loader().close();

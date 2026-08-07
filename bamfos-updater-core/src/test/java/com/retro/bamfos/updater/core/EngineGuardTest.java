@@ -1,4 +1,4 @@
-package com.retro.bamfos.updater.boot;
+package com.retro.bamfos.updater.core;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -24,10 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Boot-once-verify, the P0 guard: an engine that LOADS but does not WORK used to brick a box forever, and the
- * measured way in was the release's own engine asset being an OLD build. Every engine in here is a REAL
- * loadable jar built off the embedded baseline, because that is the whole difficulty of the bug, the corrupt-jar
- * fallback never sees it.
+ * Tests boot-once probation rollback using real loadable engine jars from the embedded baseline,
+ * covering engines that load fine but fail at runtime (where corrupt-jar fallback never runs).
  */
 class EngineGuardTest {
 
@@ -42,9 +40,10 @@ class EngineGuardTest {
         return enginePath().resolveSibling(enginePath().getFileName() + ".new");
     }
 
-    /** One boot of the shim: judge, promote, load. The loader is closed right away because Windows will not let
-     *  the NEXT boot replace a jar this test still holds open, which is the very refusal the last test here
-     *  exists to prove. */
+    /**
+     * Simulates one shim boot (check, promote, load) and closes the loader right away so Windows
+     * lets the next boot replace the jar.
+     */
     private void boot() throws IOException {
         EngineLoader.Engine engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
         engine.loader().close();
@@ -57,13 +56,13 @@ class EngineGuardTest {
         install(good);
         Files.copy(brick, staged());
 
-        boot(); // the release's engine goes in
+        boot(); // stage the new engine jar from the release
         assertArrayEquals(bytes(brick), bytes(enginePath()));
         assertTrue(Files.isRegularFile(EngineGuard.probation(enginePath())));
         assertTrue(Files.isRegularFile(EngineGuard.good(enginePath())));
         assertArrayEquals(bytes(good), bytes(EngineGuard.good(enginePath())));
 
-        boot(); // it never cleared the flag, so THIS boot is the verdict
+        boot(); // previous boot never cleared the flag, so this boot rolls it back
         assertArrayEquals(bytes(good), bytes(enginePath()));
         assertFalse(Files.exists(EngineGuard.probation(enginePath())));
         assertEquals(List.of(EngineGuard.sha256(brick) + "\t1"),
@@ -72,9 +71,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The strike rule's other side, because forgiving forever would be the flap this guard was built to bound: the
-     * release keeps naming that engine asset until the pack host publishes a new one, so every sync re-stages the
-     * same bad jar. Two chances, then those bytes are done, which is two wasted boots instead of infinite.
+     * Two strikes permanently reject that engine sha so syncs stop re-staging the same broken
+     * release every boot.
      */
     @Test
     void aSecondUnprovenBootOfTheSameBytes_burnsThemForGood() throws Exception {
@@ -85,13 +83,12 @@ class EngineGuardTest {
         Files.copy(brick, staged());
         boot(); // promoted, armed
         boot(); // rolled back, strike 1
-        Files.copy(brick, staged()); // the release still names it, so the next sync stages it again
+        Files.copy(brick, staged()); // release still lists this version, so the next sync stages it again
         boot(); // promoted again, armed again
         boot(); // rolled back, strike 2
 
         assertArrayEquals(bytes(good), bytes(enginePath()));
-        // asserted present BEFORE it is read, because a guard that forgives forever is the flap this list bounds and
-        // that has to read as a failed assertion, never as a NoSuchFileException nobody can interpret
+        // Assert the file exists before reading so a missing guard file fails cleanly instead of throwing NoSuchFileException.
         assertTrue(Files.isRegularFile(EngineGuard.rejects(enginePath())));
         assertTrue(Files.readAllLines(EngineGuard.rejects(enginePath()), StandardCharsets.UTF_8).get(0)
                         .startsWith(EngineGuard.sha256(brick) + "\t"));
@@ -102,9 +99,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The anti-flap half, and without it the guard makes things WORSE instead of better: the release keeps
-     * naming that engine asset until the pack host publishes a new one, so every sync re-stages the same bad jar.
-     * Promote, reject, promote, reject means a box that only syncs every other boot, forever.
+     * Once a sha is rejected, promoteStaged must refuse it instead of alternating promote and
+     * rollback every other boot until a new release ships.
      */
     @Test
     void aRejectedEngine_isNeverPromotedAgain() throws Exception {
@@ -119,8 +115,10 @@ class EngineGuardTest {
         assertTrue(Files.isRegularFile(staged()));
     }
 
-    /** The false-positive direction, which matters more than the catch: an engine that reported a working run
-     *  must be untouchable, or the guard downgrades a healthy box every time it updates. */
+    /**
+     * An engine that already reported a healthy run must not be rolled back,
+     * or the guard would downgrade working installs on every update.
+     */
     @Test
     void provenEngine_isLeftAloneOnTheNextBoot() throws Exception {
         Path good = engineJar("known-good");
@@ -129,7 +127,7 @@ class EngineGuardTest {
         Files.copy(fresh, staged());
         boot();
 
-        // exactly what EngineHealth.proven does from inside the engine, one deleteIfExists
+        // mirrors what EngineHealth.proven() does from inside the engine
         Files.delete(EngineGuard.probation(enginePath()));
 
         boot();
@@ -137,10 +135,10 @@ class EngineGuardTest {
         assertFalse(Files.exists(EngineGuard.rejects(enginePath())));
     }
 
-    /** The cross-module contract, and this is the ONLY place it can be checked: the shim and the engine never
-     *  link, so the flag's name is duplicated in EngineGuard and EngineHealth. Rename it on one side and every
-     *  box quietly rolls its engine back one build on the boot after it updates. Loaded the way the shim loads
-     *  the engine, out of the embedded baseline, so the assertion is on real engine bytes. */
+    /**
+     * Checks that EngineGuard and the embedded engine use the same probation flag name.
+     * The modules aren't linked at compile time, so renaming one side would roll back every engine update.
+     */
     @Test
     void theEnginesOwnClearCall_landsOnTheFlagTheGuardWatches() throws Exception {
         boot(); // materializes the baseline engine into the slot
@@ -153,8 +151,10 @@ class EngineGuardTest {
         assertFalse(Files.exists(EngineGuard.probation(enginePath())));
     }
 
-    /** A box that has never promoted an engine has no rollback copy, and the shim is still carrying a known
-     *  good image: its own twin. Better than giving up, because giving up here is the brick. */
+    /**
+     * A fresh install that has never promoted an engine has no rollback copy, so fall back to
+     * the bundled baseline jar in the shim instead of failing the boot.
+     */
     @Test
     void withNoRollbackCopy_theShimsBaselineIsTheLastResort() throws Exception {
         Path brick = engineJar("brick");
@@ -169,12 +169,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The .good copy is not always READABLE, and giving up there kept booting the unproven engine while a known
-     * good image sat inside the shim jar untouched. An AV holding or quarantining a jar copy in a hidden
-     * dot-folder is exactly the shape heuristic scanners grab, so the last resort has to be reachable from a
-     * .good that exists as well as from one that never did.
-     * WINDOWS-ONLY as a declared fact: the lock below is what makes the read fail, and POSIX advisory locks do
-     * not stop another handle reading the file, so there the assertion would be measuring the platform.
+     * An unreadable .good (e.g. AV lock) must fall through to the embedded baseline instead of
+     * keeping the unproven engine. Windows-only because POSIX advisory locks don't block reads.
      */
     @Test
     @EnabledOnOs(OS.WINDOWS)
@@ -195,8 +191,10 @@ class EngineGuardTest {
         assertFalse(Files.exists(EngineGuard.probation(enginePath())));
     }
 
-    /** The baseline ships inside the shim, so it is known good by definition and must never inherit the
-     *  verdict that was hanging over the jar it replaced, or the next boot rolls the baseline back. */
+    /**
+     * The embedded baseline jar is known-good, so restoring it must clear any pending
+     * failure marker or the next boot will roll the baseline back too.
+     */
     @Test
     void aReExtractedBaseline_isNeverLeftOnProbation() throws Exception {
         Files.createDirectories(enginePath().getParent());
@@ -206,11 +204,8 @@ class EngineGuardTest {
     }
 
     /**
-     * at the rollback: a second instance of this profile holds engine.jar open for its whole session and
-     * Windows refuses to replace an open file. That has to cost the RESTORE and nothing else, and the verdict
-     * has to survive for the next boot instead of being spent on a rollback that never landed.
-     * WINDOWS-ONLY as a declared fact, not an assumeTrue: POSIX renames over an open file happily, so there is
-     * no refusal to survive there and the assertions below would be measuring the platform.
+     * If another instance locks engine.jar during rollback, fail cleanly and keep probation armed
+     * for the next boot. Windows-only because POSIX renames over open files.
      */
     @Test
     @EnabledOnOs(OS.WINDOWS)
@@ -220,7 +215,7 @@ class EngineGuardTest {
         install(brick);
         Files.copy(good, EngineGuard.good(enginePath()));
         Files.writeString(EngineGuard.probation(enginePath()), EngineGuard.sha256(brick));
-        EngineLoader.Engine held = EngineLoader.load(enginePath()); // the other instance, jar open all session
+        EngineLoader.Engine held = EngineLoader.load(enginePath()); // simulate another instance keeping the jar open
         try {
             EngineLoader.Engine engine = EngineLoader.ensureAndLoad(enginePath(), EngineLoader.embeddedBaseline());
             engine.loader().close();
@@ -234,12 +229,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The double-launch, which is the case InstanceLock exists for and the one the flag's content
-     * decides: instance 1 promoted an engine seconds ago and is mid-sync behind it, instance 2 finds the flag
-     * armed. Without the pid stamp instance 2 cannot tell that from "a previous boot failed", so on POSIX (where
-     * a replace over an open jar SUCCEEDS) it rolled the healthy engine back, struck its sha, and deleted the
-     * flag out from under the process that was about to clear it honestly.
-     * A foreign LIVE pid is the only way to make this real, the same pick ServerDoorTest uses for the lock file.
+     * Double-launch guard: a live foreign pid in the probation flag means a sibling is mid-sync,
+     * so skip rollback and leave the flag intact.
      */
     @Test
     void aFlagArmedByAProcessThatIsStillRunning_isNotJudgedYet() throws Exception {
@@ -260,18 +251,15 @@ class EngineGuardTest {
         assertTrue(Files.isRegularFile(EngineGuard.probation(enginePath())));
         assertFalse(Files.exists(EngineGuard.strikes(enginePath())));
 
-        // the control: the same stamp naming a pid nobody owns IS judged, or a stale stamp freezes the guard
+        // a stamp with a dead PID must still be evaluated so stale stamps don't freeze the guard
         Files.writeString(EngineGuard.probation(enginePath()), EngineGuard.sha256(running) + "\t999999999\t1");
         boot();
         assertArrayEquals(bytes(good), bytes(enginePath()));
     }
 
     /**
-     * The tmp collision inside that same unserialized window: rollbackUnproven and promoteStaged run before
-     * any InstanceLock exists, and copyThroughTmp shared its literal <target>.tmp name with extract, so two
-     * processes judging the same dead flag could hand one's move the other's half-written bytes, into
-     * engine.jar or, through keepKnownGood, over the .good rollback image itself. The planted file is the
-     * sibling's in-flight tmp under that old shared name; a rollback that eats it is the collision back.
+     * Verifies copyThroughTmp uses a pid-scoped temp file instead of <target>.tmp so siblings
+     * running before InstanceLock cannot consume each other's half-written jar.
      */
     @Test
     void aRollbackNeverTouchesASiblingsInFlightTmp() throws Exception {
@@ -292,12 +280,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The pid-named tmp's other duty on the guard side: a leftover under the shared name used to get recycled
-     * by whoever wrote through it next, ours never will be, so the failure path has to delete it itself.
-     * keepKnownGood is the one copy whose refused move nobody downstream covers (a refused restore is
-     * followed by an extract that reuses and cleans the same name), so a leftover here squats a full engine
-     * copy beside .good forever. WINDOWS-ONLY for the same reason the refused-rollback test is: POSIX renames
-     * over an open file happily, so there the move lands and the failure path never runs.
+     * Failed keepKnownGood moves must clean up their pid-scoped temp file instead of leaking a
+     * full jar copy. Windows-only because POSIX renames over open files.
      */
     @Test
     @EnabledOnOs(OS.WINDOWS)
@@ -307,7 +291,7 @@ class EngineGuardTest {
         install(current);
         Files.copy(engineJar("old-good"), EngineGuard.good(enginePath()));
         Files.copy(next, staged());
-        // pins .good open the way a second instance pins engine.jar, so the REPLACE move onto it is refused
+        // keep .good open like another instance locking engine.jar so replacing it fails
         EngineLoader.Engine holdsGood = EngineLoader.load(EngineGuard.good(enginePath()));
         try {
             boot();
@@ -321,12 +305,8 @@ class EngineGuardTest {
     }
 
     /**
-     * The one branch that stops a FAILED rollback from destroying the last known-good engine, and it is reachable:
-     * probation armed, the restore refused (a second instance holds engine.jar), and a staged engine.jar.new
-     * waiting. Delete keepKnownGood's probation check and promoteStaged copies the UNPROVEN jar over .good, so
-     * every later rollback restores the brick and the guard permanently installs the failure it exists to undo.
-     * WINDOWS-ONLY for the same reason the refused-rollback test is: POSIX renames over an open file happily, so
-     * there the restore lands, the flag clears, and the branch is never reached at all.
+     * If rollback fails (probation still armed), keepKnownGood must NOT overwrite .good with the
+     * unproven jar during a later promote. Windows-only because POSIX lets rollback succeed.
      */
     @Test
     @EnabledOnOs(OS.WINDOWS)
@@ -338,7 +318,7 @@ class EngineGuardTest {
         Files.copy(good, EngineGuard.good(enginePath()));
         Files.writeString(EngineGuard.probation(enginePath()), EngineGuard.sha256(unproven));
         Files.copy(next, staged());
-        EngineLoader.Engine held = EngineLoader.load(enginePath()); // the other instance, jar open all session
+        EngineLoader.Engine held = EngineLoader.load(enginePath()); // simulate another instance keeping the jar open
         try {
             boot();
             assertArrayEquals(bytes(good), bytes(EngineGuard.good(enginePath())));
@@ -348,10 +328,8 @@ class EngineGuardTest {
     }
 
     /**
-     * A promoted engine that cannot even LOAD never reached a verdict: the baseline re-extract that saves the
-     * boot clears the flag on its way past (the baseline is not on trial), so nothing was ever held against those
-     * bytes and the sync re-downloaded, re-promoted and re-failed them on EVERY boot for the life of that
-     * release. A release naming an engine built for a newer Java is exactly that, LinkageError every time.
+     * A promoted jar that fails to load (e.g. LinkageError) must still take a strike before
+     * baseline re-extract clears probation, preventing endless re-download loops.
      */
     @Test
     void anEngineThatCannotEvenLOAD_earnsItsStrikesToo() throws Exception {
@@ -359,9 +337,9 @@ class EngineGuardTest {
         byte[] garbage = "not a jar at all".getBytes(StandardCharsets.UTF_8);
 
         Files.write(staged(), garbage);
-        boot(); // promoted, fails to load, the baseline saves the boot
+        boot(); // promoted jar fails to load, so we fall back to the baseline
         assertArrayEquals(baseline(), bytes(enginePath()));
-        Files.write(staged(), garbage); // the release still names it, so the next sync stages it again
+        Files.write(staged(), garbage); // release still lists this version, so the next sync stages it again
         boot(); // strike 2 burns it
 
         Files.write(staged(), garbage);
@@ -370,10 +348,9 @@ class EngineGuardTest {
         assertTrue(Files.isRegularFile(staged()));
     }
 
-    // ---- fixtures: real loadable engine jars that are not each other ----
+    // test fixtures: distinct loadable engine jars
 
-    /** The embedded baseline plus one marker entry: loads exactly like the engine does (that is the point of
-     *  this whole guard) while hashing differently, so a restore is provable by bytes. */
+    /** Builds a valid engine jar from the baseline plus an extra marker entry so it has a different hash. */
     private Path engineJar(String marker) throws IOException {
         Path out = tmp.resolve(marker + ".jar");
         try (ZipInputStream zin = new ZipInputStream(EngineLoader.embeddedBaseline().get());

@@ -9,7 +9,9 @@ import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.util.HashUtils;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,6 +64,7 @@ public final class ClientDoor {
                 return EngineHealth.proven(dir, 0);
             }
             try (InstanceLock ignored = lock.get()) {
+                sweepStagedShim(dir);
                 // Pass the bus so large replays (like a factory reset) render progress. True means post-replay
                 // verification found a mismatch, which must bypass the up-to-date shortcut below.
                 boolean unproven = SyncCore.stepZero(dir, bus, cfg.pins());
@@ -229,6 +232,31 @@ public final class ClientDoor {
             return "updater: repository unreachable, continuing boot";
         }
         return "updater: sync aborted, continuing boot";
+    }
+
+    /**
+     * Clears a staged client shim that is already the jar on disk. Nothing on this side promotes
+     * mods/bamfos-updater-boot.jar.new, so the day the player hand replaces the jar or takes a pack
+     * re-ship, the staged copy stops being a waiting update and becomes litter he was told to expect once and
+     * then never hears about again. Bytes decide, never the name: a DIFFERENT .new is a real waiting update
+     * and SyncCore's shim-waiting line still owns it.
+     * IT HAS TO BE HERE, above the is-it-current shortcut, and not in SyncCore's self loop. That loop
+     * CONTINUES the moment the sha matches, and this door returns at the packages-current gate before
+     * sync() is ever called, which is nearly every boot of exactly the boxes holding the litter.
+     */
+    private static void sweepStagedShim(Path dir) {
+        Path staged = dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new");
+        Path installed = dir.resolve(SyncCore.SHIM_CLIENT_PATH);
+        try {
+            if (Files.isRegularFile(staged) && Files.isRegularFile(installed)
+                    && HashUtils.sha256(staged).equals(HashUtils.sha256(installed))) {
+                Files.delete(staged);
+                System.out.println("[updater] " + SyncCore.SHIM_CLIENT_PATH + ".new held the jar that is "
+                        + "already installed, so it was cleared");
+            }
+        } catch (IOException | RuntimeException held) {
+            // Never fail boot over a leftover .new file we can't delete (e.g., AV or read-only folder).
+        }
     }
 
     /** Records whether this boot changed anything (quarantine or pack version). If nothing changed and

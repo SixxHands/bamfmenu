@@ -109,6 +109,29 @@ class RepairSessionTest {
         assertEquals(Tone.NORMAL, leftToneOf(s.frame(WIDTH, ROWS, 0), "Optional Mods"));
     }
 
+    /**
+     * Active release pins highlight red in the list and state line without a modal dialog,
+     * keeping the warning visible without nagging players who intentionally pinned.
+     */
+    @Test
+    void aLiveReleaseLockIsRedInTheListAndInItsStateLine() {
+        RepairSession pinned = session(RepairSample.state("pinned"));
+        RepairFrame frame = pinned.frame(WIDTH, ROWS, 0);
+        assertEquals(Tone.ALERT, leftToneOf(frame, "Clear Release Lock"));
+
+        select(pinned, "clearlock");
+        RepairFrame onIt = pinned.frame(WIDTH, ROWS, 0);
+        assertEquals(Tone.ALERT, leftToneOf(onIt, "Clear Release Lock"));
+        String state = stateLineOf(onIt);
+        assertTrue(state.contains("Locked to"), String.valueOf(state));
+        assertTrue(state.contains("not following the server"), String.valueOf(state));
+        assertEquals(Tone.ALERT, stateToneOf(onIt));
+
+        // When unpinned, the row stays grayed out with its status text instead of red.
+        RepairSession free = session(RepairSample.state("idle"));
+        assertNotEquals(Tone.ALERT, leftToneOf(free.frame(WIDTH, ROWS, 0), "Clear Release Lock"));
+    }
+
     /** Guards the farewell prompt (the only exit path in this window) against firing unexpectedly. */
     @Test
     void onlyARestartRequiredResultEverArmsTheFarewell() {
@@ -397,6 +420,27 @@ class RepairSessionTest {
             }
         }
         return null;
+    }
+
+    /* Returns the status row directly under the right-panel divider. We locate it using the divider
+       instead of a fixed index because the help text above wraps to different heights per item. */
+    private static int stateRowOf(RepairFrame frame) {
+        for (int i = 0; i < frame.rows().size() - 1; i++) {
+            if (frame.rows().get(i).divider()) {
+                return i + 1;
+            }
+        }
+        return -1;
+    }
+
+    private static String stateLineOf(RepairFrame frame) {
+        int r = stateRowOf(frame);
+        return r < 0 ? "" : frame.rows().get(r).right();
+    }
+
+    private static Tone stateToneOf(RepairFrame frame) {
+        int r = stateRowOf(frame);
+        return r < 0 ? null : frame.rows().get(r).rightTone();
     }
 
     private static String noticeOf(RepairFrame frame) {

@@ -15,9 +15,11 @@ public final class ClearLockItem implements RepairDef {
         return RepairItem.act("clearlock", "Clear Release Lock",
                 "Drop the version pin so BAMFOS follows the server's broadcast again.",
                 RepairGate.all(RepairGate.FILE_SAFE, ClearLockItem::whyNot),
-                state -> "Locked to " + state.pinned(),
+                state -> "Locked to " + state.pinned() + ". BAMFOS is not following the server.",
                 "Clear the release lock?",
-                ops -> RepairResult.ofUnpin(ops.unpin()));
+                ops -> RepairResult.ofUnpin(ops.unpin()))
+                // Pins are user-set so we don't pop a dialog, but they block updates; highlight the row red as a reminder.
+                .alerting(UpdaterState::isPinned);
     }
 
     /* If status() couldn't be read, we don't know whether a pin is set. Disabling this row with

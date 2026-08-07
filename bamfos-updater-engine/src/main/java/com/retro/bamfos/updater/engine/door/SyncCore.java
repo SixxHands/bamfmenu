@@ -1,6 +1,7 @@
 package com.retro.bamfos.updater.engine.door;
 
 import com.retro.bamfos.updater.engine.bus.BootBus;
+import com.retro.bamfos.updater.engine.cargo.CoreCargo;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.console.ConsoleBar;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
@@ -346,6 +347,11 @@ final class SyncCore {
             Files.createDirectories(stagedNew.getParent()); // EngineLoader usually creates this dir, but make sure it exists
             Files.move(part, stagedNew, StandardCopyOption.REPLACE_EXISTING);
             bus.fileDone(fileName(e.path()));
+            if (e.path().equals(ENGINE_PATH)) {
+                // extract the core from the staged .new engine right away so the stub picks it up on the next boot
+                // instead of needing an extra restart
+                CoreCargo.placeFrom(dir, stagedNew);
+            }
             if (clientShim) {
                 shimWaiting(e.path()); // NOT pendingSelf: see the class header, no reboot applies this one
             } else {

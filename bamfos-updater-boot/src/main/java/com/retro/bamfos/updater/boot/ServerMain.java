@@ -2,6 +2,7 @@ package com.retro.bamfos.updater.boot;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Map;
 
 /* Server entry point: java -jar bamfos-updater-boot.jar --server --dir . [--tag v] [--repair] [--panel].
  * Runs before the Minecraft JVM starts. Always exits 0 so a broken updater never blocks the server from
@@ -25,9 +26,8 @@ public final class ServerMain {
                 markPreJvmRun(dir);
             }
             clearStaleStop(dir);
-            Path engineJar = dir.resolve(".bamfos-updater").resolve("engine").resolve("bamfos-updater-engine.jar");
-            EngineLoader.Engine engine = EngineLoader.ensureAndLoad(engineJar, EngineLoader.embeddedBaseline());
-            System.exit(engine.enter(args));
+            Map<?, ?> answer = CoreSlot.run(dir, args);
+            System.exit(answer.get("exit") instanceof Integer code ? code : 0);
         } catch (Throwable t) {
             System.err.println("[updater] sync skipped: " + t);
             System.exit(0); // the updater must never be the reason the server won't boot

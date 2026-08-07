@@ -1,17 +1,5 @@
-# Builds the five shipped jars TWICE and fails if any of them changed.
-#
-# This exists because bamfmenu#6 cost nothing visible: the jars were byte-different on every rebuild, the
-# release tool read that as new content, and 77MB of early window went up the wire again on a build where
-# nobody had touched a line. Nothing failed, nothing warned, the only symptom was upload time. So the guard
-# has to be a thing somebody RUNS, not a thing somebody notices.
-#
-# usage:  powershell -File tools\repro-check.ps1
-# exit:   0 = both builds hashed the same, 1 = something is nondeterministic again
-#
-# On a hit, the report names the entries that moved and whether it was their CONTENT (crc) or just their
-# TIMESTAMP, because those are two completely different bugs: a crc change is a real code change and this script
-# is telling you the truth, a timestamp change means the archive settings in the root build.gradle stopped
-# reaching that task.
+# Builds the shipped jars twice and fails if any hash changes (catches nondeterministic jars that bloat releases).
+# Usage: powershell -File tools\repro-check.ps1
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -21,14 +9,15 @@ $JARS = @(
     "mainmenu\build\libs\bamfmenu-1.0.0.jar",
     "earlywindow\build\libs\bamfmenu-earlywindow-1.0.0.jar",
     "bamfos-updater-boot\build\libs\bamfos-updater-boot-0.1.0.jar",
+    "bamfos-updater-core\build\libs\bamfos-updater-core-0.1.0.jar",
     "bamfos-updater-engine\build\libs\bamfos-updater-engine-0.1.0.jar",
     "bamfos-updater-watchdog\build\libs\bamfos-updater-watchdog-0.1.0.jar"
 )
 
 function Build-All {
     # Use --rerun-tasks instead of clean so we verify warm incremental rebuilds stay deterministic.
-    & "$root\gradlew.bat" jar :earlywindow:jar :bamfos-updater-boot:jar :bamfos-updater-engine:jar `
-        :bamfos-updater-watchdog:jar --rerun-tasks --console=plain -q 2>&1 | Out-Null
+    & "$root\gradlew.bat" jar :earlywindow:jar :bamfos-updater-boot:jar :bamfos-updater-core:jar `
+        :bamfos-updater-engine:jar :bamfos-updater-watchdog:jar --rerun-tasks --console=plain -q 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Output "BUILD FAILED"; exit 1 }
 }
 

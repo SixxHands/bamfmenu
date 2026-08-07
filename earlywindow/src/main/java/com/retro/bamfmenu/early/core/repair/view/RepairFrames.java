@@ -81,7 +81,9 @@ public final class RepairFrames {
                 // it. Before the snapshot lands NOTHING is dimmed, because we have not read the install yet
                 // and greying a row on no evidence is the same lie as lighting one
                 boolean dim = v.state().loaded() && !item.enabled(v.state());
-                leftTone = dim ? Tone.DIM : (on ? Tone.BRIGHT : Tone.NORMAL);
+                // Alert red overrides the selection highlight so warnings stay visible while scrolling past.
+                boolean alert = v.state().loaded() && item.alerts(v.state());
+                leftTone = dim ? Tone.DIM : alert ? Tone.ALERT : (on ? Tone.BRIGHT : Tone.NORMAL);
             }
             out.add(r == dividerRow ? RepairFrame.Row.divider(left, leftTone)
                     : RepairFrame.Row.of(left, leftTone, rightText[r], rightTone[r]));
@@ -137,7 +139,7 @@ public final class RepairFrames {
                 tone[stateRow] = Tone.ALERT;
             } else {
                 text[stateRow] = RepairBox.clip(item.status().line(v.state()), width);
-                tone[stateRow] = Tone.BRIGHT;
+                tone[stateRow] = item.alerts(v.state()) ? Tone.ALERT : Tone.BRIGHT;
             }
         }
         int noticeRow = dividerRow + 2;

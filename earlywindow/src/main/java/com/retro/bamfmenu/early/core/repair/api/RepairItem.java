@@ -1,13 +1,20 @@
 package com.retro.bamfmenu.early.core.repair.api;
 
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Immutable row definition for the UPDATE AND REPAIR menu, discovered from a RepairDef folder.
  * `gate` and `status` read the live snapshot so rows reflect the real install state.
  */
 public record RepairItem(String id, String label, String help, RepairGate gate,
-                         RepairStatus status, RepairEffect effect) {
+                         RepairStatus status, RepairEffect effect, Predicate<UpdaterState> alert) {
+
+    /** Standard six-arg constructor used by most row factories below. */
+    public RepairItem(String id, String label, String help, RepairGate gate,
+                      RepairStatus status, RepairEffect effect) {
+        this(id, label, help, gate, status, effect, state -> false);
+    }
 
     /** A row that acts on the install; `confirm` is the are-you-sure question, "" for none. */
     public static RepairItem act(String id, String label, String help, RepairGate gate,
@@ -31,6 +38,19 @@ public record RepairItem(String id, String label, String help, RepairGate gate,
                                   Function<UpdaterState, String> initial, RepairEffect.EditAction action) {
         return new RepairItem(id, label, help, gate, status,
                 new RepairEffect.Edit(title, label, initial, action));
+    }
+
+    /**
+     * Highlights the row and its status line red when `when` is true.
+     * Used for quiet but important states like an active release lock that blocks future updates.
+     */
+    public RepairItem alerting(Predicate<UpdaterState> when) {
+        return new RepairItem(id, label, help, gate, status, effect, when);
+    }
+
+    /** True when this row should be highlighted in the list to get the player's attention. */
+    public boolean alerts(UpdaterState state) {
+        return alert.test(state);
     }
 
     /** Why this row cannot run against this snapshot, "" when it can. */
