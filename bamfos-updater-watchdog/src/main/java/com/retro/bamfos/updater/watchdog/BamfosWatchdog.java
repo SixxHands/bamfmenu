@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.retro.bamfos.updater.engine.config.UpdaterConfig;
 import com.retro.bamfos.updater.engine.door.Doors;
 import com.retro.bamfos.updater.engine.ops.UpdaterOps;
+import com.retro.bamfos.updater.engine.util.TagOrder;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.neoforged.api.distmarker.Dist;
@@ -263,6 +264,10 @@ public final class BamfosWatchdog {
         if (UpdateMotd.takes(decision)) {
             takeMotd(target);
         }
+        // ONE noun for every arm below, because they all describe the same move and every one of them used to
+        // say "update" over a rollback. TagOrder never vetoes the move, it only names it, and the reason it
+        // must not veto is written up there: pulling a bad release IS how the fleet gets rescued
+        String move = TagOrder.noun(local, target);
         switch (decision) {
             case RESTART -> {
                 if (restartAtTick >= 0) {
@@ -275,7 +280,7 @@ public final class BamfosWatchdog {
                         giveBackMotd(); // notice is sent and no restart is scheduled
                         if (!announcedTag.equals(target)) {
                             announcedTag = target;
-                            broadcast("Pack update " + target + " is pending but this box could not record "
+                            broadcast("Pack " + move + " " + target + " is pending but this server could not record "
                                     + "the restart, check the server logs");
                             LOGGER.warn("[watchdog] could not write .bamfos-updater/watchdog-state.properties, "
                                     + "so the restart for {} is NOT armed to prevent a restart loop. Free space or "
@@ -284,8 +289,9 @@ public final class BamfosWatchdog {
                         return;
                     }
                     pendingTarget = target;
-                    broadcast("Pack update " + target + " - restarting in " + countdownSeconds + "s");
-                    LOGGER.info("[watchdog] new release {} (server on {}), restarting in {}s", target, local, countdownSeconds);
+                    broadcast("Pack " + move + " " + target + " - restarting in " + countdownSeconds + "s");
+                    LOGGER.info("[watchdog] {} to {} (server on {}), restarting in {}s",
+                            move, target, local, countdownSeconds);
                     restartAtTick = tick + countdownSeconds * 20L;
                     warnAtTick = countdownSeconds > 15 ? restartAtTick - 200 : -1;
                 } catch (Throwable orphaned) {
@@ -298,14 +304,16 @@ public final class BamfosWatchdog {
             case ANNOUNCE_ONLY -> {
                 if (!announcedTag.equals(target)) {
                     announcedTag = target;
-                    broadcast("Pack update " + target + " is out - restart the server to apply it (auto restart is off)");
-                    LOGGER.info("[watchdog] release {} available; auto_restart=false, operator restarts", target);
+                    broadcast("Pack " + move + " " + target + " is out - restart the server to apply it (auto restart is off)");
+                    // Include the version direction so operators know whether a manual restart would upgrade or roll back.
+                    LOGGER.info("[watchdog] {} to {} available (server on {}); auto_restart=false, "
+                            + "operator restarts", move, target, local);
                 }
             }
             case HOLD_COOLDOWN -> {
                 if (!announcedTag.equals(target)) {
                     announcedTag = target;
-                    broadcast("Pack update " + target + " is pending but the last restart did not apply it, "
+                    broadcast("Pack " + move + " " + target + " is pending but the last restart did not apply it, "
                             + "the next attempt waits out the cooldown");
                     LOGGER.warn("[watchdog] pausing after {} restart attempt(s) for {}: the version never "
                             + "converged, so sync is failing on this server (token? disk? offline?). One "
@@ -315,7 +323,7 @@ public final class BamfosWatchdog {
             case HOLD_GIVEUP -> {
                 if (!announcedTag.equals(target)) {
                     announcedTag = target;
-                    broadcast("Pack update " + target + " is pending but the last restart did not apply it, "
+                    broadcast("Pack " + move + " " + target + " is pending but the last restart did not apply it, "
                             + "check the server logs");
                     // Name the state file so operators know how to clear the hold if the same tag is republished with fixed assets.
                     LOGGER.warn("[watchdog] PAUSING after {} restart attempt(s) for {}: the version never "
@@ -327,10 +335,9 @@ public final class BamfosWatchdog {
             case HOLD_PINNED -> {
                 if (!announcedTag.equals(target)) {
                     announcedTag = target;
-                    broadcast("Pack update " + target + " is out but this box is locked to " + pin
-                            + " on purpose, so it stays put");
-                    LOGGER.info("[watchdog] release {} is out but tag= locks this box to {}; remove tag= "
-                            + "from .bamfos-updater/bamfos-updater.properties to take it", target, pin);
+                    broadcast("Pack " + move + " " + target + " is out, but this server is pinned to " + pin);
+                    LOGGER.info("[watchdog] release {} is out but tag= pins this server to {}; remove tag= "
+                            + "from .bamfos-updater/bamfos-updater.properties to update", target, pin);
                 }
             }
             case HOLD_VETOED -> {

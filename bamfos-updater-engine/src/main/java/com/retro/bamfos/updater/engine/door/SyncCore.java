@@ -20,6 +20,7 @@ import com.retro.bamfos.updater.engine.reconcile.Reasons;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.reconcile.SyncPlan;
 import com.retro.bamfos.updater.engine.util.HashUtils;
+import com.retro.bamfos.updater.engine.util.TagOrder;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -401,7 +402,10 @@ public final class SyncCore {
             // Only use "updated/rolled back" wording when the pack version actually changed; same-version repairs
             // and self-entry-only updates shouldn't claim "UPDATED FROM vX TO vX".
             if (!was.equals(now)) {
-                summary = "updated " + was + " -> " + now + " (" + moved + " files)" + tail;
+                // Pick the verb from TagOrder so rollbacks aren't labelled "updated"; unknown/unorderable tags
+                // fall back to SIDEWAYS instead of guessing a direction.
+                summary = TagOrder.pastVerb(was, now) + " " + was + " -> " + now
+                        + " (" + moved + " files)" + tail;
             } else if (moved > 0) {
                 // report actual applied count on a shortfall, not the planned count, so logs/latest.log doesn't
                 // claim a file was repaired when it wasn't
