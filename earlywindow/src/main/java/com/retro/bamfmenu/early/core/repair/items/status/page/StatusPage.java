@@ -47,6 +47,19 @@ public final class StatusPage implements RepairPage {
         out.add(PageRow.text(row("Last Sync", blind ? UNKNOWN : state.lastSyncCell())));
         out.add(PageRow.text(row("Disabled Mods", blind ? UNKNOWN : String.valueOf(state.disabledCount()))));
         out.add(PageRow.text(row("Quarantined", blind ? UNKNOWN : String.valueOf(state.quarantinedCount()))));
+        // Previously the engine could return WITHHELD if a scrubbed report still contained a credential.
+        // Reports are built from typed fields now, so this is always either a filename or none.
+        out.add(PageRow.text(row("Problem Report", blind ? UNKNOWN
+                : state.hasReport() ? state.reportFile() : "none")));
+        if (state.hasReport() && !blind) {
+            out.add(PageRow.gap());
+            out.add(PageRow.text("THE UPDATER WROTE A PROBLEM REPORT.", Tone.ALERT));
+            for (String line : RepairBox.wrap("Send " + state.reportFile()
+                    + " to the pack owner. It says what went wrong on this machine and it has no login "
+                    + "token in it.", width)) {
+                out.add(PageRow.text(line, Tone.ALERT));
+            }
+        }
         if (state.tokenDead()) {
             out.add(PageRow.gap());
             // Show dead-token errors clearly instead of like a network blip so broken tokens don't go unnoticed.

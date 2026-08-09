@@ -9,6 +9,7 @@ import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.report.TroubleReport;
 import com.retro.bamfos.updater.engine.util.HashUtils;
 
 import java.io.IOException;
@@ -200,6 +201,9 @@ public final class ClientDoor {
             channel = offline ? "no-carrier" : "fail";
             return 0;
         } finally {
+            // run before the two bus events below so its output lands while the POST block is still open and
+            // END stays last. Reads last-sync.json directly.
+            TroubleReport.consider(dir, "client");
             // Emit one channel status per boot before end() so END stays last. Pinned replaces ok and idle
             // (including quiet pinned boots), while errors like fail or no-carrier still take priority.
             bus.channel(pinned && ("ok".equals(channel) || "idle".equals(channel)) ? "pinned" : channel);

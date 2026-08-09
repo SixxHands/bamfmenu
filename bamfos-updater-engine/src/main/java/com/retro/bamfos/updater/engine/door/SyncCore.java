@@ -33,24 +33,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/**
- * The sync both doors share: step 0, resolve+reconcile+apply, and the self-divert for the two
- * files a running updater can never replace in place, the shim and the loaded engine. The engine's
- * .new is promoted by the shim before it loads it, and the shim's own .new is swapped by the wrapper
- * SERVER-side. The client shim gets NO promoter, by decision: self-replacing the one
- * thing that fetches updates is too volatile to be worth it, and the shim is deliberately near-static
- * (its own build file says target churn ~never), so a client shim change rides a pack re-ship instead.
- * EngineLoader.promoteStaged is hardcoded to the engine slot and stays that way. So the client stages
- * mods/bamfos-updater-boot.jar.new ONCE and then leaves it alone: a later sync that finds the right bytes
- * already sitting there fetches nothing and only re-prints the waiting line, because the alternative is
- * re-downloading the same asset on every sync for the life of that box. A waiting client shim also never
- * counts as `pending`, because pending is what makes the terminal promise REBOOT TO APPLY and no reboot
- * applies this one. Either way that .new is inert to FML, it only picks up *.jar.
- * Doors differ ONLY in how they pick the tag and side.
- * Everything the boot display or the BIOS later needs is cached beside the ledger on the way
- * through: release notes, the manifest itself, the last-sync result.
- */
-final class SyncCore {
+/* Shared sync pipeline for client and server doors: replay any pending journal, reconcile against
+ * manifest, and stage self-updates (.new) for the shim and loaded engine. */
+public final class SyncCore {
 
     static final String SHIM_SERVER_PATH = "bamfos-updater-boot.jar";
     static final String SHIM_CLIENT_PATH = "mods/bamfos-updater-boot.jar";
@@ -484,12 +469,9 @@ final class SyncCore {
                 + " already failed probation, skipping download (publish a new engine or run BIOS repair to retry)");
     }
 
-    /** The doors' way onto the loud channel. sync() already announced "updating server X -> Y" there before
-     *  the first byte, and every success path closes with a "..., launching" line, so a refusal answered only
-     *  on the quiet channel leaves server-sync.log ending forever on an update that started and never
-     *  finished. That is the log the player reads when players report the old version, and reading it as a
-     *  hung updater is exactly the conclusion says this state must never produce. */
-    static void loud(Path dir, String msg) {
+    /** Writes a loud line to the wrapper console and server-sync.log so failures close cleanly after
+     *  "updating server X -> Y". Public so TroubleReport shares the same prefix and log rotation. */
+    public static void loud(Path dir, String msg) {
         serverLog(dir, msg);
     }
 

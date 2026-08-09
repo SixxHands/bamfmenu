@@ -12,6 +12,7 @@ import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.ping.PortHold;
 import com.retro.bamfos.updater.engine.ping.UpdatingNotice;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.report.TroubleReport;
 
 import java.nio.file.Path;
 import java.util.Optional;
@@ -32,15 +33,21 @@ public final class ServerDoor {
     /** Runs the server sync while owning the server port. Acquires PortHold before loading config and
      *  releases it in finally so the port is free before the wrapper launches the server JVM. */
     public int run(Path dir, String tagOverride, boolean repair) {
-        PortHold hold = PortHold.open(dir, UpdatingNotice.target(UpdatingNotice.lastTarget(dir),
-                ClientDoor.localVersion(dir).orElse("")));
         try {
-            return sync(dir, tagOverride, repair);
-        } finally {
-            String trouble = hold.release();
-            if (!trouble.isEmpty()) {
-                SyncCore.loud(dir, trouble);
+            PortHold hold = PortHold.open(dir, UpdatingNotice.target(UpdatingNotice.lastTarget(dir),
+                    ClientDoor.localVersion(dir).orElse("")));
+            try {
+                return sync(dir, tagOverride, repair);
+            } finally {
+                String trouble = hold.release();
+                if (!trouble.isEmpty()) {
+                    SyncCore.loud(dir, trouble);
+                }
             }
+        } finally {
+            // Run after releasing the port hold so the port is free before the server JVM starts and before we read
+            // files for diagnostics. Every branch returns through here, and consider() reads last-sync.json directly.
+            TroubleReport.consider(dir, "server");
         }
     }
 

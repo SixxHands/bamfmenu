@@ -19,6 +19,9 @@ public record UpdaterConfig(
         String tagPin,
         boolean autoRestart) {
 
+    /** Default release repo. Kept in one place so trouble reports stay accurate when checking overrides. */
+    public static final String DEFAULT_REPO = "SixxHands/bamfos-pack";
+
     /** Redacts the token so accidental logging of UpdaterConfig never leaks the shared PAT
      *  into logs/latest.log. */
     @Override
@@ -41,7 +44,7 @@ public record UpdaterConfig(
         }
         return new UpdaterConfig(
                 token(props, instanceDir),
-                props.getProperty("repo", "SixxHands/bamfos-pack"),
+                props.getProperty("repo", DEFAULT_REPO),
                 props.getProperty("server_host", ""),
                 port(props.getProperty("server_port", "25565")),
                 List.copyOf(pins),

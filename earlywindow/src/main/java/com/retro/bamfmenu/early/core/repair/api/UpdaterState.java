@@ -12,7 +12,8 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
                            String lastSyncResult, long lastSyncAt, long nowMillis, boolean syncing,
                            int disabledCount, int quarantinedCount, boolean statusUnreadable,
                            String notes, List<Mod> optional, ReleaseList releases,
-                           String serverHost, int serverPort, String resetTarget) {
+                           String serverHost, int serverPort, String resetTarget,
+                           String reportFile) {
 
     /** An optional or quarantined managed jar from listOptional(). `missing` is true when neither the
      *  enabled nor .disabled file exists on disk, so the UI doesn't show a false on/off state. */
@@ -23,6 +24,17 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
             int slash = path.lastIndexOf('/');
             return slash >= 0 && slash + 1 < path.length() ? path.substring(slash + 1) : path;
         }
+    }
+
+    /** Convenience constructor defaulting `report` for sample states and tests. */
+    public UpdaterState(boolean loaded, String installed, String pinned, boolean tokenDead,
+                        String lastSyncResult, long lastSyncAt, long nowMillis, boolean syncing,
+                        int disabledCount, int quarantinedCount, boolean statusUnreadable,
+                        String notes, List<Mod> optional, ReleaseList releases,
+                        String serverHost, int serverPort, String resetTarget) {
+        this(loaded, installed, pinned, tokenDead, lastSyncResult, lastSyncAt, nowMillis, syncing,
+                disabledCount, quarantinedCount, statusUnreadable, notes, optional, releases,
+                serverHost, serverPort, resetTarget, "");
     }
 
     /** Initial loading state before the worker returns the first snapshot. */
@@ -50,21 +62,27 @@ public record UpdaterState(boolean loaded, String installed, String pinned, bool
                 status.isEmpty() || status.containsKey("error"), notes == null ? "" : notes,
                 List.copyOf(mods), null,
                 str(status.get("server_host")), (int) num(status.get("server_port")),
-                str(status.get("reset_target")));
+                str(status.get("reset_target")),
+                str(status.get("report_file")));
     }
 
     /** Returns a copy of this state with the fetched release list attached. */
     public UpdaterState withReleases(ReleaseList list) {
         return new UpdaterState(loaded, installed, pinned, tokenDead, lastSyncResult, lastSyncAt,
                 nowMillis, syncing, disabledCount, quarantinedCount, statusUnreadable, notes,
-                optional, list, serverHost, serverPort, resetTarget);
+                optional, list, serverHost, serverPort, resetTarget, reportFile);
     }
 
     /** Updates the wall clock and lock flag without re-reading the full snapshot. */
     public UpdaterState live(long millis, boolean engineSyncing) {
         return new UpdaterState(loaded, installed, pinned, tokenDead, lastSyncResult, lastSyncAt,
                 millis, engineSyncing, disabledCount, quarantinedCount, statusUnreadable, notes,
-                optional, releases, serverHost, serverPort, resetTarget);
+                optional, releases, serverHost, serverPort, resetTarget, reportFile);
+    }
+
+    /** True when the updater has written a problem report a player is meant to send on. */
+    public boolean hasReport() {
+        return !reportFile.isEmpty();
     }
 
     /**

@@ -12,6 +12,7 @@ import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.report.TroubleReport;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.journal.Journal;
 import com.retro.bamfos.updater.engine.json.MiniJson;
@@ -94,6 +95,9 @@ public final class UpdaterOps {
                 // An older record with no field reads false, same as SyncCore.lastSyncHeldFiles
                 out.put("last_sync_held", Boolean.TRUE.equals(m.get("held")));
             }
+            // Older engines omit this and older earlywindow ignores it. Pass only the file path, never its
+            // contents, across the BIOS boundary.
+            out.put("report_file", TroubleReport.newestReport(dir));
         } catch (Exception e) {
             out.put("error", String.valueOf(e));
         }

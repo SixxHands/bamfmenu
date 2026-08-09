@@ -22,8 +22,15 @@ public final class CoreEntry {
         boolean ours = CoreHealth.armedHere(mark);
         String skipped = ours ? CoreHealth.skipped(mark) : "";
 
-        EngineLoader.Engine engine = EngineLoader.ensureAndLoad(engineJar,
-                BaselineEngine.supplier(instanceDir));
+        EngineLoader.Engine engine;
+        try {
+            engine = EngineLoader.ensureAndLoad(engineJar, BaselineEngine.supplier(instanceDir));
+        } catch (Throwable noEngine) {
+            CoreNote.write(instanceDir, args, CoreHealth.running(mark), noEngine);
+            // MUST rethrow: swallowing this clears the crash mark and leaves future boots stuck on a broken core.
+            // CoreNote catches Throwables internally so writing the note can't mask this failure.
+            throw noEngine;
+        }
 
         // THE SEAM
         if (ours) {
