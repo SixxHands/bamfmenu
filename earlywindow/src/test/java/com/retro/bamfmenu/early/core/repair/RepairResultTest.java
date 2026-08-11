@@ -19,8 +19,8 @@ class RepairResultTest {
         assertEquals(RepairResult.Kind.RESTART_REQUIRED, RepairResult.ofSync(0).kind());
         assertEquals("update", RepairResult.ofSync(0).restartCause());
         assertEquals("No release to sync to.", RepairResult.ofSync(1).message());
-        assertEquals("Sync failed. See the log.", RepairResult.ofSync(2).message());
-        assertEquals("Another sync holds the lock.", RepairResult.ofSync(3).message());
+        assertEquals("Sync failed. Please see logs.", RepairResult.ofSync(2).message());
+        assertEquals("Lock held by another Sync process.", RepairResult.ofSync(3).message());
         assertEquals("UPDATE TOKEN EXPIRED. Sync is dead until it is replaced.", RepairResult.ofSync(4).message());
         assertEquals("GitHub is rate limiting. Try again later.", RepairResult.ofSync(5).message());
         assertEquals(RepairResult.Kind.REFUSED, RepairResult.ofSync(5).kind());
@@ -33,10 +33,10 @@ class RepairResultTest {
     void anEngineThatPredatesAnOpIsNotASuccess() {
         // OpsGateway returns "error: unknown op x" for unsupported ops, which OpsBridge maps to NO_ANSWER.
         // Treating that as 0 would wrongly report work as staged.
-        assertEquals("The updater did not answer. See the log.",
+        assertEquals("The updater did not respond. Please see logs.",
                 RepairResult.ofSync(OpsBridge.NO_ANSWER).message());
         assertEquals(RepairResult.Kind.FAILED, RepairResult.ofSync(OpsBridge.NO_ANSWER).kind());
-        assertEquals("The updater did not answer. See the log.",
+        assertEquals("The updater did not respond. Please see logs.",
                 RepairResult.ofUnpin(OpsBridge.NO_ANSWER).message());
     }
 
@@ -46,7 +46,7 @@ class RepairResultTest {
         assertEquals(RepairResult.Kind.DONE, RepairResult.ofUnpin(0).kind());
         assertEquals("Nothing was pinned.", RepairResult.ofUnpin(1).message());
         assertEquals(RepairResult.Kind.REFUSED, RepairResult.ofUnpin(1).kind());
-        assertEquals("Could not write the release lock. See the log.", RepairResult.ofUnpin(2).message());
+        assertEquals("Could not write the release lock. Please see logs.", RepairResult.ofUnpin(2).message());
     }
 
     @Test
@@ -54,7 +54,7 @@ class RepairResultTest {
         assertEquals("chipped.jar is on next boot.", RepairResult.ofToggle(true, "chipped.jar", false).message());
         assertEquals("chipped.jar is off next boot.", RepairResult.ofToggle(true, "chipped.jar", true).message());
         assertEquals(RepairResult.Kind.STAGED, RepairResult.ofToggle(true, "chipped.jar", true).kind());
-        assertEquals("Could not toggle chipped.jar. See the log.",
+        assertEquals("Could not toggle chipped.jar. Please see logs.",
                 RepairResult.ofToggle(false, "chipped.jar", true).message());
         assertEquals(RepairResult.Kind.FAILED, RepairResult.ofToggle(false, "chipped.jar", true).kind());
     }

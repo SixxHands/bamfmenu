@@ -248,6 +248,12 @@ public final class RepairFrames {
 
     /* Confirm dialogs and text input share one modal channel so `prompting()` covers both.
        Text input draws between `> <` with a `_` caret rather than nesting a second border. */
+    /** Builds a confirmation or farewell popup without a text field. Public so the boot-time reboot
+     *  notice can reuse the same wrapping and single-option layout. */
+    public static List<String> modalLines(RepairEffect.Confirm confirm) {
+        return modalLines(confirm, "", "");
+    }
+
     private static List<String> modalLines(RepairEffect.Confirm confirm, String editTitle, String editField) {
         if (!editTitle.isEmpty()) {
             return List.of("", editTitle, "", "> " + editField, "", "[ENTER] Save      [ESC] Cancel");

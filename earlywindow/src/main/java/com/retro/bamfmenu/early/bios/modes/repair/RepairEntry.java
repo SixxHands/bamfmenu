@@ -13,7 +13,7 @@ public final class RepairEntry {
     // menu where nothing else does.
     public static final String LABEL = "Update and Repair";
     private static final String HELP =
-            "Check for updates, verify the install, and roll BAMFOS back if you have to.";
+            "Check for updates, verify the install, and rollback BAMFOS if needed.";
     private static final String STATE = "Press ENTER to open.";
 
     private RepairEntry() {

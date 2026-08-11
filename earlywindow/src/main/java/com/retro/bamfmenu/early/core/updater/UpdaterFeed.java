@@ -277,7 +277,7 @@ public final class UpdaterFeed {
                 // and unknown future states should stay on the generic FAILED row without contradicting it.
                 if (sawSync && "fail".equals(state)) {
                     // Tell the user boot continues: updater failures never block game launch.
-                    pendingLog.add("updater: sync aborted, boot continues");
+                    pendingLog.add("updater: sync aborted, continuing to boot");
                 }
             }
             default -> {
@@ -294,6 +294,11 @@ public final class UpdaterFeed {
     /** The DEL gate + footer swap hang off this. */
     public boolean syncActive() {
         return syncActive;
+    }
+
+    /** True if this boot staged updates for next boot; scoped to this boot because the ctor truncates prior feeds. */
+    public boolean pendingSwaps() {
+        return pendingSwaps;
     }
 
     /**

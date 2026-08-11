@@ -13,7 +13,7 @@ public final class OptionalItem implements RepairDef {
     @Override
     public RepairItem item() {
         return RepairItem.page("optional", "Optional Mods",
-                "Turn the pack's optional mods on or off, and switch a quarantined one back on.",
+                "Turn the pack's optional mods on or off, or switch a quarantined mod back on.",
                 // Needs FILE_SAFE even though opening the page is read-only, because every row renames a jar
                 // and would just fail with "locked" during an active sync.
                 RepairGate.all(RepairGate.FILE_SAFE,

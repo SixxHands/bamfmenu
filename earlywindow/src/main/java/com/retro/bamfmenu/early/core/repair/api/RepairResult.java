@@ -45,14 +45,14 @@ public record RepairResult(Kind kind, String message, String restartCause) {
             case 0 -> new RepairResult(Kind.RESTART_REQUIRED,
                     "Update staged. It applies the next time you start the game.", "update");
             case 1 -> new RepairResult(Kind.REFUSED, "No release to sync to.");
-            case 3 -> new RepairResult(Kind.REFUSED, "Another sync holds the lock.");
+            case 3 -> new RepairResult(Kind.REFUSED, "Lock held by another Sync process.");
             case 4 -> new RepairResult(Kind.FAILED, "UPDATE TOKEN EXPIRED. Sync is dead until it is replaced.");
             case 5 -> new RepairResult(Kind.REFUSED, "GitHub is rate limiting. Try again later.");
             // 6 means already current with nothing staged (avoids pointless reboots and lets Verify report clean).
             // Older engines return 0 here.
             case 6 -> new RepairResult(Kind.DONE, "Already up to date. Nothing needed changing.");
             case OpsBridge.NO_ANSWER -> noAnswer();
-            default -> new RepairResult(Kind.FAILED, "Sync failed. See the log.");
+            default -> new RepairResult(Kind.FAILED, "Sync failed. Please see logs.");
         };
     }
 
@@ -63,7 +63,7 @@ public record RepairResult(Kind kind, String message, String restartCause) {
             case 0 -> new RepairResult(Kind.DONE, "Release lock cleared. BAMFOS tracks the server again.");
             case 1 -> new RepairResult(Kind.REFUSED, "Nothing was pinned.");
             case OpsBridge.NO_ANSWER -> noAnswer();
-            default -> new RepairResult(Kind.FAILED, "Could not write the release lock. See the log.");
+            default -> new RepairResult(Kind.FAILED, "Could not write the release lock. Please see logs.");
         };
     }
 
@@ -73,7 +73,7 @@ public record RepairResult(Kind kind, String message, String restartCause) {
      */
     public static RepairResult ofToggle(boolean ok, String name, boolean nowDisabled) {
         if (!ok) {
-            return new RepairResult(Kind.FAILED, "Could not toggle " + name + ". See the log.");
+            return new RepairResult(Kind.FAILED, "Could not toggle " + name + ". Please see logs.");
         }
         return new RepairResult(Kind.STAGED, name + (nowDisabled ? " is off" : " is on") + " next boot.");
     }
@@ -85,6 +85,6 @@ public record RepairResult(Kind kind, String message, String restartCause) {
 
     /** The engine returned something other than a status code, so the operation didn't run. */
     public static RepairResult noAnswer() { // Unsupported op on an older engine, or the call threw an error.
-        return new RepairResult(Kind.FAILED, "The updater did not answer. See the log.");
+        return new RepairResult(Kind.FAILED, "The updater did not respond. Please see logs.");
     }
 }

@@ -12,7 +12,7 @@ public final class ClearLockItem implements RepairDef {
 
     @Override
     public RepairItem item() {
-        return RepairItem.act("clearlock", "Clear Release Lock",
+        return RepairItem.act("clearlock", "Remove Release Lock",
                 "Drop the version pin so BAMFOS follows the server's broadcast again.",
                 RepairGate.all(RepairGate.FILE_SAFE, ClearLockItem::whyNot),
                 state -> "Locked to " + state.pinned() + ". BAMFOS is not following the server.",
@@ -29,7 +29,7 @@ public final class ClearLockItem implements RepairDef {
             return "";
         }
         return state.statusUnreadable() ? "Could not read the release lock."
-                : "Nothing pinned. BAMFOS follows the server.";
+                : "Nothing pinned. BAMFOS tracks the server.";
     }
 
     @Override

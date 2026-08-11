@@ -59,7 +59,7 @@ public final class ClientDoor {
             // Don't send OK here since we haven't contacted GitHub yet.
             bus.ident(cfg.repo());
             if (lock.isEmpty()) {
-                bus.line("updater: instance lock held, sync skipped");
+                bus.line("updater: instance lock active, skipping sync");
                 // Clear probation on named skips too: the engine ran and decided cleanly, and most boots on a
                 // current install end here, so skipping the clear would trigger a false rollback.
                 return EngineHealth.proven(dir, 0);
@@ -84,13 +84,13 @@ public final class ClientDoor {
                 } else {
                     Optional<String> broadcast = Doors.broadcast(dir, cfg);
                     if (broadcast.isEmpty()) {
-                        bus.line("updater: no carrier found, sync skipped");
+                        bus.line("updater: no carrier found, skipping sync");
                         // Match the row wording to the log line above so they read consistently.
                         channel = "no-carrier";
                         return EngineHealth.proven(dir, 0); // treat no-carrier as offline so it clears probation
                     }
                     if (local.isEmpty()) {
-                        bus.line("updater: no version stamp found in config/bcc-common.toml, sync skipped");
+                        bus.line("updater: no version stamp found in config/bcc-common.toml, skipping sync");
                         return EngineHealth.proven(dir, 0);
                     }
                     tag = broadcast.get(); // upgrades and rollbacks use the same sync path
@@ -172,7 +172,7 @@ public final class ClientDoor {
             SyncCore.recordFailure(dir, "no-release", gone.alias // Handle the alias branch here too, same as abortLine.
                     ? "the " + gone.repo + " channel has no published release yet, nothing to converge to"
                     : "no release named " + gone.tag + " on " + gone.repo
-                            + " (or the token access it), nothing to converge to");
+                            + " (or the token cannot access it), nothing to converge to");
             EngineHealth.proven(dir); // github answered 404 so the engine itself is healthy (see EngineHealth); record a distinct state
             // here since the network and token worked, the requested release just doesn't exist
             end = "no-release";

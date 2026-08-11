@@ -209,7 +209,7 @@ class ClientDoorTest {
 
         List<String> bus = Files.readAllLines(dir.resolve(".bamfos-updater").resolve("bus.log"));
         int ident = indexOfPrefix(bus, "IDENT\t");
-        int held = bus.indexOf("LOG\tupdater: instance lock held, sync skipped");
+        int held = bus.indexOf("LOG\tupdater: instance lock active, skipping sync");
         assertTrue(held >= 0, String.valueOf(bus));
         assertTrue(ident >= 0 && ident < held, String.valueOf(bus));
         assertEquals("idle", channel());
@@ -230,7 +230,7 @@ class ClientDoorTest {
 
         List<String> lines = Files.readAllLines(busFile);
         assertEquals("SYNC\to/r\tvOLD\tvNEW", lines.get(0), String.valueOf(lines));
-        assertTrue(lines.contains("LOG\tupdater: instance lock held, sync skipped"), String.valueOf(lines));
+        assertTrue(lines.contains("LOG\tupdater: instance lock active, skipping sync"), String.valueOf(lines));
     }
 
     /** Status line must be emitted separately from IDENT. */

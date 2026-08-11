@@ -24,6 +24,7 @@ import com.retro.bamfmenu.early.bios.modes.minigame.DoomScreen;
 import com.retro.bamfmenu.early.bios.modes.repair.RepairEntry;
 import com.retro.bamfmenu.early.bios.modes.repair.RepairScreen;
 import com.retro.bamfmenu.early.bios.overlay.PauseOverlay;
+import com.retro.bamfmenu.early.bios.overlay.RebootOverlay;
 import com.retro.bamfmenu.early.bios.overlay.VolumeOverlay;
 import com.retro.bamfmenu.early.core.rhythm.registry.SongLoader;
 import com.retro.bamfmenu.early.core.rhythm.registry.SongRegistry;
@@ -456,6 +457,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     private volatile int volume = 100;
     private final java.util.Queue<Integer> volumeInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final VolumeOverlay volumeOverlay = new VolumeOverlay(volumeInput);
+
+    /* The staged-update farewell (RebootOverlay), the boot-time twin of the one the UPDATE AND REPAIR
+       window puts up. It arms itself and owns its own countdown, halt and give-up deadline; everything
+       below is one delegating line, so the decision never lives in this file. */
+    private final java.util.Queue<Integer> rebootInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final RebootOverlay rebootOverlay = new RebootOverlay(rebootInput);
 
     /* In-game PAUSE menu (Esc during the rhythm game): Resume / Options / Quit; like the volume menu it
        freezes the game + pauses the audio. "Options" opens the key-remap sub-screen. All on the render
@@ -1088,6 +1095,12 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                 pauseOverlay.render(canvas, biosCtx); // Resume/Options/Quit (or the key-remap sub-screen) over the frozen game
             }
             drawErrorFlash(); // brief red ERROR when an action was blocked (no-op unless recently triggered)
+            /* The staged-update farewell, composited LAST so nothing lands over the one box a player has to
+               read, and stepped right here so its countdown can only advance on a frame that also drew it. */
+            rebootOverlay.step(biosCtx);
+            if (rebootOverlay.active()) {
+                rebootOverlay.render(canvas, biosCtx);
+            }
 
             /* ...then blit it to the window, flipping Y (src top->bottom) so the text is right-side up. */
             glBindFramebuffer(GL_READ_FRAMEBUFFER, offscreenFbo);
@@ -1314,6 +1327,15 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
         if (cutscenePending || cutsceneActive()) {
             return; // cutscene (pending or running): the BIOS is locked, swallow EVERY key until it completes
+        }
+        if (rebootOverlay.active()) {
+            /* Once the staged-update farewell is up, EVERY key is its own, above F2 on purpose: the volume
+               slider would stack over the box and freeze its stepping, and the farewell only re-arms its
+               countdown ONCE, so the second freeze would spend the ten seconds behind the slider. */
+            if (action == GLFW_PRESS) {
+                rebootInput.offer(key);
+            }
+            return;
         }
         if (pauseOverlay.active()) {
             /* While the in-game pause menu is up, EVERY key goes to it (the render thread interprets nav vs
@@ -1776,7 +1798,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             case REPAIR:
                 return repairScreen.controlHints(biosCtx);
             default:
-                return "";
+                return rebootOverlay.hints(); // "" unless the staged-update farewell is up over POST
         }
     }
 
@@ -2803,6 +2825,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
     }
 
     private String footerLine(int maxChars) {
+        if (rebootOverlay.active()) {
+            // the farewell's countdown owns this row through drawControlBar, and two writers land on the
+            // SAME line; the DEL prompt is a lie under a box that has taken every key anyway
+            return "";
+        }
         if (updaterSyncActive) {
             // mid-flash warning, exactly what real boards show; reverts the moment the sync ends
             return clip("WARNING: Do not turn off power or reset the system during update!", maxChars);
@@ -2847,6 +2874,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         try {
             updaterFeed.poll();
             updaterSyncActive = updaterFeed.syncActive();
+            rebootOverlay.pending(updaterFeed.pendingSwaps());
             String line;
             while ((line = updaterFeed.nextLogLine()) != null) {
                 log.addLast(clip("> " + line, maxChars));
@@ -2963,7 +2991,18 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
            waits; we keep pumping input so ESC / "Exit Bios" still register, while the render thread keeps
            drawing SETUP / the game. This is the safe "pause": we never freeze FML's loader, we just delay
            the hand-off. */
-        while ((state.holdsHandoff() || volumeOverlay.active() || pauseOverlay.active()) && !initFailed) {
+        /* Tells the reboot notice the boot is out of things to do, so it can arm itself on the render thread
+           and hold the loop below. Arming stays render-side on purpose: a boot that can draw nothing arms
+           nothing and stands itself down, instead of waiting on a box nobody will ever see.
+           IMPORTANT: the loop below waits on holds() and NOT active(). active() cannot be true until the
+           render thread has run a frame, and this thread evaluates the condition on the very next statement,
+           so at POST, where nothing else keeps, the body never ran once: the render thread was stopped before
+           the countdown got a single one of its ~200 frames and the box was inert on the ONE path it exists
+           for. Every unit test passed through it, because they call handingOff() then step() on one thread, an
+           ordering production cannot produce. holds() waits on the INTENT and is bounded at both ends. */
+        rebootOverlay.handingOff();
+        while ((state.holdsHandoff() || volumeOverlay.active() || pauseOverlay.active()
+                || rebootOverlay.holds()) && !initFailed) {
             glfwPollEvents();
             try {
                 Thread.sleep(16L);

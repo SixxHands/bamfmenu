@@ -1,8 +1,8 @@
 # early/bios/overlay, input-capturing layers composited over the active screen
 ## Features
-The two `Overlay` implementations the BIOS host draws *after* the active screen, popup LAYERS rather
-than `Mode`s, so a song or a game keeps its frozen frame underneath while a menu floats on top. Both
-were extracted verbatim from the provider, nothing the user sees changed. The overlays keep no GL or
+The `Overlay` implementations the BIOS host draws *after* the active screen, popup LAYERS rather
+than `Mode`s, so a song or a game keeps its frozen frame underneath while a menu floats on top. The two
+menus were extracted verbatim from the provider, nothing the user sees changed. The overlays keep no GL or
 LWJGL imports (GLFW key codes are duplicated as constants) and reach all shared/persisted
 state through `BiosContext`, so the provider stays the single owner of the input queues, volume value,
 and lane keybinds. Two behavioral reworks are deferred, NOT done here: F2/volume as a pause sub-item and
@@ -28,6 +28,19 @@ BIOS-only, and a later look pass on these functional-not-pretty menus.
   and calls `ctx.save()`. `render(c, ctx)` draws either the `PAUSED` menu or the `REMAP KEYS` list (using
   `LANE_GLYPHS` `{<,v,^,>}` and `ctx.keyName`). Volatile `active` plays the same gating role as above.
 
+- **`RebootOverlay`** is the staged-update farewell at boot, the one overlay that is not a menu: it keeps the
+  Minecraft hand-off and then ends the process, so a sync that staged files cannot be joined around. It also
+  implements `RepairContext`, because the box, the ten seconds, the 1.5s key grace and every string are the real
+  `core.repair.session.RepairSession` posed with `RepairResult.ofSync(0)`, the same farewell the UPDATE AND
+  REPAIR window puts up in session. `pending(boolean)` mirrors the engine's `PENDING` event in from
+  `UpdaterFeed.pendingSwaps()`; `handingOff()` is the main thread saying the boot is done.
+  `step(ctx)` arms only when both are true and `ctx.mode() == Mode.POST` with neither menu open, so a player
+  in SETUP or a game keeps their session. `compose()` builds the lines through `RepairFrames.modalLines`,
+  `render` hands them to `TerminalCanvas.popup`, `hints()` feeds the bottom bar its `Closing in Ns` row. Two
+  Law-5 rules shape the rest: no close until `compose()` has answered once, and `active()` releases itself
+  15s after arming, so a wedged render thread boots stale rather than never booting. Its clock and its exit
+  are both injectable. That is the only reason a thing that halts has unit tests at all.
+
 ## How it works
 The provider owns the host loop and the input queues. On the main thread, `onKey` enqueues integer
 key codes into each overlay's provider-held `Queue<Integer>` (and decides priority, e.g. an active
@@ -42,13 +55,14 @@ Neither overlay knows about the other or about `Mode` screens, they only talk to
 
 ## Dependencies
 - Depends on the `early.bios.screen` framework (`Overlay`, `BiosContext`), `early.bios.gfx.TerminalCanvas`,
-  `early.bios.Mode` (PauseOverlay only, to decide the Options item), and `early.core.audio.AudioPlayer`
-  (reached via `ctx.audio()`).
+  `early.bios.host.Mode` (PauseOverlay to decide the Options item, RebootOverlay to arm only at POST), and
+  `early.core.audio.AudioPlayer` (reached via `ctx.audio()`). RebootOverlay alone also reaches into
+  `early.core.repair` for the session, the frames and the key mapping it reuses.
 - Depended on by the provider/host (`TerminalWindowProvider`), which constructs each overlay with its
   input queue and drives `toggle`/`open` + `step` + `render` + `active()`.
 - `step`/`render` are render-thread only (they change game-visible state and touch the canvas), `onKey`
   only *enqueues* on the main thread.
 - The input queue, volume value, and lane keybind `int[]` are provider-owned and changed only through
   `BiosContext`.
-- This layer holds no GL/LWJGL imports (key codes are duplicated constants), consistent with `core/` never
+- This layer keeps no GL/LWJGL imports (key codes are duplicated constants), consistent with `core/` never
   importing `bios/` and only `TerminalCanvas` touching `org.lwjgl.opengl.*`.

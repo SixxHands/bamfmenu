@@ -61,8 +61,7 @@ public final class OptionalPage implements RepairPage {
         List<Entry> out = new ArrayList<>();
         int cell = Math.max(10, width - 2); // the two columns the selection cursor takes
         for (UpdaterState.Mod mod : state.optional()) {
-            // a jar with neither name on disk is not "on": the row would claim a mod is loaded that is not
-            // on the box, and the toggle under it can only come back as "See the log."
+            // A jar with neither filename on disk is not "on"; don't claim it's loaded when toggling will fail.
             String cellText = mod.missing() ? "missing" : mod.disabled() ? "off" : "on";
             String text = RepairBox.dotted(mod.name(), cellText, cell);
             out.add(new Entry(mod.missing() ? PageRow.text(text, Tone.DIM) : PageRow.pick(text), mod));

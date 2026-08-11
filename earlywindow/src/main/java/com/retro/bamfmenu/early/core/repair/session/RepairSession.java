@@ -49,7 +49,7 @@ public final class RepairSession {
        every key is locked is contradicted by the next thing a player presses. 's rule with the
        door already open: the BIOS stays up, actions do not. */
     private static final String HINTS_BUSY =
-            "Working ...      ENTER and ESC are locked until the engine answers      F2  Volume";
+            "Working ...      Key inputs disabled.      Please do not close this window!";
 
     private final List<RepairItem> items;
     private UpdaterState state = UpdaterState.reading();
@@ -265,7 +265,7 @@ public final class RepairSession {
         if (!state.loaded()) {
             // Don't run anything before the first snapshot loads, otherwise gates would check empty data
             // and show bogus refusals like "no optional mods in this release".
-            last = new RepairResult(RepairResult.Kind.REFUSED, "Reading the updater ...");
+            last = new RepairResult(RepairResult.Kind.REFUSED, "Reading updater ...");
             return;
         }
         if (page != null) {
@@ -370,7 +370,7 @@ public final class RepairSession {
             return HINTS_EDIT;
         }
         if (closeAt > 0) {
-            return "Closing in " + closingIn() + "s      Press any key to close now";
+            return "Closing in " + closingIn() + "s";
         }
         if (pending != null) {
             // Use this prompt's own button labels (e.g. Proceed/Cancel on reset step 2) so the footer matches.
@@ -411,7 +411,8 @@ public final class RepairSession {
         if (closeAt > 0) {
             // one option, because there is no second answer: the reset is already journalled and the next boot
             // applies it whether this box closes politely or gets killed
-            return new RepairEffect.Confirm(FAREWELL_TITLE, farewellBody(closeCause), "Ok", "Ok");
+            return new RepairEffect.Confirm(FAREWELL_TITLE, farewellBody(closeCause),
+                    "Press any key to close the game.", "Press any key to close the game.");
         }
         return pending == null || promptStep >= pending.confirms().size()
                 ? null : pending.confirms().get(promptStep);

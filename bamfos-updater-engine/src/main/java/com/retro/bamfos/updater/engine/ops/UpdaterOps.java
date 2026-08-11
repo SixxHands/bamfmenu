@@ -45,7 +45,7 @@ import java.util.Set;
  * the target tag, because to a caller those are one thing: there is nothing to converge to), 2 failed,
  * 3 another sync holds the lock, 4 token dead,
  * 5 github rate limited, try again later. 5 has its own code so the repair page cannot render a
- * throttle as "Sync failed. See the log.", because a limit clears itself inside the hour and is not a
+ * throttle as "Sync failed. Please see logs.", because a limit clears itself inside the hour and is not a
  * failure. 6 is the box already matching the target: NOTHING was staged, so the page can say done
  * instead of promising a next boot that changes nothing (client-side ops only, stagedSync says why).
  * unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
@@ -224,8 +224,9 @@ public final class UpdaterOps {
             Manifest manifest = ManifestParser.parse(gh.manifestJson());
             String serverFile = serverOnlyFileOnDisk(manifest, Ledger.load(Ledger.pathIn(dir)));
             if (serverFile != null) {
-                return said(out, 6, "this install holds server files (" + serverFile + "), so it is a server "
-                        + "and a factory reset only knows how to rebuild a client. Nothing was changed.");
+                return said(out, 6, "this install contains server files (" + serverFile + "), so factory reset "
+                        + "refused to run (it only rebuilds clients). Nothing was changed. If this is not a "
+                        + "server, report this issue.");
             }
             FactoryReset.Armed armed = FactoryReset.arm(dir, manifest, Reconciler.Side.CLIENT, gh::fetch, tag,
                     (path, done, total) -> bus(path, done, total));
@@ -239,16 +240,16 @@ public final class UpdaterOps {
             String got = armed.reused() > 0
                     ? armed.places() + " files ready (" + armed.reused() + " already downloaded before)"
                     : armed.places() + " files downloaded";
-            return said(out, 0, "reset armed for " + tag + ": " + got + " and "
-                    + armed.deletes() + " to remove. Nothing has changed yet.");
+            return said(out, 0, "Reset ready for " + tag + ": " + got + " and "
+                    + armed.deletes() + " to remove. Nothing has applied yet.");
         } catch (FactoryReset.Refused refused) {
             // Separate exit code for refusals vs failures: a refusal leaves the install untouched.
             return said(out, 6, refused.why);
         } catch (HttpFetcher.TokenDead dead) {
             return said(out, 4, "github refused the token, so nothing was downloaded and nothing changed.");
         } catch (HttpFetcher.RateLimited limited) {
-            return said(out, 5, "github is rate limiting this box, so the reset could not download. It clears "
-                    + "itself, try again later. Nothing was changed.");
+            return said(out, 5, "github is rate limiting this client, so the reset could not download. Nothing "
+                    + "was changed, try again later.");
         } catch (Exception e) {
             return said(out, 2, "the reset did not finish and nothing was changed: " + e);
         } finally {
@@ -509,10 +510,10 @@ public final class UpdaterOps {
         return row;
     }
 
-    /** Flips the filename bit THROUGH the engine so the ledger stays coherent. True =
-     *  the ask is met or journaled (a held jar flips at the next boot's step 0); false = nothing sane
-     *  to flip (both names on disk is crash debris and the reconciler's business, neither name means
-     *  no such mod), with the reason printed, because the BIOS renders every false as "See the log." */
+    /**
+     * Toggles an optional mod through the engine so the ledger stays coherent. Returns true if applied
+     * or journaled; false if both names or neither exist on disk (reason logged for the BIOS).
+     */
     public boolean setDisabled(String path, boolean disabled) {
         try (var lock = InstanceLock.acquire(dir).orElse(null)) {
             if (lock == null) {
@@ -643,10 +644,8 @@ public final class UpdaterOps {
         } catch (HttpFetcher.TokenDead dead) {
             return 4;
         } catch (GithubReleases.ReleaseMissing gone) {
-            // 1 is "no target to sync to" and that is exactly what a 404 on the target tag means, so folding
-            // it into 2 had the page answer "Sync failed. See the log." for the one state where the log says
-            // nothing is wrong with this box: the release is not there. Only the host can fix that, by
-            // publishing it, and a player told the sync failed goes hunting his own machine instead
+            // Map a 404 on the target tag to 1 ("no target") instead of generic failure (2): nothing is wrong
+            // locally, the release just isn't published yet.
             return 1;
         } catch (Exception e) {
             return 2;
@@ -679,12 +678,8 @@ public final class UpdaterOps {
     }
 
     /**
-     * Rewrites only the tag= line of the properties file; every other line is the human's.
-     * LATIN-1 both ways, NOT UTF-8, because UpdaterConfig.rawProps reads this same file with a latin-1 fallback
-     * for a documented reason (readString throws on a file Notepad saved as ANSI). Read it stricter than the
-     * boot path does and a player who typed one accented character in a comment gets a box where the sync
-     * still works but the BIOS rollback page answers "Sync failed. See the log." forever, with nothing in the
-     * log saying why. latin-1 maps every byte, so this round-trips their bytes untouched either way.
+     * Rewrites only the tag= line of the properties file, leaving all other lines intact. Uses Latin-1
+     * both ways to match UpdaterConfig.rawProps and preserve ANSI-saved comments byte-for-byte.
      */
     void writePin(String tag) throws IOException {
         writeKeys(Map.of("tag", tag));

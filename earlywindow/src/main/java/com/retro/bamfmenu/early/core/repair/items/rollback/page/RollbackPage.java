@@ -14,20 +14,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The rollback picker: the repo's releases, newest first, capped at ten by the engine.
- * What is pickable, and why so little is. The installed row is never pickable, because "roll back
- * to the version you are running" is not a rollback, it is a pin, and Clear Release Lock is the row
- * that owns pin state. Offline NOTHING is pickable: the engine still sends the installed version as
- * its one row (so the picker is never an empty box that reads as "this repo has no releases"), but
- * syncTo would write the pin and then fail on the same dead network, leaving a pinned box and a
- * failure line to explain it.
- * The two zero-row states. That offline row needs a version to name, and a box with no bcc stamp
- * and no ledger version has none, so the engine's own guarantee comes back empty on a fresh install; a
- * repo with no published releases answers LIVE with an empty array. Both print what the screen actually
- * has, because a reason line drawn above nothing reads as a picker that broke.
- * The gag lives here. "This is the first version, silly!" was the help on the row this window
- * replaced, and it only shows when the LIVE list really has nothing older, so the joke outlived the
- * feature by becoming true.
+ * Rollback picker (newest first, capped at 10 by the engine).
+ * Installed rows and offline fallback rows are never pickable so syncTo cannot pin on a dead network.
+ * Handles empty lists (fresh offline install or empty repo) and shows the "first version" line only when LIVE.
  */
 public final class RollbackPage implements RepairPage {
 

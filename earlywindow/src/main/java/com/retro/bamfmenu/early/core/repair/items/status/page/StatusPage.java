@@ -29,7 +29,7 @@ public final class StatusPage implements RepairPage {
     public List<PageRow> rows(UpdaterState state, int width) {
         List<PageRow> out = new ArrayList<>();
         if (!state.loaded()) {
-            out.add(PageRow.text("Reading the updater ...", Tone.DIM));
+            out.add(PageRow.text("Reading updater ...", Tone.DIM));
             return out;
         }
         // Status couldn't be read, so show unknown for every field instead of misleading defaults like
@@ -80,7 +80,7 @@ public final class StatusPage implements RepairPage {
     /** The guardrail requires in words, because there is no technical one: BCC 21.1.8 has no join
      *  gate, so a pinned client CAN join a mismatched server and eat a registry kick. */
     public static final String PIN_WARNING =
-            "A pinned client can still join a mismatched server and get kicked.";
+            "A pinned client can still try to join a mismatched server and will get kicked.";
 
     private static String row(String label, String value) {
         return (label.length() >= LABEL ? label : label + " ".repeat(LABEL - label.length())) + ": " + value;

@@ -16,7 +16,7 @@ public final class VerifyItem implements RepairDef {
                 "Check every managed file and restore potentially damaged files.",
                 RepairGate.FILE_SAFE,
                 state -> "Last sync: " + state.lastSyncCell(),
-                "Verify and repair every managed file?",
+                "Are you sure you would like to verify and repair managed files?",
                 ops -> RepairResult.ofSync(ops.repair()));
     }
 

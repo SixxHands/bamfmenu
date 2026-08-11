@@ -17,8 +17,8 @@ public final class FactoryResetItem implements RepairDef {
 
     /** Exact text for the two confirm prompts, kept as constants so tests can assert the wording verbatim. */
     public static final RepairEffect.Confirm ASK = new RepairEffect.Confirm("Confirm",
-            "Are you sure? This action will reset all configs to release defaults, and delete your "
-                    + "configured game options.", "Yes", "No");
+            "Are you sure you'd like to Factory Reset? This action will reset all mods, configs and "
+                    + "BAMFOS resources to release defaults, including configured game options.", "Yes", "No");
 
     public static final RepairEffect.Confirm WARN = new RepairEffect.Confirm("Warning",
             "This cannot be undone. Are you sure?", "Proceed", "Cancel");
@@ -27,10 +27,10 @@ public final class FactoryResetItem implements RepairDef {
      * Right-panel help covering what the confirm prompts omit: edits to shipped resource packs revert
      * and user-added mods are removed, while user-added resource packs survive. Kept short for ~67-col panels.
      */
-    public static final String HELP = "Downloads the whole pack again and puts this install back to release "
-            + "defaults. Your worlds, screenshots and server list are safe. Mods you added yourself are "
-            + "deleted. Resource packs you added survive, but ones that came with BAMFOS go back to the "
-            + "shipped version, so edits to those are lost.";
+    public static final String HELP = "Removes all files in BAMFOS and redownloads defaults. Worlds, "
+            + "screenshots and server lists are saved. Mods added by you will be deleted. Added Resource "
+            + "packs are saved but BAMFOS packs will be deleted and redownloaded. All edits to BAMFOS "
+            + "resource packs will be lost.";
 
     @Override
     public RepairItem item() {

@@ -33,8 +33,8 @@ class FactoryResetItemTest {
         assertEquals(2, asks.size());
 
         assertEquals("Confirm", asks.get(0).title());
-        assertEquals("Are you sure? This action will reset all configs to release defaults, and delete your "
-                + "configured game options.", asks.get(0).body());
+        assertEquals("Are you sure you'd like to Factory Reset? This action will reset all mods, configs and "
+                + "BAMFOS resources to release defaults, including configured game options.", asks.get(0).body());
         assertEquals("Yes", asks.get(0).yes());
         assertEquals("No", asks.get(0).no());
 
@@ -51,10 +51,10 @@ class FactoryResetItemTest {
     @Test
     void theHelpNamesWhatTheDialogsCannot() {
         String help = new FactoryResetItem().item().help();
-        assertTrue(help.contains("Mods you added yourself are deleted"), help);
-        assertTrue(help.contains("Resource packs you added survive"), help);
-        assertTrue(help.contains("came with BAMFOS"), String.valueOf(help));
-        assertTrue(help.contains("worlds"), String.valueOf(help));
+        assertTrue(help.contains("Mods added by you will be deleted"), help);
+        assertTrue(help.contains("Added Resource packs are saved"), help);
+        assertTrue(help.contains("All edits to BAMFOS resource packs will be lost"), String.valueOf(help));
+        assertTrue(help.contains("Worlds"), String.valueOf(help));
     }
 
     /** Verifies every line in both confirmation dialogs fits within the popup width. */

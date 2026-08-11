@@ -12,11 +12,11 @@ public final class SyncItem implements RepairDef {
     @Override
     public RepairItem item() {
         return RepairItem.act("sync", "Sync Now",
-                "Fetch the version the server is broadcasting. Version will be applied on the next boot.",
+                "Fetch the version the server is broadcasting. Version will be applied on next boot.",
                 RepairGate.FILE_SAFE,
                 state -> state.isPinned()
                         ? "Syncs to " + state.pinned() + " (the release lock)"
-                        : "Syncs to whatever the server broadcasts",
+                        : "Syncs to whatever the server is broadcasting",
                 "Sync BAMFOS now?",
                 ops -> RepairResult.ofSync(ops.syncNow()));
     }

@@ -103,7 +103,7 @@ class RepairSessionTest {
         RepairSession s = session(UpdaterState.reading());
         Recorder host = new Recorder();
         s.key(RepairIntent.ACTIVATE, host);
-        assertEquals("Reading the updater ...", s.lastMessage());
+        assertEquals("Reading updater ...", s.lastMessage());
         assertEquals(0, host.runs);
         assertNull(s.openPage());
         assertEquals(Tone.NORMAL, leftToneOf(s.frame(WIDTH, ROWS, 0), "Optional Mods"));
@@ -117,11 +117,11 @@ class RepairSessionTest {
     void aLiveReleaseLockIsRedInTheListAndInItsStateLine() {
         RepairSession pinned = session(RepairSample.state("pinned"));
         RepairFrame frame = pinned.frame(WIDTH, ROWS, 0);
-        assertEquals(Tone.ALERT, leftToneOf(frame, "Clear Release Lock"));
+        assertEquals(Tone.ALERT, leftToneOf(frame, "Remove Release Lock"));
 
         select(pinned, "clearlock");
         RepairFrame onIt = pinned.frame(WIDTH, ROWS, 0);
-        assertEquals(Tone.ALERT, leftToneOf(onIt, "Clear Release Lock"));
+        assertEquals(Tone.ALERT, leftToneOf(onIt, "Remove Release Lock"));
         String state = stateLineOf(onIt);
         assertTrue(state.contains("Locked to"), String.valueOf(state));
         assertTrue(state.contains("not following the server"), String.valueOf(state));
@@ -129,7 +129,7 @@ class RepairSessionTest {
 
         // When unpinned, the row stays grayed out with its status text instead of red.
         RepairSession free = session(RepairSample.state("idle"));
-        assertNotEquals(Tone.ALERT, leftToneOf(free.frame(WIDTH, ROWS, 0), "Clear Release Lock"));
+        assertNotEquals(Tone.ALERT, leftToneOf(free.frame(WIDTH, ROWS, 0), "Remove Release Lock"));
     }
 
     /** Guards the farewell prompt (the only exit path in this window) against firing unexpectedly. */
@@ -154,7 +154,7 @@ class RepairSessionTest {
 
         assertEquals("Restart Required", s.confirm().title());
         assertTrue(s.confirm().body().contains("Your game will now close"), s.confirm().body());
-        assertEquals("Ok", s.confirm().yes());
+        assertEquals("Press any key to close the game.", s.confirm().yes());
         assertEquals(10, s.closingIn());
 
         s.tick(host);
@@ -303,10 +303,10 @@ class RepairSessionTest {
     @Test
     void aConfirmPromptOwnsTheKeysUntilItIsAnswered() {
         RepairSession s = RepairSample.session("confirm");
-        assertEquals("Verify and repair every managed file?", s.confirm().body());
+        assertEquals("Are you sure you would like to verify and repair managed files?", s.confirm().body());
         Recorder host = new Recorder();
         s.key(RepairIntent.DOWN, host);
-        assertEquals("Verify and repair every managed file?", s.confirm().body());
+        assertEquals("Are you sure you would like to verify and repair managed files?", s.confirm().body());
         s.key(RepairIntent.BACK, host);
         assertNull(s.confirm());
         assertEquals("Cancelled.", s.lastMessage());
@@ -324,7 +324,7 @@ class RepairSessionTest {
     @Test
     void aPromptAnsweredAfterTheEngineStartedWritingIsStillRefused() {
         RepairSession s = RepairSample.session("confirm");
-        assertEquals("Verify and repair every managed file?", s.confirm().body());
+        assertEquals("Are you sure you would like to verify and repair managed files?", s.confirm().body());
         s.state(s.state().live(0L, true)); // Sync starts while the confirmation dialog is open.
         Recorder host = new Recorder();
         s.key(RepairIntent.ACTIVATE, host);
@@ -340,8 +340,8 @@ class RepairSessionTest {
         RepairSession s = RepairSample.session("working");
         assertTrue(s.busy());
         String bar = s.hints();
-        assertTrue(bar.contains("ENTER and ESC are locked"), bar);
-        assertTrue(bar.contains("F2  Volume"), bar);
+        assertTrue(bar.contains("Key inputs disabled."), bar);
+        assertTrue(bar.contains("Please do not close this window!"), bar);
         Recorder host = new Recorder();
         int before = s.selection();
         s.key(RepairIntent.DOWN, host);

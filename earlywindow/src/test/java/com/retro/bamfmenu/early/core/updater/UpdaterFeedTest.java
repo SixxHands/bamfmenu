@@ -238,7 +238,7 @@ class UpdaterFeedTest {
         UpdaterFeed failed = feedOn(midSync("fail"));
         assertEquals("Update stopped ....... FAILED",
                 failed.postBlock(0).get(failed.postBlock(0).size() - 1).text());
-        assertEquals("updater: sync aborted, boot continues", drain(failed));
+        assertEquals("updater: sync aborted, continuing to boot", drain(failed));
 
         UpdaterFeed limited = feedOn(midSync("limited"));
         assertNull(drain(limited));
