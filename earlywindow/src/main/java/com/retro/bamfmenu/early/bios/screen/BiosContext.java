@@ -28,6 +28,9 @@ public interface BiosContext {
     /** Closes the active audio resources and player. */
     void closeAudio();
 
+    /** Asks for the game to quit the way the window's X button does, once the hand-off reaches Minecraft. */
+    void requestGameClose(); // NOT immediate, the flag isn't read until Minecraft's first tick. Which is whenever you get to minecraft and idk if that becomes a issue so js dont screw that up bc I couldnt tell you what would happen if the two timing environments collided, gl ig.
+
     // shared transitional lead-in + special-event input lock
     /** Arms the shared transitional lead-in and special-event input lock. */
     void armLeadIn();

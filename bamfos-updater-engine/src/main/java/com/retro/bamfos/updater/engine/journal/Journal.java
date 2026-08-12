@@ -7,7 +7,6 @@ import com.retro.bamfos.updater.engine.util.HashUtils;
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -218,33 +217,16 @@ public final class Journal {
     }
 
     /**
-     * Replaces an OCCUPIED destination without ever leaving the name empty. On Windows a REPLACE_EXISTING
-     * move is two syscalls, delete the target then rename the source, and the realistic failure splits
-     * them: a scanner holding the freshly staged source (new files are exactly what a real-time scanner
-     * grabs) fails the rename AFTER the delete already unlinked the target. Step 0 runs before FML's mod
-     * scan and the retry is a whole boot away, so that session ran with the mod ABSENT, a
-     * missing-dependency crash, while every retry line upstream promised old bytes. Copying beside the
-     * target first means the only step that can touch the old file is an atomic swap, and a swap that
-     * fails leaves it standing.
+     * Replaces an occupied target without leaving the path empty. On Windows, plain REPLACE_EXISTING
+     * unlinks before renaming, so an AV lock on the staged file can leave a mod missing; Placement
+     * handles the copy-beside, atomic-swap, and rename-aside ladder.
      */
     private static void place(Path from, Path to) throws IOException {
-        Path fresh = to.resolveSibling(to.getFileName() + ".new");
-        try {
-            Files.copy(from, fresh, StandardCopyOption.REPLACE_EXISTING);
-            try {
-                Files.move(fresh, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException odd) {
-                // fresh is a same-directory sibling, so this arm should be unreachable; one plain move
-                // beats holding the op retryable for three boots on a filesystem that cannot say ATOMIC
-                Files.move(fresh, to, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            try {
-                Files.deleteIfExists(fresh);
-            } catch (IOException litter) {
-                // never mask the failure that matters with the cleanup's
-            }
-            throw e;
+        Placement.Rung rung = Placement.place(from, to);
+        if (rung == Placement.Rung.ASIDE) {
+            // Log which placement path succeeded so we can tell if an open jar was swapped under a running JVM.
+            System.out.println("[updater] " + to.getFileName()
+                    + " was open, so the old file was moved aside and the new bytes took its name");
         }
         try {
             Files.deleteIfExists(from);

@@ -63,8 +63,16 @@ public final class RebootOverlay implements Overlay, RepairContext {
     private boolean composed; // the box's lines have been built once, so a close can never beat the draw
     private volatile boolean done; // closed or stood down, either way this surface is finished for the boot
 
-    public RebootOverlay(Queue<Integer> input) {
-        this(input, System::nanoTime, RebootOverlay::halt);
+    /**
+     * The shipped door: the host passes the quit it wants taken, because only the host keeps the window whose
+     * should-close flag carries the request out to Minecraft. The clock stays ours.
+     * There is deliberately NO convenience ctor that supplies its own exit. The one that used to be here
+     * defaulted to Runtime.getRuntime.halt(0), which reaches neither a shutdown hook nor Minecraft.stop,
+     * and that is exactly the bug that had Crash Assistant filing a crash report for a quit the player chose.
+     * A surface that cannot name who takes the quit has no business ending anyone's game.
+     */
+    public RebootOverlay(Queue<Integer> input, Runnable exit) {
+        this(input, System::nanoTime, exit);
     }
 
     /** The posed-clock, posed-exit door: this thing counts on a clock and then ends the process, and a test
@@ -249,16 +257,6 @@ public final class RebootOverlay implements Overlay, RepairContext {
         exit.run();
     }
 
-    /**
-     * Ends the process, which is this surface's whole point: what the engine staged only becomes real on a
-     * boot that starts after this one.
-     * halt and not exit or Minecraft.stop(): the game has not started, there is no world to save, and
-     * this module has no Minecraft classes by design. Status 0 because the player chose this, and a launcher
-     * reading a non-zero code would report a crash that never happened.
-     */
-    private static void halt() {
-        Runtime.getRuntime().halt(0);
-    }
 
     /* The four the farewell never reaches. leave() in particular has to stay empty: at POST there is no
        SETUP to fall back to, so honouring it would drop the box and hand off to a Minecraft still holding

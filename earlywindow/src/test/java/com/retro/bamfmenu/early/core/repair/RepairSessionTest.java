@@ -170,6 +170,39 @@ class RepairSessionTest {
         assertEquals(1, host.closes);
     }
 
+    /**
+     * Farewell must clear closeAt and dismiss itself after firing once.
+     * Leaving closeAt set re-fires closeGame every frame and leaves "Restart Required" stuck on screen.
+     */
+    @Test
+    void aTakenFarewellLeavesTheScreenAndOnlyEverFiresOnce() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        s.done(new RepairResult(RepairResult.Kind.RESTART_REQUIRED, "reset armed"));
+        assertEquals(10, s.closingIn());
+
+        // done() sets rearmFarewell so the first tick starts the 10-second timer from the first drawable frame.
+        // Without this tick, advancing the clock below would happen before the countdown starts.
+        s.tick(host);
+        assertEquals(0, host.closes);
+
+        s.state(s.state().live(1_000L + 10_000L, false));
+        s.tick(host);
+        assertEquals(1, host.closes);
+
+        // What RepairScreen.closeGame does first before requesting quit.
+        s.farewellTaken();
+        assertEquals(0, s.closingIn());
+
+        // Simulate 2 seconds of frames at 60fps.
+        for (int frame = 0; frame < 120; frame++) {
+            s.state(s.state().live(1_000L + 11_000L + frame * 16L, false));
+            s.tick(host);
+        }
+        assertEquals(1, host.closes);
+        assertEquals(0, s.closingIn());
+    }
+
     /** Any key dismisses the farewell prompt once its grace period has passed. */
     @Test
     void anyKeyTakesTheFarewellOnceItHasHadTimeToBeSeen() {

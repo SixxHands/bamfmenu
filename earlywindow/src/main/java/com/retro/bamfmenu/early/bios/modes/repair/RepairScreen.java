@@ -36,6 +36,11 @@ public final class RepairScreen implements Screen, RepairContext {
     /* SETUP's option count, so this box reserves the SAME vertical budget its menu does and crossing
        between the two screens cannot resize the text or move the divider. */
     private final int reservedRows;
+    /* The quit has been asked for once, so ask no more. RepairSession.tick fires closeGame on EVERY frame
+       once the farewell's countdown is spent and never clears its own clock, which was invisible while this
+       method was Runtime.halt(0): the process died on the first call. Asking the host sixty times a second
+       instead printed the same line sixty times and re-requested a quit already in flight. */
+    private boolean asked;
 
     private final RepairOps ops = new EngineOps();
     private final AtomicReference<UpdaterState> readState = new AtomicReference<>();
@@ -178,21 +183,35 @@ public final class RepairScreen implements Screen, RepairContext {
     }
 
     /**
-     * Ends the process, the only op in this window that does. A factory reset is journalled by the time this
+     * Asks for the quit, the only op in this window that does. A factory reset is journalled by the time this
      * runs, so the next launch converges from bytes already on disk whatever happens here.
-     * exit and not Minecraft.stop(): at BIOS time the game has not started, there is no world open and no
-     * Minecraft instance to ask, and this module has no Minecraft classes by design. Status 0 because this is a
-     * deliberate quit, and a launcher reading a non-zero code would report a crash the player did not have.
+     * We ask the host rather than ending the process ourselves, and the window does not shut on this line:
+     * the boot finishes and Minecraft's first tick quits through stop, which is the same path the X button
+     * takes. That module still has no Minecraft classes by design, so the request rides out on GLFW's
+     * should-close flag and nothing here ever names a Minecraft type.
+     * IMPORTANT: this was Runtime.getRuntime.halt(0), and halt reaches neither a shutdown hook nor stop.
+     * Crash Assistant watches from a separate process and reads the missing normal_stop marker as a crash, so
+     * the shipped reset handed the player a crash report for a quit they chose. Status 0 was never the issue.
      */
     @Override
     public void closeGame() {
+        if (asked) {
+            return; // see the field: the session re-fires this every frame and it is no longer a one-way door
+        }
+        asked = true;
+        // the box goes FIRST, before the request: it has said everything it has to say, and a farewell still
+        // sitting there while the boot finishes behind it is what a player reads as a hang
+        RepairSession s = session;
+        if (s != null) {
+            s.farewellTaken();
+        }
         System.out.println("[bamfmenu] factory reset armed, closing so the next launch can apply it");
         try {
             System.out.flush();
         } catch (Throwable ignored) {
-            // never let a flush be the reason the exit below does not happen
+            // never let a flush be the reason the request below does not happen
         }
-        Runtime.getRuntime().halt(0);
+        host.requestGameClose();
     }
 
     @Override

@@ -331,7 +331,8 @@ public final class Reconciler {
 
         dupeGuard(plan, manifest, ledger, stagedFiles);
 
-        // .bak courtesies happen before the journal: a crash after a bak is only litter, never damage
+        // Copy .bak files before writing the journal so a crash only leaves extra backup files. Must copy
+        // instead of rename, otherwise aborting before the journal is written would leave the target missing.
         for (Action a : plan.actions) {
             if (deferred.contains(a.path())) {
                 continue; // Don't create a .bak copy for a path we're already skipping.

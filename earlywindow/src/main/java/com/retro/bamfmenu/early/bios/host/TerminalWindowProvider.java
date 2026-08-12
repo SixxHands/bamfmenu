@@ -462,7 +462,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        window puts up. It arms itself and owns its own countdown, halt and give-up deadline; everything
        below is one delegating line, so the decision never lives in this file. */
     private final java.util.Queue<Integer> rebootInput = new java.util.concurrent.ConcurrentLinkedQueue<>();
-    private final RebootOverlay rebootOverlay = new RebootOverlay(rebootInput);
+    private final RebootOverlay rebootOverlay = new RebootOverlay(rebootInput, this::requestGameClose);
+
+    /* Set by a BIOS surface that wants the game to quit, read once by setupMinecraftWindow on the main
+       thread. Volatile because the reboot notice requests it from the render thread. */
+    private volatile boolean closeRequested;
 
     /* In-game PAUSE menu (Esc during the rhythm game): Resume / Options / Quit; like the volume menu it
        freezes the game + pauses the audio. "Options" opens the key-remap sub-screen. All on the render
@@ -1898,6 +1902,11 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         }
 
         @Override
+        public void requestGameClose() {
+            TerminalWindowProvider.this.requestGameClose();
+        }
+
+        @Override
         public void armLeadIn() {
             TerminalWindowProvider.this.armLeadIn();
         }
@@ -2874,7 +2883,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         try {
             updaterFeed.poll();
             updaterSyncActive = updaterFeed.syncActive();
-            rebootOverlay.pending(updaterFeed.pendingSwaps());
+            // never once a quit is committed: requestGameClose now lands the player on POST, which is exactly
+            // where this overlay arms, so without the guard an in-session repair would show its farewell a
+            // SECOND time over a close already in flight and count another ten seconds at them
+            rebootOverlay.pending(updaterFeed.pendingSwaps() && !closeRequested);
             String line;
             while ((line = updaterFeed.nextLogLine()) != null) {
                 log.addLast(clip("> " + line, maxChars));
@@ -2906,7 +2918,7 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
        same moment. BootPhase owns the wording; the only thing this adds is the hand-off, which is a phase FML
        pushes no label for. */
     private String phaseText() {
-        return BootPhase.phase(handingOff,
+        return BootPhase.phase(closeRequested, handingOff,
                 stepText(activeMeter(StartupNotificationManager.getCurrentProgress())));
     }
 
@@ -2938,11 +2950,13 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             // finished with the NEXT bar's 0%. And no bar measures the hand-off, so past it the percentage is
             // dropped rather than left sitting on whatever meter is still standing
             ProgressMeter pm = activeMeter(StartupNotificationManager.getCurrentProgress());
-            String s = BootPhase.phase(handingOff, stepText(pm));
+            String s = BootPhase.phase(closeRequested, handingOff, stepText(pm));
             if (!s.isEmpty()) {
                 step = s;
             }
-            if (!handingOff && pm != null && pm.steps() > 0) {
+            // the percentage goes with the label: a bar filling up under the word "Closing" says the opposite
+            // of what the row means, same reason the hand-off drops it
+            if (!closeRequested && !handingOff && pm != null && pm.steps() > 0) {
                 pct = (int) (pm.progress() * 100.0F);
             }
         } catch (Throwable ignored) {
@@ -3001,8 +3015,9 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
            for. Every unit test passed through it, because they call handingOff() then step() on one thread, an
            ordering production cannot produce. holds() waits on the INTENT and is bounded at both ends. */
         rebootOverlay.handingOff();
+        // closeRequested has to break this wait loop, otherwise a factory reset from BIOS spins in Mode.REPAIR forever and never reaches the quit flag right below.
         while ((state.holdsHandoff() || volumeOverlay.active() || pauseOverlay.active()
-                || rebootOverlay.holds()) && !initFailed) {
+                || rebootOverlay.holds()) && !initFailed && !closeRequested) {
             glfwPollEvents();
             try {
                 Thread.sleep(16L);
@@ -3063,6 +3078,15 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
         glfwSwapInterval(0);
         /* Keep the brand through hand-off; the main mod's WindowTitleMixin owns it from here in-game. */
         glfwSetWindowTitle(window, APP_TITLE);
+        /* A BIOS surface asked to quit, so leave the same flag behind that the X button leaves. Minecraft
+           takes this handle unchanged and registers no close callback of its own, so the first pass of
+           runTick reads it and calls Minecraft.stop() for real. That is the whole point of doing it this way
+           rather than halting: stop() is what saves, what fires GameShuttingDownEvent, and what every other
+           mod watching for a clean quit is waiting on. Set on the MAIN thread here, not from the render
+           thread that requested it, because GLFW does not synchronise access to this flag. */
+        if (closeRequested) {
+            glfwSetWindowShouldClose(window, true);
+        }
         freeCallbacks();
         shutdownRenderThread();
         /* Free our OpenAL device now that the render thread is stopped, BEFORE Minecraft initialises its own
@@ -3072,6 +3096,35 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             audio = null;
         }
         return window;
+    }
+
+    /**
+     * A BIOS surface wants out: the factory reset and the staged-update farewell both end here.
+     * We do NOT end the process. Recording the wish and letting the boot finish is what makes this a
+     * real quit rather than a kill: setupMinecraftWindow leaves GLFW's should-close flag on the handle it
+     * gives Minecraft, whose first tick reads it and runs Minecraft.stop(), which is the only thing that
+     * fires GameShuttingDownEvent and satisfies every mod watching for a clean exit.
+     * IMPORTANT: this used to be Runtime.getRuntime().halt(0) at both call sites, and halt skips every
+     * shutdown hook and never touches stop(). Crash Assistant watches from a SEPARATE process and reads a
+     * missing normal_stop marker as a crash, so a player taking the factory reset got a crash report for a
+     * quit they chose. Exit status was never the problem, that mod does not read it. Whatever replaces this,
+     * it has to leave through stop().
+     * Costs a full mod load before the window actually closes, because nothing reads the flag until then.
+     */
+    private void requestGameClose() {
+        closeRequested = true;
+        /* Stand the BIOS screen down to POST, the same three lines ESC uses to leave SETUP. Without this the
+           friend keeps staring at the window that just told them the game would close while the boot quietly
+           finishes behind it, and a screen that says "closing" and then sits still for a minute reads as
+           frozen. Dropping to POST shows the real terminal finishing its work, which is what the exit they
+           already know looks like.
+           biosUsed comes WITH it and is not optional: POST would otherwise redraw the DEL prompt and let them
+           walk back into SETUP and hold the hand-off again, on a quit that is already committed. */
+        if (state != Mode.POST) {
+            recoveryRequiredError = false;
+            biosUsed = true;
+            state = Mode.POST;
+        }
     }
 
     /* The render thread has done its job after hand-off; shut the executor down so its daemon thread does

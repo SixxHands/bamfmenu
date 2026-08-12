@@ -44,9 +44,22 @@ class BootPhaseTest {
      */
     @Test
     void handingOff_outranksWhateverLabelIsStillStanding() {
-        assertEquals("Handing off to game", BootPhase.phase(true, "Launching minecraft"));
-        assertEquals("Handing off to game", BootPhase.phase(true, ""));
+        // Match FML's verbatim last label (lowercase "m") rather than our internal "Handing off" phrase.
+        assertEquals("Launching minecraft", BootPhase.phase(true, "Launching minecraft"));
+        assertEquals("Launching minecraft", BootPhase.phase(true, ""));
         assertEquals("Launching minecraft", BootPhase.phase(false, "Launching minecraft"));
         assertEquals("", BootPhase.phase(false, null));
+    }
+
+    /**
+     * When the BIOS requests a quit, show that on the status row while startup finishes
+     * so the wait doesn't look like a freeze.
+     */
+    @Test
+    void aQueuedQuit_outranksBothOfThem() {
+        assertEquals("Closing minecraft", BootPhase.phase(true, true, "Loading mods"));
+        assertEquals("Closing minecraft", BootPhase.phase(true, false, "Loading mods"));
+        assertEquals("Closing minecraft", BootPhase.phase(true, false, null));
+        assertEquals("Loading mods", BootPhase.phase(false, false, "Loading mods"));
     }
 }

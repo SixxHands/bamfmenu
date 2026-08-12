@@ -356,6 +356,16 @@ public final class RepairSession {
         }
     }
 
+    /**
+     * Dismisses the farewell dialog once exit is actually requested (by countdown or key).
+     * Must clear `closeAt` here: if closeGame doesn't halt immediately, leaving it armed re-fires exit every frame.
+     */
+    public void farewellTaken() {
+        closeAt = 0;
+        rearmFarewell = false;
+        closeCause = "";
+    }
+
     /** Seconds left before the game closes itself, 0 when no farewell is up. */
     public int closingIn() {
         return closeAt <= 0 ? 0 : (int) Math.max(0, (closeAt - state.nowMillis() + 999) / 1000);
