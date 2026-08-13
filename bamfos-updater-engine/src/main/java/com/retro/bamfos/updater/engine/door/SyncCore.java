@@ -416,8 +416,10 @@ public final class SyncCore {
                         : "repaired " + moved + " file(s) on " + now + tail;
             } else if (plan.isNoop() && strikesHeld) {
                 // a DISTINCT prefix, machine-matched: UpdaterOps.stagedSync maps "already current (" to the
-                // BIOS's done code, and this state is NOT done, it is a box whose held rows ran out of
-                // retries with nothing left to plan. Change these words and change stagedSync's matcher too
+                // BIOS's done code (6) and THIS prefix to the held code (7), because this state is NOT done, it
+                // is a box whose held rows ran out of retries with nothing left to plan -- and folded into
+                // 0 it closed the game promising an update no boot delivers. Change these words and change
+                // stagedSync's matcher too
                 summary = "current with " + heldCount + " file(s) held back (" + now + ")";
             } else {
                 summary = "staged the updater's own files on " + now + tail;

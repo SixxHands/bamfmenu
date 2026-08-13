@@ -580,6 +580,29 @@ class UpdaterOpsTest {
         assertTrue(Files.isDirectory(p.resolve("squatter")));
     }
 
+    /** Strip a leading UTF-8 BOM in writeKeys just like rawProps does, or unpinning a first-line tag misses it. */
+    @Test
+    void unpin_clearsAPinHidingBehindAUtf8Bom() throws IOException {
+        Path box = Files.createDirectories(dir.resolve("bombox"));
+        Path p = box.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
+        Files.createDirectories(p.getParent());
+        byte[] body = "tag=v0.2.4\nrepo=o/r\n".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        byte[] withBom = new byte[body.length + 3];
+        withBom[0] = (byte) 0xEF;
+        withBom[1] = (byte) 0xBB;
+        withBom[2] = (byte) 0xBF;
+        System.arraycopy(body, 0, withBom, 3, body.length);
+        Files.write(p, withBom);
+        UpdaterOps boxOps = new UpdaterOps(box, "http://127.0.0.1:1");
+
+        assertEquals(0, boxOps.unpin());
+
+        assertEquals("", com.retro.bamfos.updater.engine.config.UpdaterConfig.load(box).tagPin());
+        String text = Files.readString(p, java.nio.charset.StandardCharsets.ISO_8859_1);
+        assertFalse(text.contains("tag="), text);
+        assertTrue(text.contains("repo=o/r"), String.valueOf(text));
+    }
+
     /**
      * java.util.Properties accepts `=`, `:`, and whitespace separators, so writeKeys has to match all of
      * them instead of just `tag=`, otherwise unpin() leaves the pin behind without error.

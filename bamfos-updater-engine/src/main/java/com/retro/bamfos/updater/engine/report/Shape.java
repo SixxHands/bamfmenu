@@ -72,6 +72,20 @@ final class Shape {
         return UNKNOWN;
     }
 
+    /**
+     * Prefix variant of ourWord for OS/arch strings with version tails ("Windows 11", "Mac OS X").
+     * Still returns our own literal; pass longest prefixes first (e.g. x86_64 before x86).
+     */
+    static Shape ourPrefix(String raw, List<String> ours) {
+        String s = clean(raw).toLowerCase(Locale.ROOT);
+        for (String word : ours) {
+            if (s.startsWith(word)) {
+                return new Shape(word);
+            }
+        }
+        return UNKNOWN;
+    }
+
     /** Formats a numeric field as a string (safe by type, no text validation needed). */
     static Shape number(long value) {
         return new Shape(Long.toString(value));

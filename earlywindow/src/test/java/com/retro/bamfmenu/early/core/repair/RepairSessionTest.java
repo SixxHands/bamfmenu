@@ -351,9 +351,10 @@ class RepairSessionTest {
         assertTrue(yes.busy());
     }
 
-    /** The prompt is the one gap where a player's own reading time sits between the gate and the write, and
-     *  the engine can start writing inside it. Nothing else stands in the way: InstanceLock reads our own
-     *  pid as a dead holder, deletes the live lock file and hands out a second lock in the same JVM. */
+    /**
+     * Blocks the prompt from opening if the engine starts writing during the gap,
+     * rather than waiting for InstanceLock to fail after the player confirms.
+     */
     @Test
     void aPromptAnsweredAfterTheEngineStartedWritingIsStillRefused() {
         RepairSession s = RepairSample.session("confirm");

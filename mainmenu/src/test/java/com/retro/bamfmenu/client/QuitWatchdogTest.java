@@ -3,6 +3,7 @@ package com.retro.bamfmenu.client;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,25 +11,75 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The watchdog's whole safety story is what it CANNOT do: it must be a daemon (a non-daemon watchdog
- * IS the leak it hunts) and it must arm exactly once however many times shutdown fires. The halt
- * itself is untestable in-process (halting the test JVM reads as a crashed worker), so these pin the
- * arming rules and the abandonment line instead.
- */
+// Verifies QuitWatchdog runs as a daemon, arms once, and never halts during an active world save (clock injected into Stillness).
 class QuitWatchdogTest {
-
-    private static final long NEVER_FIRES_MS = 5L * 60L * 1000L; // far past the suite's lifetime, the timer must never fire inside a test JVM
 
     @Test
     void armsExactlyOnce_andTheTimerThreadIsADaemon() throws Exception {
-        assertTrue(QuitWatchdog.arm(NEVER_FIRES_MS));
-        Thread dog = byNameWithin("bamfmenu-quit-watchdog", 2000);
-        assertNotNull(dog);
-        assertTrue(dog.isDaemon());
-        // a second registration (or the event firing twice) must not stack a second timer
-        assertFalse(QuitWatchdog.arm(NEVER_FIRES_MS));
-        assertEquals(1, countByName("bamfmenu-quit-watchdog"));
+        // no-op body so a live watchdog doesn't think this Gradle worker is stuck and halt the test suite
+        CountDownLatch parked = new CountDownLatch(1);
+        Runnable inert = () -> {
+            try {
+                parked.await();
+            } catch (InterruptedException ignored) {
+            }
+        };
+        try {
+            assertTrue(QuitWatchdog.arm(inert));
+            Thread dog = byNameWithin("bamfmenu-quit-watchdog", 2000);
+            assertNotNull(dog);
+            assertTrue(dog.isDaemon());
+            // a second registration (or the event firing twice) must not stack a second timer
+            assertFalse(QuitWatchdog.arm(inert));
+            assertEquals(1, countByName("bamfmenu-quit-watchdog"));
+        } finally {
+            parked.countDown();
+        }
+    }
+
+    // World save on Server thread keeps resetting the timer no matter how long it takes.
+    @Test
+    void aLiveGameThreadResetsTheClock_howeverLongTheSaveTakes() {
+        long[] now = {0};
+        QuitWatchdog.Stillness quiet = new QuitWatchdog.Stillness(10_000L, () -> now[0]);
+        Set<String> saving = Set.of("Server thread", "modloader-worker-1");
+        for (int minute = 1; minute <= 5; minute++) {
+            now[0] = minute * 60_000L * 1_000_000L;
+            assertFalse(quiet.wedged(saving), String.valueOf(minute));
+        }
+        // save done, Server thread gone, and the clock starts NOW, not at the quit request
+        now[0] += 1_000L * 1_000_000L;
+        assertFalse(quiet.wedged(Set.of("modloader-worker-1")));
+        now[0] += 9_999L * 1_000_000L;
+        assertFalse(quiet.wedged(Set.of("modloader-worker-1")));
+        now[0] += 1L * 1_000_000L;
+        assertTrue(quiet.wedged(Set.of("modloader-worker-1")));
+    }
+
+    /** Every change to the survivor set is progress, and progress restarts the whole window. */
+    @Test
+    void aChangingThreadSetIsProgress_notAWedge() {
+        long[] now = {0};
+        QuitWatchdog.Stillness quiet = new QuitWatchdog.Stillness(10_000L, () -> now[0]);
+        assertFalse(quiet.wedged(Set.of("worker-a", "worker-b")));
+        now[0] += 9_000L * 1_000_000L;
+        assertFalse(quiet.wedged(Set.of("worker-a")));
+        now[0] += 9_000L * 1_000_000L;
+        assertFalse(quiet.wedged(Set.of("worker-a")));
+        now[0] += 1_000L * 1_000_000L;
+        assertTrue(quiet.wedged(Set.of("worker-a")));
+    }
+
+    // Leave a live server alone! Cant help it if yo thinkpad slow af
+    @Test
+    void aWedgedServerThreadIsNeverHalted_theLeakIsTheLesserEvil() {
+        long[] now = {0};
+        QuitWatchdog.Stillness quiet = new QuitWatchdog.Stillness(10_000L, () -> now[0]);
+        Set<String> stuck = Set.of("Server thread");
+        for (int hour = 1; hour <= 3; hour++) {
+            now[0] = hour * 3_600_000L * 1_000_000L;
+            assertFalse(quiet.wedged(stuck));
+        }
     }
 
     @Test
@@ -46,6 +97,9 @@ class QuitWatchdogTest {
             assertFalse(line.contains("test-quit-bystander"));
             assertFalse(line.contains("test-quit-dead"));
             assertFalse(line.contains("\n"));
+
+            assertTrue(QuitWatchdog.nonDaemonNames(List.of(holder, bystander, neverStarted))
+                    .equals(Set.of("test-quit-holder")));
         } finally {
             hold.countDown();
             holder.join(2000);

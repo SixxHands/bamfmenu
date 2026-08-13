@@ -17,25 +17,9 @@ import java.util.Map;
 import java.util.function.BiFunction;
 import java.util.stream.Stream;
 
-/**
- * The whole competence of the frozen stub: pick a core jar, load it, hand over.
- * Why this file is the way it is. On a client FML opens this jar before our code exists and holds it
- * all session, so nothing inside the JVM can replace it (the same ERROR_SHARING_VIOLATION fact that killed
- * the in-session mod toggle). Every JUDGEMENT the old shim made, which bytes are bad, how many chances they
- * get, who is forgiven, now lives in the CORE, one floor down, where a bug is one release away from fixed.
- * The ladder, and it is the entire design. Cores are core-NNNN.jar in .bamfos-updater/core/, four
- * digits, zero padded, so a LEXICAL sort IS a numeric sort. Highest generation first, older ones under it,
- * core-0000.jar (this jar's own embedded twin) at the floor. Nothing here ever renames or replaces a core,
- * which is why none of the atomic-move, pid-tmp and did-the-copy-land machinery the engine slot needs is
- * here: a new generation is a new FILENAME, and the running one stays open and untouched all session.
- * The one bit of memory. A mark file names the generation this boot handed control to. The CORE
- * deletes it the moment it has an engine loaded, so a mark still standing on the next boot means that core
- * never got that far. The descent is MONOTONE: the stub skips the blamed generation AND everything above
- * it, so two bad generations walk down instead of ping-ponging, and it never skips the LAST candidate.
- * Why it is safe to freeze. Every wrong answer this file can give lands on core-0000.jar, which is
- * known good by shipping. The worst bug it can have is "always runs the floor", and that box still boots,
- * still syncs, and still takes a new core on the next boot.
- */
+/* Picks a core-NNNN.jar from .bamfos-updater/core/ (highest generation first, 4-digit padded so lexical
+ * sort is numeric), loads it in an isolated classloader, and hands over. Falls back to the bundled floor
+ * core-0000.jar if nothing else loads. */
 final class CoreSlot {
 
     private static final String MARK = "core-unproven";
@@ -59,9 +43,9 @@ final class CoreSlot {
             Path last = order.isEmpty() ? null : order.get(order.size() - 1);
             order.removeIf(p -> name(p).compareTo(blamed) >= 0);
             if (order.isEmpty() && last != null) {
-                // NEVER skip the last candidate: one alt-F4 during the first sync on a fresh box must not
-                // cost a player his updater forever with no step he could be talked through
-                order.add(last);
+                // Fallback so we always have something to run: if all other cores fail, re-extract and run the bundled core-0000.jar.
+                Path floor = name(last).equals(FLOOR) ? last : extract(dir);
+                order.add(floor != null ? floor : last);
             }
         }
         for (Path jar : order) {
@@ -99,21 +83,33 @@ final class CoreSlot {
         return (BiFunction<String, Object[], Object>) f;
     }
 
-    /** Highest generation first. The fixed four-digit padding is WHY a lexical sort is a numeric sort, and
-     *  that is the reason the width is frozen surface. The filter stays LOOSE on purpose: checking the
-     *  core-NNNN grammar here wants a compiled Pattern, a static field holding one is a class initialiser,
-     *  and no class in this jar is allowed one (FrozenStubJarTest). CoreHealth checks the grammar one floor
-     *  down, where a junk name is both cheap to reject and fixable. A name that does not fit still has to
-     *  LOAD before it can run, so the worst it costs is one rung. */
+    /**
+     * Highest generation first; 4-digit padding makes lexical sort match numeric order.
+     * Strict core-NNNN.jar match ignores hand-copied backups (e.g. core-old.jar sorts above digits) without deleting them.
+     * Uses char checks instead of a static Pattern so this jar stays free of class initialisers (FrozenStubJarTest).
+     */
     private static List<Path> candidates(Path dir) {
         try (Stream<Path> list = Files.list(dir)) {
             return new ArrayList<>(list
-                    .filter(p -> name(p).startsWith(PREFIX) && name(p).endsWith(".jar"))
+                    .filter(p -> isGeneration(name(p)))
                     .sorted(Comparator.comparing(CoreSlot::name).reversed())
                     .toList());
         } catch (IOException | RuntimeException none) {
             return new ArrayList<>(); // Missing dir or permissions: fall back to the embedded core.
         }
+    }
+
+    /** Strict filename format: core-NNNN.jar (four digits). */
+    private static boolean isGeneration(String n) {
+        if (n.length() != 13 || !n.startsWith(PREFIX) || !n.endsWith(".jar")) {
+            return false;
+        }
+        for (int i = 5; i < 9; i++) {
+            if (n.charAt(i) < '0' || n.charAt(i) > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Returns null if there's no mark, or an empty array if the mark exists but can't be read
@@ -227,8 +223,17 @@ final class CoreSlot {
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             return target;
         } catch (IOException | RuntimeException disk) {
+            sweepTmp(tmp); // Clean up our pid-named temp file on failure so we don't leave junk behind.
             System.out.println("[updater] no core could be loaded: " + disk);
             return null;
+        }
+    }
+
+    private static void sweepTmp(Path tmp) {
+        try {
+            Files.deleteIfExists(tmp);
+        } catch (IOException | RuntimeException held) {
+            // Best-effort cleanup; ignore delete failures.
         }
     }
 

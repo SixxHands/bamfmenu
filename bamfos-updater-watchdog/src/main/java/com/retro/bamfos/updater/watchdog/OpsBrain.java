@@ -143,11 +143,10 @@ final class OpsBrain {
                     + "/bamfos reload and /bamfos cleartoken.");
             case 5 -> Reply.ok("github is rate limiting this server, so nothing was staged. It clears itself, "
                     + "try again later.");
-            // the server engine does not answer 6 yet: UpdaterOps holds stagedSync's !server gate until
-            // this line and repairReply's exist, so lifting it cannot land a healthy box in the
-            // unknown-code arm below. NOT dead code, landing first is the point
-            case 6 -> Reply.ok("already current. This box is on the release it asked for, so nothing was "
+            case 6 -> Reply.ok("already current. This server is on the configured release, so nothing was "
                     + "staged and a restart now would change nothing.");
+            case 7 -> Reply.ok("current, but some file(s) are still blocked after retries ran out. Nothing "
+                    + "was staged and a restart alone changes nothing: run /bamfos repair to retry them.");
             case 2 -> Reply.bad("the sync did not finish and nothing applied. Read "
                     + ".bamfos-updater/server-sync.log for the reason; the next boot syncs again anyway.");
             // Don't guess a message for an unknown exit code; just print the code.
@@ -173,13 +172,15 @@ final class OpsBrain {
                     + "/bamfos reload and /bamfos cleartoken.");
             case 5 -> Reply.ok("github is rate limiting this server, so the repair could not read the release. "
                     + "It clears itself, try again later.");
-            case 6 -> Reply.ok("repair clean. Every managed file was hash-checked against the release and "
-                    + "every one already matches, so nothing was staged and there is no restart to take. "
-                    + "Whatever sent you here, it is not something a repair can put back.");
-            case 2 -> Reply.bad("the repair did not finish. Read .bamfos-updater/server-sync.log for the "
-                    + "reason; the next boot re-derives the install by itself anyway.");
-            default -> Reply.bad("the repair answered " + code + ", which this build has no line for. "
-                    + "Read .bamfos-updater/server-sync.log.");
+            case 6 -> Reply.ok("repair clean. Every managed file matches the release, so nothing was staged "
+                    + "and no restart is needed.");
+            case 7 -> Reply.bad("the repair could not replace some file(s) after all retries. Something on "
+                    + "this server is locking them (another launcher, antivirus, or read-only bit). Check "
+                    + ".bamfos-updater/server-sync.log for which files.");
+            case 2 -> Reply.bad("the repair did not finish. Check .bamfos-updater/server-sync.log for the "
+                    + "reason; the next boot re-checks the install anyway.");
+            default -> Reply.bad("repair returned unknown code " + code + ". "
+                    + "Check .bamfos-updater/server-sync.log.");
         };
     }
 

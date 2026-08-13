@@ -41,8 +41,7 @@ def cargoDir = layout.buildDirectory.dir('generated-cargo')
 
 tasks.register('copyCargoCore', Copy) {
     from(configurations.cargoCore) {
-        // fixed resource name: CoreCargo reads /core/bamfos-updater-core.jar by this exact path, and the stub
-        // packs its own floor copy under the matching one
+        // Fixed resource path: CoreCargo reads /core/bamfos-updater-core.jar (stub fallback lives under baseline/).
         rename { 'bamfos-updater-core.jar' }
     }
     into cargoDir.map { it.dir('core') }

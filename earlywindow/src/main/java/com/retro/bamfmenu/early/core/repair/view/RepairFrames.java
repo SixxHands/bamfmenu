@@ -132,7 +132,7 @@ public final class RepairFrames {
         if (dividerRow >= 0 && stateRow < rows) {
             String why = item.whyNot(v.state());
             if (!v.state().loaded()) {
-                text[stateRow] = RepairBox.clip("Reading the updater ...", width);
+                text[stateRow] = RepairBox.clip("Reading updater ...", width);
                 tone[stateRow] = Tone.DIM;
             } else if (!why.isEmpty()) {
                 text[stateRow] = RepairBox.clip(why, width);
@@ -173,7 +173,7 @@ public final class RepairFrames {
         }
         if (page.needsReleases() && v.state().releases() == null) {
             int waitRow = Math.min(2, rows - 1);
-            text[waitRow] = RepairBox.clip("Reading the release list ...  " + spin(tick), width);
+            text[waitRow] = RepairBox.clip("Checking release list ...  " + spin(tick), width);
             tone[waitRow] = Tone.DIM;
             return new PageFill(-1, pageSel, pageTop);
         }

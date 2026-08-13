@@ -639,20 +639,35 @@ public final class Reconciler {
     }
 
     /**
-     * The ops a step 0 KEPT because they were still stuck, so journal.save cannot quietly destroy them
-     *. They go in FRONT of this plan's ops, because replay
-     * runs in order and our fresher op for the same name still wins.
-     * Three things are left behind. An op this plan RE-DERIVED, because the fresh one owns freshly staged
-     * bytes and replaying both would move the file and then report the second one abandoned, gating a
-     * ledger row that actually landed. An op for a path this apply DEFERRED, because this run already decided
-     * to leave that file alone. And every op at all when the target version moved, which is 's
-     * rollback safety: after a rollback the new plan is authoritative and a leftover op would place bytes
-     * from the version we just left.
+     * Prepends still-stuck step-0 ops before this plan's ops so journal.save doesn't drop them. Drops
+     * ops re-derived or deferred here, and on a version change drops everything except player renames.
      */
     private List<Journal.Op> carryOver(String targetVersion, Set<String> deferred, List<Journal.Op> fresh) throws IOException {
         Journal leftover = Journal.load(Journal.pathIn(dir));
-        if (leftover.ops.isEmpty() || !leftover.targetVersion.equals(targetVersion)) {
+        if (leftover.ops.isEmpty()) {
             return List.of();
+        }
+        if (!leftover.targetVersion.equals(targetVersion)) {
+            List<Journal.Op> renames = new ArrayList<>();
+            int dropped = 0;
+            for (Journal.Op kept : leftover.ops) {
+                boolean named = fresh.stream().anyMatch(o -> strip(o.to()).equals(strip(kept.to())));
+                if (kept.kind().equals("rename") && !named
+                        && !pins.pinned(strip(kept.to())) && !deferred.contains(strip(kept.to()))) {
+                    // Keep pending enable/disable toggles across version changes; if the new plan targets the
+                    // same path, the new op overrides it.
+                    renames.add(kept);
+                } else {
+                    dropped++;
+                }
+            }
+            if (dropped > 0) {
+                // Log dropped ops explicitly so there's a trace in the logs if something gets skipped.
+                System.out.println("[updater] target moved to " + targetVersion + ", dropping " + dropped
+                        + " held-over op(s) from the " + leftover.targetVersion
+                        + " journal, the new plan is authoritative");
+            }
+            return renames;
         }
         List<Journal.Op> carried = new ArrayList<>();
         for (Journal.Op kept : leftover.ops) {

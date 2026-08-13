@@ -68,8 +68,9 @@ final class BoxFacts {
         Ledger ledger = ledger(dir);
         UpdaterConfig cfg = config(dir);
         return new Box(side,
-                Shape.ourWord(prop("os.name"), OS),
-                Shape.ourWord(prop("os.arch"), ARCH),
+                // Prefix match, not equals: os.name is "Windows 11" or "Mac OS X", while Linux is bare.
+                Shape.ourPrefix(prop("os.name"), OS),
+                Shape.ourPrefix(prop("os.arch"), ARCH),
                 Runtime.version().feature(),
                 Shape.tag(EngineEntry.version()),
                 ledger.installedVersion.isEmpty() ? Shape.NONE : Shape.tag(ledger.installedVersion),

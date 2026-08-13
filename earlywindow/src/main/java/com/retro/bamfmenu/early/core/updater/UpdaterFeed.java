@@ -265,6 +265,13 @@ public final class UpdaterFeed {
                 // or partial "ok" rows above the final status (BootBus.end: ok|skip|limited|offline|no-release|fail).
                 String state = f.length > 1 ? f[1] : "";
                 currentFile = "";
+                // Terminate the apply block too: if step 0 fails without ADONE (e.g. disk full),
+                // mark it "partial" so the apply spinner doesn't stay frozen on screen.
+                if (sawApply && applyState.isEmpty()) {
+                    applyState = "partial";
+                    applyPhase = "";
+                    applyPath = "";
+                }
                 if (sawSync && !"ok".equals(state)) {
                     // Match the NO CARRIER label on the hardware row when offline instead of showing FAILED next to it.
                     closingRow = switch (state) {
@@ -475,7 +482,9 @@ public final class UpdaterFeed {
             return "Update stopped ....... INCOMPLETE";
         }
         if (!syncedFrom.equals(syncedTo)) {
-            return "BAMFOS UPDATED FROM " + syncedFrom + " TO " + syncedTo + ".";
+            // Check tag direction so pulling a bad release prints ROLLED BACK to match latest.log.
+            return (rolledBack(syncedFrom, syncedTo) ? "BAMFOS ROLLED BACK FROM " : "BAMFOS UPDATED FROM ")
+                    + syncedFrom + " TO " + syncedTo + ".";
         }
         if (landed > 0 && landed < planned) {
             return "BAMFOS REPAIRED " + landed + " OF " + planned + " FILES ON " + syncedTo + ".";
@@ -483,6 +492,73 @@ public final class UpdaterFeed {
         // The engine doesn't send SYNCED when only updater jars changed, so planned is always > 0 here.
         int count = landed < 0 ? planned : landed;
         return "BAMFOS REPAIRED " + count + (count == 1 ? " FILE ON " : " FILES ON ") + syncedTo + ".";
+    }
+
+    /**
+     * Local duplicate of the backward-move check in engine `TagOrder` (duplicated so earlywindow stays decoupled).
+     * Returns true only when provably backward (unreadable or ambiguous tags return false); keep in sync with `TagOrder`.
+     */
+    static boolean rolledBack(String from, String to) {
+        int[] left = tagParts(tagCore(from));
+        int[] right = tagParts(tagCore(to));
+        if (left == null || right == null) {
+            return false;
+        }
+        for (int i = 0; i < Math.max(left.length, right.length); i++) {
+            int l = i < left.length ? left[i] : 0; // 0-fill so v0.2 and v0.2.0 stay the same version
+            int r = i < right.length ? right[i] : 0;
+            if (l != r) {
+                return r < l;
+            }
+        }
+        // Equal numbers: a bare release outranks a prerelease suffix (semver), so moving to a suffixed tag is a downgrade.
+        return tagSuffix(from).isEmpty() && !tagSuffix(to).isEmpty();
+    }
+
+    /** Drops a leading v and everything from the first suffix marker, leaving the dotted numbers. */
+    private static String tagCore(String tag) {
+        String s = tag.trim().toLowerCase(java.util.Locale.ROOT);
+        if (s.startsWith("v")) {
+            s = s.substring(1);
+        }
+        int cut = s.indexOf('-');
+        int plus = s.indexOf('+');
+        if (plus >= 0 && (cut < 0 || plus < cut)) {
+            cut = plus;
+        }
+        return cut < 0 ? s : s.substring(0, cut);
+    }
+
+    /** Returns the suffix starting at its delimiter from the raw tag, or "" if none. */
+    private static String tagSuffix(String tag) {
+        String s = tag.trim();
+        int cut = s.indexOf('-');
+        int plus = s.indexOf('+');
+        if (plus >= 0 && (cut < 0 || plus < cut)) {
+            cut = plus;
+        }
+        return cut < 0 ? "" : s.substring(cut);
+    }
+
+    /** null for anything that is not dot-separated digits, because a half-read tag must not become a direction. */
+    private static int[] tagParts(String core) {
+        if (core.isEmpty()) {
+            return null;
+        }
+        String[] cell = core.split("\\.", -1);
+        int[] out = new int[cell.length];
+        for (int i = 0; i < cell.length; i++) {
+            if (cell[i].isEmpty() || cell[i].length() > 9) {
+                return null; // a 20-digit "version" is a date or a hash, not a version
+            }
+            for (int j = 0; j < cell[i].length(); j++) {
+                if (!Character.isDigit(cell[i].charAt(j))) {
+                    return null;
+                }
+            }
+            out[i] = Integer.parseInt(cell[i]);
+        }
+        return out;
     }
 
     private static String dotted(String name) {

@@ -329,10 +329,8 @@ public final class RepairSession {
     }
 
     private void start(RepairEffect.Act act, RepairContext ctx) {
-        // The last gate before the hand-off, because the ones above ran before the prompt went up and a player
-        // reading an are-you-sure box is a player the engine can start writing behind (single
-        // writer). InstanceLock is NOT the backstop: it reads our own pid as a dead holder, deletes the
-        // live lock file and hands out a second lock inside the same JVM.
+        // Re-check single-writer gate right before dispatch: the engine may have started writing
+        // while the user read the confirm dialog, and catching it here beats failing with "lock held".
         String locked = RepairGate.FILE_SAFE.whyNot(state);
         if (!locked.isEmpty()) {
             last = new RepairResult(RepairResult.Kind.REFUSED, locked);

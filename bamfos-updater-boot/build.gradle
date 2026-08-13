@@ -161,19 +161,11 @@ tasks.named('jar') {
     }
 }
 
-/* THE FROZEN BUDGET. Every statement in these three files is permanent liability on every
-   player's machine: FML opens this jar before our code exists and holds it all session, so no release can
-   ever reach in and fix one of them. That point erodes one convenience method at a time, which is why this
-   FAILS the build instead of warning about it. 90 against the 67 the split landed on, and that headroom is
-   for a fix that genuinely cannot live in the core, never for a feature.
-   Counted as semicolons at brace depth >= 2 once comments and literals are stripped, which is method-body
-   statements: the package line, the imports and the field declarations sit shallower and do not count.
-   COMMENTS ARE NOT IN THE BUDGET, because every warning in these files cost somebody a session. */
-def frozenFiles = files(
-        'src/main/java/com/retro/bamfos/updater/boot/ClientLocator.java',
-        'src/main/java/com/retro/bamfos/updater/boot/CoreSlot.java',
-        'src/main/java/com/retro/bamfos/updater/boot/UpdaterBridge.java')
-def frozenLimit = 90
+// Statement cap on the frozen stub so we don't accidentally bloat code we can't hot-update. Fails the build if exceeded.
+def frozenFiles = fileTree('src/main/java') { include '**/*.java' }
+// Constants-only files allowed to have 0 statements without tripping the parser sanity check below.
+def statementFree = ['UpdaterAbi.java'] as Set
+def frozenLimit = 110
 
 tasks.register('frozenBudget') {
     description = 'Fails the build when the frozen stub grows past its statement budget.'
@@ -219,13 +211,12 @@ tasks.register('frozenBudget') {
                     i++
                 }
             }
-            if (count == 0) {
-                // a counter that has stopped understanding Java reads the same as a stub that shrank, and it
-                // would sit here passing forever while the budget it guards quietly filled up. No frozen file
-                // is ever legitimately empty, so ZERO means the parser broke and this run measured nothing
+            if (count == 0 && !statementFree.contains(f.name)) {
+                // Zero statements in a non-constants file means the statement counter broke (don't silently pass).
                 throw new GradleException("${f.name} counted ZERO executable statements, so this gate is "
                         + "measuring nothing. Either the file was gutted or the counter below no longer reads "
-                        + "Java: fix that before trusting any number it prints")
+                        + "Java: fix that before trusting any number it prints (constants-only files belong "
+                        + "in statementFree above)")
             }
             total += count
             perFile << "${f.name} ${count}"

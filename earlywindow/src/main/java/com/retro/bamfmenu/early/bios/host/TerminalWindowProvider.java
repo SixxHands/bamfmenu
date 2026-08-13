@@ -3102,17 +3102,23 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
      * A BIOS surface wants out: the factory reset and the staged-update farewell both end here.
      * We do NOT end the process. Recording the wish and letting the boot finish is what makes this a
      * real quit rather than a kill: setupMinecraftWindow leaves GLFW's should-close flag on the handle it
-     * gives Minecraft, whose first tick reads it and runs Minecraft.stop(), which is the only thing that
+     * gives Minecraft, whose first tick reads it and runs Minecraft.stop, which is the only thing that
      * fires GameShuttingDownEvent and satisfies every mod watching for a clean exit.
-     * IMPORTANT: this used to be Runtime.getRuntime().halt(0) at both call sites, and halt skips every
-     * shutdown hook and never touches stop(). Crash Assistant watches from a SEPARATE process and reads a
+     * IMPORTANT: this used to be Runtime.getRuntime.halt(0) at both call sites, and halt skips every
+     * shutdown hook and never touches stop. Crash Assistant watches from a SEPARATE process and reads a
      * missing normal_stop marker as a crash, so a player taking the factory reset got a crash report for a
      * quit they chose. Exit status was never the problem, that mod does not read it. Whatever replaces this,
-     * it has to leave through stop().
-     * Costs a full mod load before the window actually closes, because nothing reads the flag until then.
+     * it has to leave through stop.
+     * Costs a full mod load before the window actually closes, because nothing reads the flag until then --
+     * and THAT promise is bounded by QuitDeadline: the player most likely to be quitting for a factory
+     * reset is the one whose pack wedges in mod construction, and for them "the first tick reads the flag"
+     * is a tick that never comes. The deadline halts a wedged loader minutes in; a pack that merely
+     * CRASHES in construction still files its own (real) crash report and the reset applies on the next
+     * launch anyway, because the client door runs at locator stage, before any mod constructs.
      */
     private void requestGameClose() {
         closeRequested = true;
+        QuitDeadline.arm();
         /* Stand the BIOS screen down to POST, the same three lines ESC uses to leave SETUP. Without this the
            friend keeps staring at the window that just told them the game would close while the boot quietly
            finishes behind it, and a screen that says "closing" and then sits still for a minute reads as

@@ -205,7 +205,10 @@ public final class RepairScreen implements Screen, RepairContext {
         if (s != null) {
             s.farewellTaken();
         }
-        System.out.println("[bamfmenu] factory reset armed, closing so the next launch can apply it");
+        // NOT "factory reset armed": since ofSync's staged code closes the game too, this line fires for
+        // Sync Now, a repair with fixes and a rollback as well, and a log claiming a reset the player
+        // never ran is the kind of line that starts a panicked support call
+        System.out.println("[bamfmenu] staged work armed, closing so the next launch can apply it");
         try {
             System.out.flush();
         } catch (Throwable ignored) {

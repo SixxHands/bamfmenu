@@ -7,6 +7,7 @@ import com.retro.bamfos.updater.engine.door.Doors;
 import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.factory.FactoryReset;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
@@ -35,26 +36,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-/**
- * The BIOS-facing surface. The BIOS is a view, THIS is the single writer, menu code
- * never touches manifests, ledgers, or files, it calls here. The server's /bamfos op commands share
- * it (serverSyncNow, clearTokenDead, status), because by then the jars are locked on BOTH sides. By menu
- * time jars are loaded and locked, so every sync that moves anything is STAGED: journal written,
- * applies next boot. Return codes over exceptions because callers sit across a
- * reflective boundary: 0 ok/staged, 1 no target to sync to (nothing resolved locally, or github 404s
- * the target tag, because to a caller those are one thing: there is nothing to converge to), 2 failed,
- * 3 another sync holds the lock, 4 token dead,
- * 5 github rate limited, try again later. 5 has its own code so the repair page cannot render a
- * throttle as "Sync failed. Please see logs.", because a limit clears itself inside the hour and is not a
- * failure. 6 is the box already matching the target: NOTHING was staged, so the page can say done
- * instead of promising a next boot that changes nothing (client-side ops only, stagedSync says why).
- * unpin() answers in that same space: 0 the pin is gone, 1 nothing was pinned so nothing
- * changed, 2 the file could not be written. listReleases() answers in it too but INSIDE its map,
- * under "code", because the picker needs the rows and the reason in one call: 0 the list is live, 2
- * offline, 4 token dead, 5 rate limited, and every non-zero one still ships the installed version as
- * its only row. The page strings for each code live in , not here, so the BIOS implementer
- * reads them off the source of truth instead of a javadoc.
- */
+// Single writer for BIOS repair UI and /bamfos server commands. Stages syncs into a journal since jars are already loaded and locked.
 public final class UpdaterOps {
 
     private final Path dir;
@@ -182,6 +164,7 @@ public final class UpdaterOps {
             }
             EngineHealth.forgiveRejectedEngines(dir); // Same engine-rejection reset as BIOS repair; see repair().
             CoreCargo.forgiveRejectedCores(dir);
+            HeldStrikes.forgive(dir); // Explicit repair request, so clear all strike records.
             return stagedSync(cfg, tag, true, true);
         } catch (IOException e) {
             return 2;
@@ -458,6 +441,8 @@ public final class UpdaterOps {
             EngineHealth.forgiveRejectedEngines(dir);
             // Also clear rejected core jars so the engine can re-download them on the next boot.
             CoreCargo.forgiveRejectedCores(dir);
+            // Clear per-row held strikes too so repair retries previously locked files right away.
+            HeldStrikes.forgive(dir);
             return stagedSync(cfg, tag, true, false);
         } catch (IOException e) {
             return 2;
@@ -632,11 +617,18 @@ public final class UpdaterOps {
                     ? Doors.stagedServerSync(dir, cfg, tag, from, repair, apiBase, bus)
                     : Doors.stagedClientSync(dir, cfg, tag, from, repair, apiBase, bus);
             end = "ok";
-            // 0 with nothing staged renders on the BIOS as "Changes staged. Applies on next boot.", which
-            // sends a current box rebooting for nothing and means Verify can NEVER answer a healthy install
-            // clean. Both surfaces read 6 now: OpsBrain grew its own already-current line, so the server
-            // gate that used to hold this back is gone.
-            return code == 0 && alreadyCurrent(asked) ? 6 : code;
+            // 0 means changes were staged for next boot; return 6 when already current, and 7 when nothing
+            // staged because held-back rows exhausted retries (neither clean nor worth a reboot).
+            if (code == 0) {
+                String verdict = syncSummarySince(asked);
+                if (verdict.startsWith("already current (")) {
+                    return 6;
+                }
+                if (verdict.startsWith("current with ")) {
+                    return 7;
+                }
+            }
+            return code;
         } catch (HttpFetcher.RateLimited limited) {
             // Catch rate limits before the generic handler so the UI reports throttling instead of a hard sync failure.
             end = "limited";
@@ -655,26 +647,23 @@ public final class UpdaterOps {
     }
 
     /**
-     * Did the sync that JUST answered 0 stage anything? Read off last-sync.json rather than a new SyncCore
-     * return code, because that record is the engine's own verdict written under the lock we still hold, and
-     * "already current (" is the one summary its no-op branch writes (SyncCore.sync); the boot doors keep
-     * their 0, current is their every-boot answer and no boot surface renders it as staged. The timestamp
-     * check covers the record write failing (lastSync swallows IOException): a stale already-current from an
-     * earlier sync must never turn real staged work into "done", so anything unreadable or old answers
-     * false and the page keeps the staged line, which is the safe direction, claiming staged over nothing
-     * wastes a reboot, claiming done over staged work hides an update.
+     * Reads last-sync.json (written under our lock) to distinguish no-op/held summaries from real staged
+     * work without changing SyncCore's 0 exit code. Rejects stale timestamps so a failed write defaults
+     * to "staged" rather than hiding an update.
      */
-    private boolean alreadyCurrent(long since) {
+    private String syncSummarySince(long since) {
         try {
             Path last = dir.resolve(".bamfos-updater").resolve("last-sync.json");
-            return Files.isRegularFile(last)
+            if (Files.isRegularFile(last)
                     && MiniJson.parse(Files.readString(last, StandardCharsets.UTF_8)) instanceof Map<?, ?> m
                     && m.get("at") instanceof Long at && at >= since
-                    && m.get("summary") instanceof String s
-                    && s.startsWith("already current (");
+                    && m.get("summary") instanceof String s) {
+                return s;
+            }
         } catch (IOException | RuntimeException unreadable) {
-            return false;
+            // fall through to the empty answer below
         }
+        return "";
     }
 
     /**
@@ -693,9 +682,19 @@ public final class UpdaterOps {
         Path p = dir.resolve(".bamfos-updater").resolve("bamfos-updater.properties");
         List<String> lines = new ArrayList<>();
         if (Files.isRegularFile(p)) {
+            boolean first = true;
             for (String line : Files.readAllLines(p, StandardCharsets.ISO_8859_1)) {
-                if (pairs.keySet().stream().noneMatch(k -> isKeyLine(line, k))) {
-                    lines.add(line);
+                if (first) {
+                    first = false;
+                    // Strip a UTF-8 BOM (as Latin-1, escaped to stay visible) so a key on line 1 still matches
+                    // files saved by Notepad or PowerShell 5.1.
+                    if (line.startsWith("\u00EF\u00BB\u00BF")) {
+                        line = line.substring(3);
+                    }
+                }
+                String kept = line;
+                if (pairs.keySet().stream().noneMatch(k -> isKeyLine(kept, k))) {
+                    lines.add(kept);
                 }
             }
         }
