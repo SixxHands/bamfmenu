@@ -40,10 +40,8 @@ final class Placement {
                 return Rung.SWAP;
             } catch (IOException held) {
                 if (!Files.isWritable(to)) {
-                    // A read-only bit is the player SAYING keep this one, and SyncCore documents it twice as
-                    // their own permanent hold. Renaming it aside would take their file anyway and hand them
-                    // the pack's, which is the one thing the safety rule forbids: the rung exists for a jar the OS has
-                    // locked, never for a jar its owner locked. They get the old deferral, unchanged.
+                    // Respect a read-only target as a player lock and defer instead of renaming it aside. Windows-only
+                    // in practice: POSIX rename(2) already replaces chmod-444 targets in the atomic move above.
                     throw held;
                 }
                 if (!Files.isRegularFile(to)) {

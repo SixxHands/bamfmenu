@@ -201,10 +201,14 @@ public final class Journal {
                     }
                 }
             } catch (FileAlreadyExistsException theirs) {
-                // a refusing kind onto a name the player now owns. Not retryable, because only they can free that
-                // name: keeping the journal for it would hold installed_version and re-run the same refusal
-                // on every boot for the life of the box, while the next boot's plan reads their file honestly
-                abandoned.add(op);
+                if (op.kind().equals("rename") || op.kind().equals("seed")) {
+                    // Target is now user-modified; drop this op instead of retrying forever so the next sync sees their file.
+                    abandoned.add(op);
+                } else {
+                    // Placement moves without REPLACE_EXISTING, so a racing writer surfaces here as FAEE for plain
+                    // moves too; keep it retryable rather than abandoning it permanently.
+                    retryable.add(op);
+                }
             } catch (IOException e) {
                 retryable.add(op);
             } catch (InvalidPathException garbage) {

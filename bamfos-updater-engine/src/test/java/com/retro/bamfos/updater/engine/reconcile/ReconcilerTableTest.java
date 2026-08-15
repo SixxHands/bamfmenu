@@ -168,6 +168,28 @@ class ReconcilerTableTest {
         assertArrayEquals(V1, Files.readAllBytes(dir.resolve("config/a.toml")));
     }
 
+    /**
+     * Keep pending RENAME ops (mod toggles) across version changes since they carry no bytes and their sha
+     * guard already no-ops if the release changed the jar.
+     */
+    @Test
+    void aJournaledToggleFlip_survivesAVersionMove() throws IOException {
+        Fx.write(dir, "mods/their-optional.jar", V1);
+        Journal kept = new Journal();
+        kept.targetVersion = "v3"; // version installed when the player flipped the toggle
+        kept.ops.add(new Journal.Op("rename", "mods/their-optional.jar", "mods/their-optional.jar.disabled",
+                com.retro.bamfos.updater.engine.util.HashUtils.sha256(V1)));
+        kept.save(Journal.pathIn(dir));
+
+        FileEntry e = Fx.entry("config/a.toml", V2, FileEntry.Side.CLIENT);
+        Ledger led = new Ledger();
+        Manifest moved = Fx.manifest("v2", List.of(), e); // a different target: everything else drops
+        rec().apply(rec().plan(moved, led), moved, led, Fx.fetcher());
+
+        assertFalse(Files.exists(dir.resolve("mods/their-optional.jar")));
+        assertArrayEquals(V1, Files.readAllBytes(dir.resolve("mods/their-optional.jar.disabled")));
+    }
+
     /** Drop carried ops for paths this plan leaves alone, so a stale op can't overwrite a player-edited config. */
     @Test
     void aLeftoverOpForAPathThisRunDeferred_isNotCarried() throws IOException {

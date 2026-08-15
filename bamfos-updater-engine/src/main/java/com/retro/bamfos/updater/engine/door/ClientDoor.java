@@ -6,9 +6,11 @@ import com.retro.bamfos.updater.engine.fetch.GithubReleases;
 import com.retro.bamfos.updater.engine.fetch.HttpFetcher;
 import com.retro.bamfos.updater.engine.guard.DisconnectHistory;
 import com.retro.bamfos.updater.engine.guard.EngineHealth;
+import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
+import com.retro.bamfos.updater.engine.reconcile.SyncPlan;
 import com.retro.bamfos.updater.engine.report.TroubleReport;
 import com.retro.bamfos.updater.engine.util.HashUtils;
 
@@ -95,20 +97,19 @@ public final class ClientDoor {
                     }
                     tag = broadcast.get(); // upgrades and rollbacks use the same sync path
                 }
-                // THE IS-IT-CURRENT GATE, above the pin fork's join on purpose: a pinned box sitting on its
-                // pin is exactly as converged as an unpinned one on the broadcast, and this gate living only
-                // in the broadcast branch ran a full network sync on every boot of a healthy pinned box, POST
-                // block up over zero files, quota spent, and offline boots writing failure records over a
-                // converged install (live-proven, task #206). lists the release lock as a quiet state
+                // Up-to-date gate runs for both pinned and broadcast targets so healthy pinned installs don't
+                // sync on every boot. Also check HeldStrikes: rows still owed retries or a daily probe are
+                // hidden from the other checks below and would otherwise stall forever behind "packages current".
+                boolean strikeRetry = HeldStrikes.anyBelowMaxOrProbeDue(dir, System.currentTimeMillis());
                 if (!local.isEmpty() && tag.equals(local)) {
                     Optional<String> missing = SyncCore.firstMissingManaged(dir, cfg.pins());
                     boolean cached = Files.isRegularFile(
                             dir.resolve(".bamfos-updater").resolve("manifest-current.json"));
                     boolean agrees = SyncCore.ledgerAgrees(dir, local);
-                    if (missing.isEmpty() && cached && agrees && !unproven) {
+                    if (missing.isEmpty() && cached && agrees && !unproven && !strikeRetry) {
                         bus.line("updater: packages current (" + local + "), nothing to do");
-                        // three checks agreed that this box is already as converged as a boot can make it,
-                        // which is a VERDICT and not a skip. The finally is where that distinction pays off
+                        // checks confirmed everything is already up to date; count this as a completed check (not a skip)
+                        // for the finally block
                         reachedVerdict = true;
                         return EngineHealth.proven(dir, 0);
                     }
@@ -118,26 +119,37 @@ public final class ClientDoor {
                         // register as the missing-file line below, because it is the same class of fault
                         bus.line("integrity: applied files do not match, re-deriving");
                     } else if (missing.isPresent()) {
-                        // a managed file vanished while the version still reads current, and the
-                        // version compare cannot see that, so this rule' only ever gets to restore it
-                        // if this shortcut lets the reconciler run at all
-                        // integrity, not updater: a managed file the ledger placed is GONE, which is the
-                        // same class of fault as a quarantine and reads as one on the terminal
-                        bus.line("integrity: " + missing.get() + " missing, restoring");
+                        if (HeldStrikes.exhaustedUnderKind(dir, missing.get(),
+                                SyncPlan.Kind.RESTORE.name(), System.currentTimeMillis())) {
+                            // the wording gate (HeldStrikes.exhaustedUnderKind's doc): the restore's
+                            // chances are spent, so promising "restoring" here is a promise the sync
+                            // below is about to refuse, say the true state and the way out instead
+                            bus.line("integrity: " + missing.get()
+                                    + " missing, its restore retries are spent, run Verify and Repair");
+                        } else {
+                            // A managed file is missing even though the version matches; bypass the shortcut so the
+                            // reconciler can restore it, and report it as an integrity issue.
+                            bus.line("integrity: " + missing.get() + " missing, restoring");
+                        }
                     } else if (!cached) {
                         // Fresh seed install with no cache yet: run one sync to backfill manifest/notes for the BIOS.
                         // Check this before the ledger, since an unsynced install has no prior sync to disagree with.
                         bus.line("updater: packages current (" + local
                                 + "), no cached index, backfilling release data");
-                    } else {
+                    } else if (!agrees) {
                         // bcc-common.toml updated before a partial apply finished, so the ledger still trails it.
                         // Re-plan so the leftover rows actually land (see SyncCore.ledgerAgrees).
                         bus.line("updater: last sync left rows unapplied, re-planning");
+                    } else {
+                        // Only pending strike retries kept us from skipping; set the repair bit below so the
+                        // re-plan actually includes those rows.
+                        bus.line("updater: held file(s) still owed retries (" + HeldStrikes.names(dir)
+                                + "), re-checking with repair on");
                     }
                 }
-                // true: this IS the promoted engine, the shim loaded these very bytes out of
-                // .bamfos-updater/engine/, so a sync it finishes is the alibi the probation flag is waiting on
-                code = SyncCore.sync(dir, cfg, tag, versionBefore, false, false,
+                // provesEngine=true because the shim loaded this promoted engine from .bamfos-updater/engine/, so a
+                // finished sync clears probation. Repair also bypasses strike filtering so hidden rule-A rows can retry.
+                code = SyncCore.sync(dir, cfg, tag, versionBefore, strikeRetry, false,
                         Reconciler.Side.CLIENT, apiBase, bus, true);
                 end = "ok";
                 reachedVerdict = true;
@@ -151,11 +163,8 @@ public final class ClientDoor {
             // write this to last-sync.json too so the BIOS screen doesn't keep showing an old ok status when
             // rate-limited. Downstream treats `limited` as non-fatal.
             SyncCore.recordFailure(dir, "limited", "github rate limited, retry on next boot");
-            EngineHealth.proven(dir); // github answered, so the engine is working, see EngineHealth
-            // its OWN end state, never "fail": the realistic trip is mid-download, which is after syncBegin,
-            // and UpdaterFeed's END arm turns a failed end into "updater: sync aborted, boot continues" right
-            // under the honest line, so the player reads two rows that contradict each other. Quoted exactly,
-            // because a reader who greps this string has to land on the line that prints it
+            EngineHealth.proven(dir); // GitHub responded, so clear engine probation. Use "limited" instead of "fail" so UpdaterFeed
+            // doesn't stack a generic "sync aborted, continuing to boot" line under the rate-limit message.
             end = "limited";
             channel = "ok"; // rate limit still means github responded and the channel is reachable
             return 0;
@@ -191,10 +200,8 @@ public final class ClientDoor {
             if (EngineHealth.attributable(e)) {
                 EngineHealth.proven(dir);
             }
-            // a dead carrier gets its OWN end state, same rule the throttle and the missing release already
-            // answer to: the specific why-line above ("repository unreachable, boot continues") already told
-            // the player what happened, and `fail` makes UpdaterFeed stack "sync aborted, boot continues"
-            // underneath it, which is two rows about one router reboot with the vaguer one last
+            // Use "offline" instead of "fail" for network faults; the unreachable line above already
+            // explained it, and "fail" would stack a redundant "sync aborted" line underneath.
             end = offline ? "offline" : "fail";
             // A sync was attempted and failed here, so never leave the row on idle or ok (e.g., on a
             // duplicate-modid abort) where it would contradict the failure in the POST block.

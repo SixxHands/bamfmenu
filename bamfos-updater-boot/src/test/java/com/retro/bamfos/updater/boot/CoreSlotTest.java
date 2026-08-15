@@ -27,7 +27,6 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -86,32 +85,48 @@ class CoreSlotTest {
     }
 
     /**
-     * One generation on disk and the mark blames it. Skipping it is the naive read of the rule and it costs
-     * a player his updater FOREVER: one alt-F4 during the first sync on a fresh install arms that mark, and
-     * from then on there is nothing to descend to and no step anybody could talk him through.
+     * When the only generation on disk is blamed, fall back to a freshly extracted floor jar
+     * instead of re-running the broken core or giving up without an updater.
      */
     @Test
-    void theLastCandidateIsNeverSkipped() throws Exception {
+    void aBlamedLastCandidateFallsToTheFloor_neverRunsItselfAgain() throws Exception {
         install("core-0005.jar");
         armedHere("core-0005.jar", "-");
 
         boot();
 
-        assertEquals(List.of("core-0005.jar"), ranLog());
-        assertFalse(Files.exists(coreDir(tmp).resolve("core-0000.jar")));
+        assertEquals(List.of(), ranLog());
+        assertArrayEquals(baselineCore(), Files.readAllBytes(coreDir(tmp).resolve("core-0000.jar")));
     }
 
-    /** Field 4 is what the core strikes. A core told to strike ITSELF burns the floor in two boots and takes
-     *  the whole ladder with it, so running the blamed jar under the last-candidate rule writes a dash. */
+    /** Field 4 is the skipped generation that gets struck. If the fallback core itself is blamed,
+     *  we still run it and write "-" so it doesn't strike and delete itself. */
     @Test
-    void weRanTheBlamedJarSoNobodyIsStruckForIt() throws Exception {
-        install("core-0005.jar");
-        armedHere("core-0005.jar", "-");
+    void weRanTheBlamedFloorSoNobodyIsStruckForIt() throws Exception {
+        install("core-0000.jar");
+        armedHere("core-0000.jar", "-");
 
         boot();
 
-        assertEquals("core-0005.jar", mark()[1]);
+        assertEquals(List.of("core-0000.jar"), ranLog());
+        assertEquals("core-0000.jar", mark()[1]);
         assertEquals("-", mark()[4]);
+    }
+
+    /**
+     * Non-matching jars like core-old.jar sort above numeric names and can't be struck,
+     * so CoreSlot ignores them without running or deleting them.
+     */
+    @Test
+    void aNameOutsideTheGrammarIsNeverRun_andNeverDeleted() throws Exception {
+        install("core-0002.jar");
+        CoreFixture.install(tmp, "core-0009 - Copy.jar", "core-old.jar", "core-00010.jar");
+
+        boot();
+
+        assertEquals(List.of("core-0002.jar"), ranLog());
+        assertTrue(Files.exists(coreDir(tmp).resolve("core-old.jar")));
+        assertTrue(Files.exists(coreDir(tmp).resolve("core-0009 - Copy.jar")));
     }
 
     /**

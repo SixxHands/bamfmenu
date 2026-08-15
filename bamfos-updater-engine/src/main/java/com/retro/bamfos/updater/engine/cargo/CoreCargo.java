@@ -16,24 +16,21 @@ import java.util.zip.ZipEntry;
 // Writes the embedded core-NNNN.jar out of this engine jar into .bamfos-updater/core/ (tracked outside the manifest and ledger so the reconciler never touches it).
 public final class CoreCargo {
 
-    /** The path the build packs the core under, and the one the stub packs its floor copy under. */
+    /** Resource path for the embedded core jar (separate from the baseline/ path used by the stub). */
     private static final String RESOURCE = "/core/bamfos-updater-core.jar";
     private static final String ENTRY = "core/bamfos-updater-core.jar";
 
-    /** The staged jar's own word about what it carries, stamped into its manifest by the engine build. */
+    /** Core generation stamped into the staged engine jar manifest at build time. */
     private static final String GEN_ATTRIBUTE = "Updater-Core-Gen";
 
-    /** Written by CoreHealth in the core module, read here, and the two never link: the filesystem is the bus
-     *  between all three layers. Rename it on one side and refused bytes come straight back. */
+    /** Written by CoreHealth in the core module; keep this name in sync across both modules. */
     private static final String REJECTED = "core-rejected";
 
-    /** Four digits is what makes the stub's LEXICAL sort a numeric one, so a generation of any other shape is
-     *  a jar the ladder cannot order. 0000 is the floor the stub writes out of its own resources. */
+    /** Four zero-padded digits keep lexical sort numeric in the stub; 0000 is reserved for the fallback. */
     private static final Pattern GENERATION = Pattern.compile("\\d{4}");
     private static final String FLOOR = "0000";
 
-    /** The generation THIS engine carries, written out at the top of every run. The belt: it covers a box
-     *  whose engine arrived by baseline extract, by hand drop or by factory reset, none of which sync. */
+    /** Extracts the bundled core jar at startup (covers baseline extract, manual drops, and factory reset). */
     public static void place(Path instanceDir) {
         try (InputStream in = CoreCargo.class.getResourceAsStream(RESOURCE)) {
             if (in == null) {

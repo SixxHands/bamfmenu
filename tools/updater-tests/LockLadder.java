@@ -9,27 +9,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
-/**
- * Which file operations this Windows box permits against a jar a JVM is holding open, per way of
- * holding it. The whole held-open swap ladder rests on one platform claim, so the claim gets a
- * harness instead of a paragraph.
- * The row that decides everything is zipfs: securejarhandler's UnionFileSystem opens mod
- * jars with FileSystems.newFileSystem(Path), which resolves to jdk.nio.zipfs.ZipFileSystem, and NIO
- * channels are opened on Windows with delete-sharing granted. ZipFile and RandomAccessFile are the
- * CONTROL legs, because their legacy native handles refuse the same operations: if a control ever comes
- * back permissive the box is not behaving the way the ladder was designed against and the run is
- * void, not interesting.
- * Exit 1 while the ladder is unbuilt, which is the point: the "overwrite in place" column is the
- * operation Journal.place() has today, and it is BLOCKED on every holder.
- * No .class files: run it with single-file source mode the way Bios.java and Broadcast.java are
- * run, because tools/ is tracked and has no *.class rule to catch a stray one.
- * <pre>
- *   java tools/updater-tests/LockLadder.java
- *   java tools/updater-tests/LockLadder.java --json out.json --runs 3
- * </pre>
- * Forward slashes above on purpose: a backslash-u inside a COMMENT is still scanned as a unicode
- * escape, so writing the Windows path here refuses to compile.
- */
+// Probes which Windows file ops work against a jar opened via zipfs (how FML opens mod jars) vs legacy ZipFile/RandomAccessFile handles.
 public class LockLadder {
 
     /** The two that must come back restrictive, or the run says nothing about the real ladder. */

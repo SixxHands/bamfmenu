@@ -51,6 +51,10 @@ public record RepairResult(Kind kind, String message, String restartCause) {
             // 6 means already current with nothing staged (avoids pointless reboots and lets Verify report clean).
             // Older engines return 0 here.
             case 6 -> new RepairResult(Kind.DONE, "Already up to date. Nothing needed changing.");
+            // 7 means nothing staged, but some files ran out of retries and were kept back.
+            // Map to REFUSED (not DONE or restart) so skipped files stay visible.
+            case 7 -> new RepairResult(Kind.REFUSED,
+                    "Nothing new to stage, but some files are held back. Run Verify and Repair.");
             case OpsBridge.NO_ANSWER -> noAnswer();
             default -> new RepairResult(Kind.FAILED, "Sync failed. Please see logs.");
         };

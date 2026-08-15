@@ -189,6 +189,33 @@ class UpdaterFeedTest {
     }
 
     /**
+     * If apply aborts without ADONE (e.g. full disk), END fail must close the apply block
+     * so the spinner and "Installing N of M" do not stay frozen under the abort line.
+     */
+    @Test
+    void anApplyThatDiesWithoutItsAdone_isClosedByEnd() throws IOException {
+        UpdaterFeed feed = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tinstall\tmods/create-6.0.4.jar\t630\t879",
+                "END\tfail");
+        List<UpdaterFeed.Line> rows = feed.postBlock(0);
+
+        assertTrue(rows.stream().anyMatch(l -> l.text().equals("Apply stopped ........ INCOMPLETE")), String.valueOf(rows));
+        for (UpdaterFeed.Line l : rows) {
+            assertFalse(l.text().contains("[#"), String.valueOf(l.text()));
+            assertFalse(l.text().contains("create-6.0.4.jar  "), String.valueOf(l.text()));
+        }
+        assertFalse(feed.syncActive());
+
+        UpdaterFeed clean = feedOn(
+                "APPLY\tv0.2.5\t412\t879",
+                "ASTEP\tverify\tmods/create-6.0.4.jar\t1291\t1291",
+                "ADONE\tok",
+                "END\tok");
+        assertTrue(clean.postBlock(0).stream().noneMatch(l -> l.text().contains("Apply stopped")));
+    }
+
+    /**
      * Unknown phase names from newer engines should be ignored without altering counts,
      * since the shim can upgrade the engine independently of this jar.
      */
@@ -333,11 +360,8 @@ class UpdaterFeedTest {
     }
 
     /**
-     * A router that goes away mid-download is the WORLD refusing, not this box breaking, so it gets the same
-     * treatment `limited` and `no-release` already had. On the old `fail` this rendered three rows about one
-     * event: the door's own specific line, then a generic FAILED, then "updater: sync aborted, boot continues"
-     * stacked under the line that had already explained it, vaguest last. The closing row wears the hardware
-     * row's own words so the two read as one fact, same rule NO CARRIER follows everywhere else.
+     * Mid-download `offline` closes the block using NO CARRIER wording like the hardware row,
+     * avoiding redundant FAILED and "sync aborted" lines below the specific error.
      */
     @Test
     void offlineEnd_saysNoCarrier_andStacksNoSecondWhyLine() throws IOException {
@@ -399,11 +423,26 @@ class UpdaterFeedTest {
                 "MANIFEST\t412", "PLAN\t1", "SYNCED\tv0.2.6\tv0.2.6\t1", "END\tok");
         assertEquals("BAMFOS REPAIRED 1 FILE ON v0.2.6.", lastOf(whole));
 
-        // a rollback whose whole plan is rule-E deletes downloads NOTHING and still converges, so zero
-        // recorded there is the honest count of a move that really happened
+        // Delete-only rollbacks download nothing (0 recorded) yet still change versions;
+        // wording must say ROLLED BACK to match the engine log rather than UPDATED.
         UpdaterFeed rollback = feedOn("SYNC\tbamfos-pack\tv0.2.6\tv0.2.4",
                 "MANIFEST\t412", "PLAN\t0", "SYNCED\tv0.2.6\tv0.2.4\t0", "END\tok");
-        assertEquals("BAMFOS UPDATED FROM v0.2.6 TO v0.2.4.", lastOf(rollback));
+        assertEquals("BAMFOS ROLLED BACK FROM v0.2.6 TO v0.2.4.", lastOf(rollback));
+    }
+
+    /**
+     * Pins local tag-direction logic to engine TagOrder rules: only provably backward moves say
+     * ROLLED BACK, while unreadable/sideways tags keep UPDATED (module-local copy like shimIn).
+     */
+    @Test
+    void theFinaleWord_matchesTheProvenDirectionOnly() {
+        assertTrue(UpdaterFeed.rolledBack("v0.2.6", "v0.2.4"));
+        assertFalse(UpdaterFeed.rolledBack("v0.2.4", "v0.2.6"));
+        assertFalse(UpdaterFeed.rolledBack("?", "v0.2.6"));
+        assertFalse(UpdaterFeed.rolledBack("nightly-a", "nightly-b"));
+        assertTrue(UpdaterFeed.rolledBack("v0.3.0", "v0.3.0-test"));
+        assertFalse(UpdaterFeed.rolledBack("v0.3.0-test", "v0.3.0-rc"));
+        assertFalse(UpdaterFeed.rolledBack("v0.2", "v0.2.0"));
     }
 
     /**

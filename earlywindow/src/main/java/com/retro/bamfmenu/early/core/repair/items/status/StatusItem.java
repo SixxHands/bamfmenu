@@ -17,13 +17,11 @@ public final class StatusItem implements RepairDef {
                 RepairGate.OPEN, StatusItem::line, new StatusPage());
     }
 
-    /* Version, then pin state. An unreadable status() gets the version half only: it never told us what
-       this box tracks, and "tracking the server" is the wrong half to guess when a tag= pin the page
-       cannot see is still steering the boot door. */
+    /* Version plus pin state; omit the pin half when status() is unreadable instead of guessing.
+       Keep the pinned line short so it fits the ~67-column cell without clipping the hint. */
     private static String line(UpdaterState state) {
         if (state.isPinned()) {
-            return "Server using " + state.installedOrUnknown() + ", currently pinned to " + state.pinned()
-                    + ". Select Remove Release lock to unpin the BAMFOS version";
+            return "Pinned to " + state.pinned() + ". Remove Release Lock unpins this box.";
         }
         if (state.statusUnreadable()) {
             return state.installedOrUnknown();
