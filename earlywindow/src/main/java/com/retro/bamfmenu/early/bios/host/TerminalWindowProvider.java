@@ -3074,7 +3074,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             renderLock.release();
         } else if (!initFailed) {
             System.err.println(
-                    "[bamfmenu] early terminal: a render frame did not yield within budget; proceeding with minecraft hand-off");
+                    // "launching minecraft", never "hand-off": this prints on exactly the hung boot whose
+                    // latest.log a player pastes into chat, and hand-off is our word for the window
+                    // contract, not one they can read or search. Same scrub the boot bar already took
+                    "[bamfmenu] early terminal: a render frame did not yield within budget; launching minecraft anyway");
         }
 
         /* Take the context onto the main thread for Minecraft and release our input hooks. By now the render

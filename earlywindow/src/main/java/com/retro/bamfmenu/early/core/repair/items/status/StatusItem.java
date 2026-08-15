@@ -21,7 +21,8 @@ public final class StatusItem implements RepairDef {
        Keep the pinned line short so it fits the ~67-column cell without clipping the hint. */
     private static String line(UpdaterState state) {
         if (state.isPinned()) {
-            return "Pinned to " + state.pinned() + ". Remove Release Lock unpins this box.";
+            // Shortened unpin hint so it fits within the ~67-column limit.
+            return "Pinned to " + state.pinned() + ". Select Remove Release Lock to unpin.";
         }
         if (state.statusUnreadable()) {
             return state.installedOrUnknown();
