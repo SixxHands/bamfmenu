@@ -44,10 +44,7 @@ public final class RepairSession {
     }
 
     private static final String HINTS_EDIT = "TYPE  Edit      LEFT/RIGHT  Move      ENTER  Save      ESC  Cancel";
-    /* Names the two keys that really are locked, because the arrows still move on purpose (a frozen-looking
-       window reads as a hung one) and the provider takes F2 before this screen sees it, so a bar claiming
-       every key is locked is contradicted by the next thing a player presses. 's rule with the
-       door already open: the BIOS stays up, actions do not. */
+    // Arrows still move while busy so the screen doesn't look frozen, and F2 is blocked in the provider so the volume menu can't open over it.
     private static final String HINTS_BUSY =
             "Working ...      Key inputs disabled.      Please do not close this window!";
 

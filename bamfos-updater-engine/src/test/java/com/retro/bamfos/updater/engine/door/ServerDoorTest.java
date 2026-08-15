@@ -720,6 +720,31 @@ class ServerDoorTest {
         assertFalse(Files.exists(strikesFile()));
     }
 
+    /** A settled held row must not mask a newly staged self-update; report the staged summary so the
+     * BIOS reboot prompt matches the feed. */
+    @Test
+    void aStagedSyncThatStagesTheEngine_onAHeldBox_answersStagedNotHeld() throws Exception {
+        HeldStrikes.PROBE_MILLIS = Long.MAX_VALUE;
+        convergeOnVT();
+        // Write strike state directly to test a NOOP plan with held strikes. A locked file would re-enter
+        // staging and take the moved>0 summary branch instead, bypassing the case we want to test.
+        long now = System.currentTimeMillis();
+        for (int boot = 0; boot < Journal.MAX_ATTEMPTS; boot++) {
+            HeldStrikes.bump(dir, "mods/m1.jar", HashUtils.sha256(M1), "REPLACE_BAK", now);
+        }
+        Fx.write(dir, SyncCore.ENGINE_PATH, "an engine older than the release".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(0, SyncCore.sync(dir, UpdaterConfig.load(dir), "vT", "vT", false, true,
+                Reconciler.Side.SERVER, base, BootBus.headless(), false));
+
+        assertTrue(Files.exists(dir.resolve(SyncCore.ENGINE_PATH + ".new")));
+        String record = Files.readString(dir.resolve(".bamfos-updater").resolve("last-sync.json"));
+        assertFalse(record.contains("current with "), String.valueOf(record));
+        assertTrue(record.contains("staged the updater's own files"), record);
+        assertTrue(record.contains("some apply on next boot"), String.valueOf(record));
+        assertEquals(Boolean.TRUE, lastSync().get("held"));
+    }
+
     /** Strike keys include the op kind so strikes on a wedged .bak (REPLACE_BAK) never block restoring
      * that jar if it later goes missing. */
     @Test

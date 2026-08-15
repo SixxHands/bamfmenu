@@ -114,8 +114,9 @@ public final class RepairSample {
                 // Skip straight to the result since the dummy context never runs actions.
                 s.done(new com.retro.bamfmenu.early.core.repair.api.RepairResult(
                         com.retro.bamfmenu.early.core.repair.api.RepairResult.Kind.RESTART_REQUIRED,
-                        "reset armed for v0.2.5: 879 files downloaded and 412 to remove. "
-                                + "Nothing has changed yet."));
+                        // Matches the actual UpdaterOps status text so the sample render stays accurate.
+                        "Reset ready for v0.2.5: 879 files downloaded and 412 to remove. "
+                                + "Nothing has applied yet."));
             }
             case "confirm" -> {
                 select(s, quiet, "verify");

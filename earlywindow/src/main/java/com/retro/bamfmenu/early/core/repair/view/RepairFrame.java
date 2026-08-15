@@ -9,7 +9,13 @@ import java.util.List;
  * `rows` covers the interior only; border strings stay separate so divider rows can render rules.
  */
 public record RepairFrame(String title, String topBar, List<Row> rows, String bottomBar,
-                          String hints, List<String> prompt) {
+                          String hints, List<String> prompt, boolean promptAlert) {
+
+    /** The shape every frame had before a confirm could be an alert. */
+    public RepairFrame(String title, String topBar, List<Row> rows, String bottomBar,
+                       String hints, List<String> prompt) {
+        this(title, topBar, rows, bottomBar, hints, prompt, false);
+    }
 
     /** One interior row: the menu cell on the left, the panel cell on the right. */
     public record Row(String left, Tone leftTone, String right, Tone rightTone, boolean divider) {

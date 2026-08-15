@@ -281,6 +281,18 @@ class RepairSessionTest {
         assertTrue(RepairSession.farewellBody("Rollback").contains("apply the Rollback"));
     }
 
+    /** Only the second reset confirm prompt uses alert red, carried as a flag on the frame. */
+    @Test
+    void onlyTheSecondResetBoxRidesTheAlertFlagToTheFrame() {
+        RepairSession s = session(RepairSample.state("idle").live(1_000L, false));
+        Recorder host = new Recorder();
+        select(s, "factory");
+        s.key(RepairIntent.ACTIVATE, host); // box 1 is up
+        assertFalse(s.frame(WIDTH, ROWS, 0).promptAlert());
+        s.key(RepairIntent.ACTIVATE, host); // Second confirmation dialog (irreversible).
+        assertTrue(s.frame(WIDTH, ROWS, 0).promptAlert());
+    }
+
     /**
      * Staged syncs only apply on the next boot, so the window must show the restart notice and trigger quit.
      * Uses the result noun rather than the row verb label so the message reads naturally.

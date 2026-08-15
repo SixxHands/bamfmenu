@@ -414,12 +414,10 @@ public final class SyncCore {
                                 + ", " + shortfall + " held back"
                                 + (rebootApplies ? ", some apply on next boot" : "")
                         : "repaired " + moved + " file(s) on " + now + tail;
-            } else if (plan.isNoop() && strikesHeld) {
-                // a DISTINCT prefix, machine-matched: UpdaterOps.stagedSync maps "already current (" to the
-                // BIOS's done code (6) and THIS prefix to the held code (7), because this state is NOT done, it
-                // is a box whose held rows ran out of retries with nothing left to plan -- and folded into
-                // 0 it closed the game promising an update no boot delivers. Change these words and change
-                // stagedSync's matcher too
+            } else if (plan.isNoop() && strikesHeld && !rebootApplies) {
+                // Machine-matched prefix: UpdaterOps.stagedSync maps this to code 7 (held) instead of 6 (done);
+                // keep both in sync. Require !rebootApplies so a run that also staged a self-entry falls
+                // through to code 0 and lets the reboot apply it (the next sync reports code 7).
                 summary = "current with " + heldCount + " file(s) held back (" + now + ")";
             } else {
                 summary = "staged the updater's own files on " + now + tail;

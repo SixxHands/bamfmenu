@@ -17,14 +17,23 @@ import java.util.stream.Stream;
 public final class UpdaterFeed {
 
     /**
-     * One rendered row of the updater POST block; bright marks the pack's CAPS finale lines. `fill` is the
-     * download bar's green prefix length, 0 on every other row, and the renderer paints those chars a second
-     * time in green over the dim row.
+     * One rendered row of the updater POST block (`bright` = CAPS finale, `fill` = green bar prefix length).
+     * `alert` outranks `bright` to draw in error red (used for the reboot-pending line).
      */
-    public record Line(String text, boolean bright, int fill) {
+    public record Line(String text, boolean bright, int fill, boolean alert) {
         /** Non-bar row (`fill = -1`, since `0` is a valid 0% bar that still draws a dim track). */
         public Line(String text, boolean bright) {
-            this(text, bright, -1);
+            this(text, bright, -1, false);
+        }
+
+        /** Standard bar row (non-alert). */
+        public Line(String text, boolean bright, int fill) {
+            this(text, bright, fill, false);
+        }
+
+        /** Factory for red alert rows so callers don't pass a 4th boolean. */
+        public static Line alert(String text) {
+            return new Line(text, true, -1, true);
         }
     }
 
@@ -402,7 +411,7 @@ public final class UpdaterFeed {
             }
         }
         if (pendingSwaps) {
-            out.add(new Line("BIOS UPDATE COMPLETE. REBOOT TO APPLY.", true));
+            out.add(Line.alert("BIOS UPDATE COMPLETE. REBOOT TO APPLY.")); // alert red for reboot-pending notice
         }
         if (closingRow != null) {
             out.add(new Line(closingRow, true)); // Highlight in bright text to match the final status lines.

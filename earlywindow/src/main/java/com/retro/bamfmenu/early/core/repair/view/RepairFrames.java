@@ -89,7 +89,9 @@ public final class RepairFrames {
                     : RepairFrame.Row.of(left, leftTone, rightText[r], rightTone[r]));
         }
         RepairFrame frame = new RepairFrame(TITLE, RepairBox.top(maxChars), out, RepairBox.bottom(maxChars),
-                v.hints(), modalLines(v.confirm(), v.editTitle(), v.editField()));
+                v.hints(), modalLines(v.confirm(), v.editTitle(), v.editField()),
+                // the edit prompt is never an alert; only a confirm can carry the flag
+                v.editTitle().isEmpty() && v.confirm() != null && v.confirm().alert());
         return new Built(frame, pageSel, pageTop);
     }
 

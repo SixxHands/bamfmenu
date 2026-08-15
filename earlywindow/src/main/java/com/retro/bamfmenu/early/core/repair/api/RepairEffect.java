@@ -22,7 +22,12 @@ public sealed interface RepairEffect permits RepairEffect.Act, RepairEffect.Page
      * One confirm dialog: title, body, and button labels (data so multi-step prompts can vary labels).
      * Title and body stay separate because popups size to their longest line and would clip one long string.
      */
-    record Confirm(String title, String body, String yes, String no) {
+    record Confirm(String title, String body, String yes, String no, boolean alert) {
+
+        /** Standard confirm dialog (non-alert). Alert styling is opt-in for destructive or urgent prompts. */
+        public Confirm(String title, String body, String yes, String no) {
+            this(title, body, yes, no, false);
+        }
 
         public static Confirm yesNo(String body) {
             return new Confirm("Confirm", body, "Yes", "No");

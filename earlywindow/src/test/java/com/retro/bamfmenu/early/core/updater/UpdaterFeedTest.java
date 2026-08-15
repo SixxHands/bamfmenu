@@ -475,6 +475,17 @@ class UpdaterFeedTest {
         assertTrue(block.stream().noneMatch(l -> l.text().startsWith("BAMFOS ")), String.valueOf(block));
     }
 
+    /** Only the reboot-pending row uses red (it requires player action); finale lines stay ordinary bright. */
+    @Test
+    void theRebootPendingRow_isTheOnlyAlertInTheBlock() throws IOException {
+        UpdaterFeed feed = feedOn("SYNC\tbamfos-pack\tv0.2.4\tv0.2.6",
+                "MANIFEST\t412", "PLAN\t3", "SYNCED\tv0.2.4\tv0.2.6\t3", "PENDING", "END\tok");
+        List<UpdaterFeed.Line> block = feed.postBlock(0);
+        for (UpdaterFeed.Line l : block) {
+            assertEquals(l.text().startsWith("BIOS UPDATE COMPLETE"), l.alert(), String.valueOf(l.text()));
+        }
+    }
+
     private static String lastOf(UpdaterFeed feed) {
         List<UpdaterFeed.Line> block = feed.postBlock(0);
         return block.get(block.size() - 1).text();

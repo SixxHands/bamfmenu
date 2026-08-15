@@ -17,16 +17,28 @@ class QuitDeadlineTest {
 
     @Test
     void armsOnce_isADaemon_andTheDeadlineReallyExpires() throws Exception {
+        // Park after firing so the thread stays alive for the isDaemon check.
+        // Without parking, a 50ms deadline can exit before enumeration and miss a missing setDaemon(true).
         CountDownLatch fired = new CountDownLatch(1);
-        assertTrue(QuitDeadline.arm(50, fired::countDown));
-        assertFalse(QuitDeadline.arm(50, () -> { }));
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            assertTrue(QuitDeadline.arm(50, () -> {
+                fired.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    // Test cleanup; nothing to do.
+                }
+            }));
+            assertFalse(QuitDeadline.arm(50, () -> { }));
 
-        Thread t = byNameWithin("bamfmenu-quit-deadline", 2000);
-        // the thread may already have expired and gone; when it is still up it must be a daemon
-        if (t != null) {
+            assertTrue(fired.await(2, TimeUnit.SECONDS));
+            Thread t = byNameWithin("bamfmenu-quit-deadline", 2000);
+            assertNotNull(t);
             assertTrue(t.isDaemon());
+        } finally {
+            release.countDown(); // unpark it either way, so a failed assert cannot strand the thread
         }
-        assertTrue(fired.await(2, TimeUnit.SECONDS));
     }
 
     private static Thread byNameWithin(String name, long ms) throws InterruptedException {

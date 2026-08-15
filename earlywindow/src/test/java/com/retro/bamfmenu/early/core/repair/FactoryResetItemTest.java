@@ -45,6 +45,10 @@ class FactoryResetItemTest {
 
         assertNotEquals(asks.get(0).body(), asks.get(1).body());
         assertNotEquals(asks.get(0).yes(), asks.get(1).yes());
+
+        // Only the second confirmation dialog should be alert red; the first is a normal prompt.
+        assertFalse(asks.get(0).alert());
+        assertTrue(asks.get(1).alert());
     }
 
     /** Help panel must warn about the two non-obvious losses neither confirmation dialog mentions. */

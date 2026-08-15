@@ -1193,8 +1193,10 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
                     String txt = clip(line.text(), maxChars);
                     int y = updTop + i * lineSpacing;
                     boolean bar = line.fill() >= 0;
-                    // a bar's whole row is the unfilled TRACK, so it starts dim and green is added on top
-                    drawText(MARGIN, y, txt, bar ? cDim() : line.bright() ? cBright() : cFg());
+                    // a bar's whole row is the unfilled TRACK, so it starts dim and green is added on top.
+                    // alert outranks bright: the reboot-pending row draws in the SETUP fault red (BT-45)
+                    drawText(MARGIN, y, txt, bar ? cDim()
+                            : line.alert() ? Art.LANE_COLORS[3] : line.bright() ? cBright() : cFg());
                     if (line.fill() > 0) {
                         // The download bar's filled part, painted a SECOND time in green over the track it
                         // already drew. Same string, same origin, monospace, so every green cell lands
@@ -1350,9 +1352,13 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             return;
         }
         /* F2 = global volume menu, handled before any game routing so it works during Tetris and the rhythm
-           game too. It pauses the current activity; F2 / Enter / Esc closes it and resumes. */
+         * game too. It pauses the current activity; F2 / Enter / Esc closes it and resumes.
+         * Blocked while the repair window is mid-action, since opening the volume overlay freezes the stepper
+         * and makes "Working ..." look hung. Honestly this all looks hung at times ngl. */
         if (key == GLFW_KEY_F2 && action == GLFW_PRESS) {
-            volumeToggleRequested = true;
+            if (state != Mode.REPAIR || !repairScreen.busy()) {
+                volumeToggleRequested = true;
+            }
             return;
         }
         if (volumeOverlay.active()) {

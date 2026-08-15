@@ -20,8 +20,9 @@ public final class FactoryResetItem implements RepairDef {
             "Are you sure you'd like to Factory Reset? This action will reset all mods, configs and "
                     + "BAMFOS resources to release defaults, including configured game options.", "Yes", "No");
 
+    // keep yo config safe. confirm and its dead
     public static final RepairEffect.Confirm WARN = new RepairEffect.Confirm("Warning",
-            "This cannot be undone. Are you sure?", "Proceed", "Cancel");
+            "This cannot be undone. Are you sure?", "Proceed", "Cancel", true);
 
     /**
      * Right-panel help covering what the confirm prompts omit: edits to shipped resource packs revert

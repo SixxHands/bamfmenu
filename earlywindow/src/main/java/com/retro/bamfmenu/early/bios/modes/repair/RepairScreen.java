@@ -80,8 +80,16 @@ public final class RepairScreen implements Screen, RepairContext {
         if (held != null) {
             session.done(held);
         }
-        readState(); // the page opens on "Reading the updater ..." and fills in when the worker answers
+        readState(); // the page opens on "Reading updater ..." and fills in when the worker answers
         ctx.enterMode(Mode.REPAIR);
+    }
+
+    /** True while an action keeps the window ("Working ..."). The provider reads this to refuse F2: the
+     *  busy bar promises every key is disabled, and the volume overlay freezing the stepper mid-action
+     *  would make the one window that says do-not-close look exactly like a hang. */
+    public boolean busy() {
+        RepairSession s = session;
+        return s != null && s.busy();
     }
 
     @Override
@@ -305,7 +313,9 @@ public final class RepairScreen implements Screen, RepairContext {
             String[] lines = frame.prompt().toArray(new String[0]);
             int[] colours = new int[lines.length];
             for (int i = 0; i < lines.length; i++) {
-                colours[i] = i == lines.length - 1 ? c.cGold() : c.cBright();
+                // alert in red, gold for normal stuff as always otherwise you'd think this is a missile strike on your boot up
+                colours[i] = i == lines.length - 1 ? c.cGold()
+                        : frame.promptAlert() ? colour(c, Tone.ALERT) : c.cBright();
             }
             c.popup(logicalW, logicalH, lines, colours);
         }
