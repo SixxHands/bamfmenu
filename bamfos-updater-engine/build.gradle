@@ -101,6 +101,9 @@ tasks.named('jar') {
     manifest {
         attributes 'Updater-Abi': '1',
                    'Updater-Core-Gen': core_generation,
+                   // Manifest schemas this engine can read (1 = base, 2 = release-zip backrefs).
+                   // release.py reads this from the jar so rollbacks don't advertise schemas they can't parse.
+                   'Updater-Schema-Support': '1,2',
                    'Implementation-Version': project.version,
                    // Stable module name for the watchdog's jar-in-jar embed.
                    'Automatic-Module-Name': 'bamfos.updater.engine'
