@@ -51,8 +51,8 @@ public final class RepairSample {
         boolean pinned = "pinned".equals(scenario) || "status".equals(scenario);
         UpdaterState base = new UpdaterState(true, VERSION, pinned ? "v0.2.4" : "", "status".equals(scenario),
                 "ok", NOW - 14 * 60_000L, NOW, "syncing".equals(scenario), 1, 1, false,
-                "Nether rework lands: ash dunes, quartz shelves, and the new seam block.\n"
-                        + "Fixes a crash when a contraption crossed a portal mid-assembly.",
+                // Real v0.2.4 release notes used for the offline renderer preview (keeps fake server addresses below).
+                "Pre updater release.\n\ninnit server release",
                 // Placeholder address since rendered PNGs ship in the README.
                 // Reset target follows the engine rule (pin wins over installed).
                 List.copyOf(mods), null, "super.secret.ip.for.a.server", 25565,
