@@ -103,6 +103,29 @@ class DisabledAndQuarantineTest {
         assertFalse(Files.exists(dir.resolve("mods/iris-1.7.jar.disabled")));
     }
 
+    /** The other direction, which had no test and so shipped broken: a ship-disabled optional the player
+     *  turned ON. The rename used to hand it back off, because only a disabled predecessor carried its bit. */
+    @Test
+    void enabledBitFollowsTheModAcrossAVersionRename() throws IOException {
+        byte[] oldJar = Fx.jar("journeymap");
+        byte[] newJar = Fx.jar("journeymap");
+        FileEntry oldE = optionalMod("mods/jm-6.0.jar", oldJar, true, List.of("journeymap"));
+        Ledger led = new Ledger();
+        Manifest m1 = Fx.manifest("v1", List.of(), oldE);
+        rec().apply(rec().plan(m1, led), m1, led, Fx.fetcher());
+        assertTrue(Files.exists(dir.resolve("mods/jm-6.0.jar.disabled")));
+        // Player re-enables the mod with no sync in between, so disk says enabled while the ledger
+        // still says disabled. On-disk state should win over install_state and the stale ledger entry.
+        Files.move(dir.resolve("mods/jm-6.0.jar.disabled"), dir.resolve("mods/jm-6.0.jar"));
+        FileEntry newE = optionalMod("mods/jm-6.5.jar", newJar, true, List.of("journeymap"));
+        Manifest m2 = Fx.manifest("v2", List.of(), newE);
+        rec().apply(rec().plan(m2, led), m2, led, Fx.fetcher());
+        assertTrue(Files.exists(dir.resolve("mods/jm-6.5.jar")));
+        assertFalse(Files.exists(dir.resolve("mods/jm-6.5.jar.disabled")));
+        assertFalse(Files.exists(dir.resolve("mods/jm-6.0.jar")));
+        assertFalse(led.files.get("mods/jm-6.5.jar").disabled);
+    }
+
     @Test
     void q1_quarantinesKilledModidOnce_reenableRespectedForever() throws IOException {
         Fx.write(dir, "mods/chipped-old.jar", Fx.jar("chipped")); // pre-updater leftover, untracked

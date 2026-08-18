@@ -162,8 +162,10 @@ public final class Reconciler {
         return plan;
     }
 
-    /** Fresh install's bit: install_state, unless a rule-E casualty with a shared modid is disabled
-     *  on disk -- the bit follows the MOD across version renames. */
+    /**
+     * Initial enabled state for a new mod: carries over the player's enabled/disabled bit from any
+     * superseded ledger entry with the same modid, otherwise falls back to install_state.
+     */
     private boolean resolveFreshBit(FileEntry e, Ledger ledger, Set<String> manifestPaths) throws IOException {
         if (!e.path().startsWith("mods/") || e.modids().isEmpty()) {
             return e.installDisabled();
@@ -173,10 +175,10 @@ public final class Reconciler {
                 continue; // Only jars removed by rule E can be treated as a predecessor.
             }
             Disk old = disk(le.getKey());
-            if (old.exists() && old.disabled) {
+            if (old.exists()) {
                 try {
                     if (!java.util.Collections.disjoint(JarInfo.read(old.file()).modids(), e.modids())) {
-                        return true;
+                        return old.disabled; // Keep the player's last enabled/disabled choice instead of the pack default.
                     }
                 } catch (IOException ignored) {
                     // Can't read the old jar to check its previous state.
