@@ -15,6 +15,7 @@ import com.retro.bamfos.updater.engine.ledger.Ledger;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.manifest.ManifestParser;
+import com.retro.bamfos.updater.engine.reconcile.LedgerBootstrap;
 import com.retro.bamfos.updater.engine.reconcile.PinMatcher;
 import com.retro.bamfos.updater.engine.reconcile.Reasons;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
@@ -240,6 +241,21 @@ public final class SyncCore {
                 manifest.requiresRelaunch(), manifest.removedModids(), files);
 
         Ledger ledger = Ledger.load(Ledger.pathIn(dir));
+        if (ledger.files.isEmpty()) {
+            // build the ledger before planning so renamed mod jars can be retired without tripping dupeGuard;
+            // covers fresh installs and offline fallback to the local version
+            Ledger derived = LedgerBootstrap.ensure(dir, ledger, filtered, side, new PinMatcher(cfg.pins()));
+            if (derived != ledger) {
+                String note = "updater: no ledger, adopted " + derived.files.size()
+                        + " installed mod(s) from hashes";
+                if (side == Reconciler.Side.SERVER) {
+                    serverLog(dir, note);
+                } else {
+                    bus.line(note);
+                }
+                ledger = derived;
+            }
+        }
         Reconciler rec = new Reconciler(dir, side, cfg.pins());
         SyncPlan plan = rec.plan(filtered, ledger, repair);
         boolean versionMoved = !fromVersion.equals(manifest.pack().version());
