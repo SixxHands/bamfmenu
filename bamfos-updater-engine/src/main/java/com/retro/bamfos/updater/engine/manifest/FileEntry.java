@@ -17,7 +17,10 @@ public record FileEntry(
         OnRemove onRemove,
         // merge="servers" on a seed-once entry merges servers.dat (updates our entry, keeps the player's
         // others). Additive field so older engines safely fall back to plain seed-once without bumping schema_version.
-        String merge) {
+        String merge,
+        // Extra accepted whole-file shas for a boot jar (reseeding changes the jar hash even when the code
+        // didn't change). Additive like `merge` above, and always non-null.
+        List<String> alsoAccept) {
 
     public enum Side { BOTH, CLIENT, SERVER }
 

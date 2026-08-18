@@ -148,7 +148,15 @@ public final class ManifestParser {
         // Ignore unknown merge values so older engines safely fall back to the base policy.
         String merge = e.get("merge") instanceof String mg && mg.equals("servers") ? mg : null;
 
-        return new FileEntry(path, sha, size, side, policy, clazz, source, List.copyOf(modids), installDisabled, category, onRemove, merge);
+        // Drop invalid entries instead of failing the whole manifest; a bad sha can't match a valid digest anyway.
+        List<String> alsoAccept = new ArrayList<>();
+        for (String s : optStrList(e, "also_accept", at)) {
+            if (SHA256.matcher(s).matches()) {
+                alsoAccept.add(s);
+            }
+        }
+
+        return new FileEntry(path, sha, size, side, policy, clazz, source, List.copyOf(modids), installDisabled, category, onRemove, merge, List.copyOf(alsoAccept));
     }
 
     private static FileEntry.Source parseSource(Map<String, Object> s, String at) {

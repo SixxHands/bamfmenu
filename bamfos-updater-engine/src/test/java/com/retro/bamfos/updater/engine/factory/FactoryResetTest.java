@@ -62,7 +62,7 @@ class FactoryResetTest {
         return new FileEntry(path, HashUtils.sha256(bytes), bytes.length, side, FileEntry.Policy.MANAGED,
                 FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, path, "", "", "", ""),
-                List.of(), off, "", FileEntry.OnRemove.DELETE, "");
+                List.of(), off, "", FileEntry.OnRemove.DELETE, "", List.of());
     }
 
     private Manifest manifest(FileEntry... files) {

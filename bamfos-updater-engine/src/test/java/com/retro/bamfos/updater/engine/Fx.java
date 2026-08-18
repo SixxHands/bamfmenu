@@ -32,7 +32,7 @@ public final class Fx {
         return new FileEntry(path, HashUtils.sha256(bytes), bytes.length, side, policy,
                 FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, path, null, null, null, null),
-                modids, installDisabled, category, onRemove, null);
+                modids, installDisabled, category, onRemove, null, List.of());
     }
 
     public static Manifest manifest(String version, List<String> removedModids, FileEntry... files) {

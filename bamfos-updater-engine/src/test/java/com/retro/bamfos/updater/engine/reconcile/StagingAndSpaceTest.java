@@ -62,7 +62,7 @@ class StagingAndSpaceTest {
         FileEntry entry = new FileEntry("mods/huge.jar", HashUtils.sha256(bytes), 1L << 50,
                 FileEntry.Side.CLIENT, FileEntry.Policy.MANAGED, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, "mods/huge.jar", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.DELETE, null); // a petabyte on paper
+                List.of(), false, null, FileEntry.OnRemove.DELETE, null, List.of()); // a petabyte on paper
         Manifest m = Fx.manifest("vT", List.of(), entry);
         Ledger led = new Ledger();
         int[] fetches = {0};

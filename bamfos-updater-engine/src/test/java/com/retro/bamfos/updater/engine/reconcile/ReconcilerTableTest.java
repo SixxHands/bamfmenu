@@ -484,7 +484,7 @@ class ReconcilerTableTest {
                 com.retro.bamfos.updater.engine.util.HashUtils.sha256(seedBytes), seedBytes.length,
                 FileEntry.Side.CLIENT, FileEntry.Policy.SEED_ONCE, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, "servers.dat", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.ORPHAN, "servers");
+                List.of(), false, null, FileEntry.OnRemove.ORPHAN, "servers", List.of());
         Ledger led = new Ledger();
         Manifest m = Fx.manifest("v1", List.of(), seed);
         SyncPlan p1 = rec().plan(m, led);

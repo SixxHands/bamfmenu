@@ -29,7 +29,7 @@ class M6ReconcilerTest {
         return new FileEntry("servers.dat", HashUtils.sha256(seedBytes), seedBytes.length,
                 FileEntry.Side.CLIENT, FileEntry.Policy.SEED_ONCE, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, "servers.dat", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.DELETE, "servers");
+                List.of(), false, null, FileEntry.OnRemove.DELETE, "servers", List.of());
     }
 
     @Test

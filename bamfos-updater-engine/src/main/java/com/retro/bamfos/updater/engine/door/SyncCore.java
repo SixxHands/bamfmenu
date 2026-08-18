@@ -310,7 +310,8 @@ public final class SyncCore {
         PinMatcher selfPins = new PinMatcher(cfg.pins());
         for (FileEntry e : self) {
             Path current = dir.resolve(e.path());
-            boolean same = Files.isRegularFile(current) && HashUtils.sha256(current).equals(e.sha256());
+            // a reseed changes the jar sha, so allow exact fallback digests listed on the manifest row
+            boolean same = Files.isRegularFile(current) && accepted(HashUtils.sha256(current), e);
             if (same) {
                 continue;
             }
@@ -466,6 +467,12 @@ public final class SyncCore {
         lastSync(dir, manifest.pack().version(), staged ? "staged" : pending ? "pending" : "ok", summary,
                 heldFiles);
         return 0;
+    }
+
+    /** Returns true if the jar sha matches the manifest row or any accepted reseed digest.
+     *  Older manifests without a seed list just check the primary sha. */
+    private static boolean accepted(String onDisk, FileEntry e) {
+        return onDisk.equals(e.sha256()) || e.alsoAccept().contains(onDisk);
     }
 
     /** Logs one line whenever a sync stages a newer client shim, explaining how to apply it since the

@@ -141,4 +141,30 @@ class ManifestParserTest {
         ManifestParser.ManifestError e = assertThrows(ManifestParser.ManifestError.class, () -> ManifestParser.parse("not json at all"));
         assertTrue(e.getMessage().contains("not valid JSON"), e.getMessage());
     }
+
+    /** Keep older boot jar hashes in the entry so installs that skipped a reseed are left alone. */
+    @Test
+    void alsoAcceptCarriesTheOlderSeedsAndDropsAnythingThatIsNotADigest() throws IOException {
+        String j = boot("\"also_accept\": [\"%s\", \"nope\", \"%s\"],".formatted("a".repeat(64), "b".repeat(64)));
+        FileEntry row = ManifestParser.parse(j).files().get(0);
+        assertEquals(java.util.List.of("a".repeat(64), "b".repeat(64)), row.alsoAccept());
+    }
+
+    /** Backwards compatibility for older manifests that don't have this field yet. */
+    @Test
+    void aRowWithNoAlsoAcceptAnswersEmptyAndNeverNull() throws IOException {
+        assertEquals(java.util.List.of(), ManifestParser.parse(boot("")).files().get(0).alsoAccept());
+    }
+
+    private static String boot(String alsoAccept) {
+        return """
+                {"schema_version":1,
+                 "pack":{"id":"bamfos","version":"v1","mc":"1.21.1","neoforge":"21.1.235","updater_abi":1},
+                 "requires_relaunch":false,
+                 "files":[
+                   {"path":"mods/bamfos-updater-boot.jar","sha256":"%s","size":1,"side":"client","policy":"managed",
+                    %s
+                    "source":{"type":"release-asset","asset":"bamfos-updater-boot.jar"}}
+                 ]}""".formatted("0".repeat(64), alsoAccept);
+    }
 }

@@ -9,6 +9,7 @@ import com.retro.bamfos.updater.engine.guard.EngineHealth;
 import com.retro.bamfos.updater.engine.guard.HeldStrikes;
 import com.retro.bamfos.updater.engine.guard.KickGuard;
 import com.retro.bamfos.updater.engine.journal.InstanceLock;
+import com.retro.bamfos.updater.engine.json.MiniJson;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
 import com.retro.bamfos.updater.engine.reconcile.SyncPlan;
 import com.retro.bamfos.updater.engine.report.TroubleReport;
@@ -18,6 +19,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /* Client boot sync (runs during FML discovery before mods/ jars open). Syncs to the version the server
@@ -245,29 +248,51 @@ public final class ClientDoor {
         return "updater: sync aborted, continuing boot";
     }
 
-    /**
-     * Clears a staged client shim that is already the jar on disk. Nothing on this side promotes
-     * mods/bamfos-updater-boot.jar.new, so the day the player hand replaces the jar or takes a pack
-     * re-ship, the staged copy stops being a waiting update and becomes litter he was told to expect once and
-     * then never hears about again. Bytes decide, never the name: a DIFFERENT .new is a real waiting update
-     * and SyncCore's shim-waiting line still owns it.
-     * IT HAS TO BE HERE, above the is-it-current shortcut, and not in SyncCore's self loop. That loop
-     * CONTINUES the moment the sha matches, and this door returns at the packages-current gate before
-     * sync() is ever called, which is nearly every boot of exactly the boxes holding the litter.
-     */
+    /** Removes a leftover mods/bamfos-updater-boot.jar.new once its bytes match the installed shim
+     *  (after a manual replace or reseed). Keep different .new files since those are real waiting updates.
+     *  Runs above the up-to-date shortcut because converged clients never enter SyncCore's self loop. */
     private static void sweepStagedShim(Path dir) {
         Path staged = dir.resolve(SyncCore.SHIM_CLIENT_PATH + ".new");
         Path installed = dir.resolve(SyncCore.SHIM_CLIENT_PATH);
         try {
-            if (Files.isRegularFile(staged) && Files.isRegularFile(installed)
-                    && HashUtils.sha256(staged).equals(HashUtils.sha256(installed))) {
+            if (!Files.isRegularFile(staged) || !Files.isRegularFile(installed)) {
+                return;
+            }
+            String have = HashUtils.sha256(installed);
+            if (have.equals(HashUtils.sha256(staged))) {
                 Files.delete(staged);
                 System.out.println("[updater] " + SyncCore.SHIM_CLIENT_PATH + ".new held the jar that is "
                         + "already installed, so it was cleared");
+            } else if (acceptedByCachedManifest(dir, have)) {
+                Files.delete(staged);
+                System.out.println("[updater] " + SyncCore.SHIM_CLIENT_PATH + " is a seed this release still "
+                        + "accepts, so the copy staged beside it was cleared");
             }
         } catch (IOException | RuntimeException held) {
             // Never fail boot over a leftover .new file we can't delete (e.g., AV or read-only folder).
         }
+    }
+
+    /** Reads the cached manifest since this sweep runs before network access. Uses the same MiniJson walk
+     *  as listOptional so a half-written cache won't break boot; if unreadable, keep the file. */
+    private static boolean acceptedByCachedManifest(Path dir, String installedSha) {
+        try {
+            Path cached = dir.resolve(".bamfos-updater").resolve("manifest-current.json");
+            if (Files.isRegularFile(cached)
+                    && MiniJson.parse(Files.readString(cached, StandardCharsets.UTF_8)) instanceof Map<?, ?> m
+                    && m.get("files") instanceof List<?> files) {
+                for (Object f : files) {
+                    if (f instanceof Map<?, ?> fm
+                            && SyncCore.SHIM_CLIENT_PATH.equals(fm.get("path"))
+                            && fm.get("also_accept") instanceof List<?> also) {
+                        return also.contains(installedSha);
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            // leave the file alone if the check fails; cleanup shouldn't break boot
+        }
+        return false;
     }
 
     /** Records whether this boot changed anything (quarantine or pack version). If nothing changed and

@@ -62,7 +62,7 @@ class SanitizedNameTest {
                 FileEntry.Side.SERVER, FileEntry.Policy.MANAGED, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET,
                         "ATi Structures Vanilla V1.4.4 (1.21+).jar", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.DELETE, null);
+                List.of(), false, null, FileEntry.OnRemove.DELETE, null, List.of());
         Path dest = dir.resolve("out.jar");
         gh.fetch(e, dest);
         assertArrayEquals(BYTES, Files.readAllBytes(dest));
@@ -84,7 +84,7 @@ class SanitizedNameTest {
                 FileEntry.Side.SERVER, FileEntry.Policy.MANAGED, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET,
                         "ATi Structures Vanilla V1.4.4 (1.21+).jar", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.DELETE, null);
+                List.of(), false, null, FileEntry.OnRemove.DELETE, null, List.of());
         gh.release("latest"); // Caller resolves "latest" before fetching (manifestJson handles this).
         Path dest = dir.resolve("latest.jar");
         gh.fetch(e, dest);
@@ -97,7 +97,7 @@ class SanitizedNameTest {
         FileEntry e = new FileEntry("mods/ghost.jar", "0".repeat(64), 1,
                 FileEntry.Side.SERVER, FileEntry.Policy.MANAGED, FileEntry.Clazz.HOT,
                 new FileEntry.Source(FileEntry.Source.Type.RELEASE_ASSET, "ghost.jar", null, null, null, null),
-                List.of(), false, null, FileEntry.OnRemove.DELETE, null);
+                List.of(), false, null, FileEntry.OnRemove.DELETE, null, List.of());
         IOException ex = assertThrows(IOException.class, () -> gh.fetch(e, dir.resolve("x")));
         assertTrue(ex.getMessage().contains("not on release"));
     }
