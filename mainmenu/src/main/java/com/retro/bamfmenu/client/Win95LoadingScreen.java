@@ -156,7 +156,18 @@ public final class Win95LoadingScreen {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         g.setColor(1.0F, 1.0F, 1.0F, alpha / 255.0F);
-        g.blit(BG, 0, 0, w, h, 0.0F, 0.0F, bgW, bgH, bgW, bgH);
+        try {
+            g.blit(BG, 0, 0, w, h, 0.0F, 0.0F, bgW, bgH, bgW, bgH);
+        } catch (Exception notLoadedYet) {
+            // The header check up top reads our own jar, so it cannot fail. This blit asks MC's
+            // resource manager, and we draw DURING the reload that fills it, so an early frame finds
+            // nothing. Teal covers the gap, the image turns up a frame later. Throwing here killed
+            // the whole reload and surfaced miles away as a shader error.
+            // NOT bgState = 2, this frame is early, the file is not missing.
+            g.setColor(1.0F, 1.0F, 1.0F, 1.0F);
+            RenderSystem.disableBlend();
+            return false;
+        }
         g.setColor(1.0F, 1.0F, 1.0F, 1.0F);
         RenderSystem.disableBlend();
         return true;
