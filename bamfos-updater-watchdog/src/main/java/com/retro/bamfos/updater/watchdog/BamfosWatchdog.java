@@ -51,6 +51,8 @@ public final class BamfosWatchdog {
     private volatile boolean autoRestart = true;
     // five minutes.
     private volatile int countdownSeconds = 300;
+    // max wait for clean shutdown before ShutdownBackstop forces exit
+    private volatile int exitGraceSeconds = 180;
     private static final long[] NO_WARNINGS = new long[0];
     /** Set once in start() and read by opReload so reloading config can't re-trigger a restart. */
     private volatile boolean wrapperPresent;
@@ -138,6 +140,7 @@ public final class BamfosWatchdog {
             // outside this catch and disable polling for the rest of the session.
             pollSeconds = WatchdogState.pollSeconds(extra);
             countdownSeconds = WatchdogState.countdownSeconds(extra);
+            exitGraceSeconds = WatchdogState.exitGraceSeconds(extra);
         } catch (Exception e) {
             // Catch all Exceptions so config load never blocks boot; warn clearly since an empty token 404s on private repos.
             LOGGER.warn("[watchdog] properties unreadable, polling anonymously on the default repo, "
@@ -373,6 +376,9 @@ public final class BamfosWatchdog {
                     stopping ? (wrapperPresent ? "the wrapper reads the stop file and exits"
                             : "nothing here relaunches it")
                             : "the wrapper syncs + relaunches");
+            // armed BEFORE the halt, because after it this thread belongs to a shutdown that may never return
+            ShutdownBackstop.arm(dir, exitGraceSeconds, () -> Runtime.getRuntime().halt(0),
+                    msg -> LOGGER.error("[watchdog] {}", msg));
             event.getServer().halt(false);
         }
     }

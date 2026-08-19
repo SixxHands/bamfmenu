@@ -121,6 +121,16 @@ final class WatchdogState {
     }
 
     /**
+     * Seconds to wait for stopServer() before forcing JVM exit. Set to 0 to disable the backstop
+     * if you'd rather let it hang than risk cutting off a world save; otherwise clamped to at least 30s
+     * so normal shutdown saves have time to finish.
+     */
+    static int exitGraceSeconds(Properties p) {
+        int raw = intProp(p, "watchdog_exit_grace_seconds", 180);
+        return raw <= 0 ? 0 : Math.max(30, Math.min(raw, 3600));
+    }
+
+    /**
      * Returns the restart attempt count for this tag (resets to 0 when the tag changes so a new release
      * gets fresh attempts, while keeping the count across cooldowns for the same tag).
      */
