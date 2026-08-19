@@ -45,6 +45,38 @@ final class WatchdogBrain {
         return Decision.RESTART;
     }
 
+    /**
+     * Countdown warning times: each whole minute left, then 10 seconds.
+     * Skips the starting minute since the initial broadcast already announces it.
+     * Ordered soonest-first so the tick handler can step through them with a single index.
+     */
+    static long[] warnSchedule(int countdownSeconds, long restartAtTick) {
+        java.util.List<Long> marks = new java.util.ArrayList<>();
+        for (int left = countdownSeconds - countdownSeconds % 60; left >= 60; left -= 60) {
+            if (left < countdownSeconds) {
+                marks.add(restartAtTick - left * 20L);
+            }
+        }
+        if (countdownSeconds > 10) {
+            marks.add(restartAtTick - 200L);
+        }
+        long[] out = new long[marks.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = marks.get(i);
+        }
+        return out;
+    }
+
+    /** Formats seconds as human-readable minutes/seconds (e.g. "5m" instead of "5m 0s"). */
+    static String human(int seconds) {
+        if (seconds < 60) {
+            return seconds + "s";
+        }
+        int m = seconds / 60;
+        int s = seconds % 60;
+        return s == 0 ? m + "m" : m + "m " + s + "s";
+    }
+
     private WatchdogBrain() {
     }
 }

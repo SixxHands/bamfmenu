@@ -104,7 +104,7 @@ class WatchdogStateTest {
     @Test
     void countdownSeconds_carriesItsOwnBounds_bothWays() {
         Properties p = new Properties();
-        assertEquals(60, WatchdogState.countdownSeconds(p));
+        assertEquals(300, WatchdogState.countdownSeconds(p));
         p.setProperty("watchdog_countdown_seconds", "-30");
         assertEquals(0, WatchdogState.countdownSeconds(p));
         p.setProperty("watchdog_countdown_seconds", "999999");

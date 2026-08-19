@@ -117,7 +117,7 @@ final class WatchdogState {
     /** Reads the chat countdown: negatives would halt immediately without warning, and huge values would
      *  block checkOnce for the life of the process. */
     static int countdownSeconds(Properties p) {
-        return intProp(p, "watchdog_countdown_seconds", 60, 0, 3600);
+        return intProp(p, "watchdog_countdown_seconds", 300, 0, 3600);
     }
 
     /**

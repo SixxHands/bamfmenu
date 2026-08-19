@@ -49,7 +49,9 @@ public final class BamfosWatchdog {
     private volatile ScheduledFuture<?> pollTask;
     private volatile int pollSeconds = 300;
     private volatile boolean autoRestart = true;
-    private volatile int countdownSeconds = 60;
+    // five minutes.
+    private volatile int countdownSeconds = 300;
+    private static final long[] NO_WARNINGS = new long[0];
     /** Set once in start() and read by opReload so reloading config can't re-trigger a restart. */
     private volatile boolean wrapperPresent;
 
@@ -57,11 +59,12 @@ public final class BamfosWatchdog {
     // (and volatile prevents 64-bit long tearing). Plain tick++ is safe since only the server thread writes it.
     private volatile long tick;
     private volatile long restartAtTick = -1;
-    private long warnAtTick = -1;
-    /** Set by /bamfos stop, and by restart now on a box with no wrapper (a halt nothing relaunches IS a
-     *  stop, whatever the operator called it), before the countdown is armed, so the ONE halt in onTickPost
-     *  knows which of the two things it is doing. Server thread only, same as warnAtTick, and never cleared:
-     *  the only exit from a stop is the process ending. */
+    /** Warning ticks (soonest first) and cursor. Matching exact ticks fires each once even if the server
+     *  hitches, whereas comparing seconds remaining could skip or double-fire. */
+    private long[] warnTicks = NO_WARNINGS;
+    private int warnIdx;
+    /** Set by /bamfos stop (or restart now without a wrapper) before arming the countdown so onTickPost
+     *  uses stop wording. Server thread only and never cleared once set. */
     private boolean stopping;
     private String pendingTarget = "";
     private String announcedTag = "";
@@ -289,11 +292,11 @@ public final class BamfosWatchdog {
                         return;
                     }
                     pendingTarget = target;
-                    broadcast("Pack " + move + " " + target + " - restarting in " + countdownSeconds + "s");
+                    broadcast("Pack " + move + " " + target + " - restarting in " + WatchdogBrain.human(countdownSeconds));
                     LOGGER.info("[watchdog] {} to {} (server on {}), restarting in {}s",
                             move, target, local, countdownSeconds);
                     restartAtTick = tick + countdownSeconds * 20L;
-                    warnAtTick = countdownSeconds > 15 ? restartAtTick - 200 : -1;
+                    armWarnings();
                 } catch (Throwable orphaned) {
                     // Vanilla swallows server-thread exceptions after logging FATAL, so restore the MOTD before rethrowing
                     // or the server stays up advertising a restart that was never armed.
@@ -354,8 +357,9 @@ public final class BamfosWatchdog {
         if (restartAtTick < 0) {
             return;
         }
-        if (tick == warnAtTick) {
-            broadcast("Restarting in 10s");
+        if (warnIdx < warnTicks.length && tick == warnTicks[warnIdx]) {
+            warnIdx++;
+            broadcast("Restarting in " + WatchdogBrain.human((int) ((restartAtTick - tick) / 20L)));
         }
         if (tick >= restartAtTick) {
             restartAtTick = -1;
@@ -479,7 +483,7 @@ public final class BamfosWatchdog {
         }
         boolean wasArmed = restartAtTick >= 0;
         vetoedTarget = "";
-        warnAtTick = -1; // else a brought-forward countdown could still fire "Restarting in 10s" first
+        clearWarnings(); // clear pending warnings so the old countdown doesn't keep firing
         if (!wrapperPresent) {
             // Without a wrapper nothing relaunches the server, so use stop wording instead of "back in a minute".
             stopping = true;
@@ -502,7 +506,7 @@ public final class BamfosWatchdog {
         }
         stopping = true;
         vetoedTarget = "";
-        warnAtTick = -1;
+        clearWarnings();
         pendingTarget = "";
         restartAtTick = tick; // use the same onTickPost halt path as restart now
         return OpsBrain.stopReply(wrapperPresent, written);
@@ -523,7 +527,7 @@ public final class BamfosWatchdog {
         }
         String target = pendingTarget;
         restartAtTick = -1;
-        warnAtTick = -1;
+        clearWarnings();
         pendingTarget = "";
         vetoedTarget = target;
         giveBackMotd(); // The veto skips this release for the rest of the session, so clear the update notice.
@@ -604,6 +608,17 @@ public final class BamfosWatchdog {
             s.getPlayerList().broadcastSystemMessage(Component.literal("[BAMFOS] " + msg), false);
         }
     }
+
+    private void armWarnings() {
+        warnTicks = WatchdogBrain.warnSchedule(countdownSeconds, restartAtTick);
+        warnIdx = 0;
+    }
+
+    private void clearWarnings() {
+        warnTicks = NO_WARNINGS;
+        warnIdx = 0;
+    }
+
 
     /**
      * Echoes the pre-JVM shim's one-line sync summary into logs/latest.log if it is from this boot.
