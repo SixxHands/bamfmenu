@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="bamfrestore"
+version="${restore_version}"
+displayName="BAMF: Restore"
+authors="Retro"
+description='''Arms a world rollback to a Simple Backups zip. /bamfrestore use <file> stages it, the swap happens at the next boot before the world loads. Server-only.'''
+
+[[dependencies.bamfrestore]]
+modId="neoforge"
+type="required"
+versionRange="[21.1,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.bamfrestore]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
