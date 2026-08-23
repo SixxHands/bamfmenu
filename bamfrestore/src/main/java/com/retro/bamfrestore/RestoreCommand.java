@@ -13,6 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 // /bamfrestore list | use <file> | status | cancel. Level 4, this is a world-eating lever so pull it from console.
@@ -56,9 +59,12 @@ public final class RestoreCommand {
             ok(src, backups.size() + " backup(s), newest first:");
             for (Path p : backups.subList(0, Math.min(10, backups.size()))) {
                 long mb = p.toFile().length() / (1024 * 1024);
-                long mins = Duration.between(
-                        Instant.ofEpochMilli(p.toFile().lastModified()), Instant.now()).toMinutes();
-                ok(src, "  " + relative(dir, p) + "  " + mb + " MB, " + age(mins) + " old");
+                Instant mtime = Instant.ofEpochMilli(p.toFile().lastModified());
+                long mins = Duration.between(mtime, Instant.now()).toMinutes();
+                // wall-clock timestamp so you can use the most relevant backup (hot backups near you want to chat)
+                String when = LocalDateTime.ofInstant(mtime, ZoneId.systemDefault())
+                        .format(DateTimeFormatter.ofPattern("EEE MMM d HH:mm"));
+                ok(src, "  " + relative(dir, p) + "  " + mb + " MB, " + when + " (" + age(mins) + " ago)");
             }
             return 1;
         } catch (IOException e) {
