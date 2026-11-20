@@ -28,11 +28,19 @@ run/
 bamfos-token.local
 *-token.local
 
+# Optional local-only earlywindow resources (extra music/songs excluded from the public repo)
+earlywindow/local-resources/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Excluded folders (testing specific / backups)
 scratch/
 reference/
 docs/
 bamfmenu-backups/
+BAMFOS-backup/
 
 # Exclude compiled files/logs from tools
 tools/doom-spike/build/

@@ -125,7 +125,6 @@ public class TerminalWindowProvider implements ImmediateWindowProvider {
             new Face("iosevka", "/fonts/iosevka.ttf", 24, true),
             new Face("mensch", "/fonts/mensch.ttf", 24, true),
             new Face("sudo", "/fonts/sudo.ttf", 24, true),
-            new Face("consolas", "/consola.ttf", 24, true),
             /* terminus: ASCII renders, but its box-drawing/block glyphs are BITMAP-ONLY (empty outlines),
                so they render BLANK under our outline rasterizer, the missing-borders bug. Do NOT make it
                active; kept only to document the finding. */

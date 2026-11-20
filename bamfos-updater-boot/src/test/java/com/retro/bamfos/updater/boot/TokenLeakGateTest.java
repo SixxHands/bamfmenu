@@ -36,7 +36,7 @@ class TokenLeakGateTest {
     /** Mirrors .gitignore for the no-git fallback, mainly skipping run/ and build outputs. */
     private static final Set<String> SKIP_DIRS = Set.of(
             ".git", ".gradle", "build", "bin", "out", ".idea", "run", "scratch", "reference",
-            "docs", "bamfmenu-backups", "BAMFOS-backup");
+            "docs", "bamfmenu-backups", "BAMFOS-backup", "local-resources");
 
     @Test
     void noCommittableFileCarriesATokenShapedString() throws IOException {

@@ -20,7 +20,7 @@ import org.lwjgl.stb.STBTTPackedchar;
 
 /* Our own bitmap-font baker for the early window, so we are NOT limited to FML SimpleFont's ASCII-only
    atlas (SimpleFont bakes only codepoints 32..126 AND re-encodes every string to US-ASCII, collapsing any
-   non-ASCII to '?'). RichFont bakes a bundled TTF (Consolas, for the authentic Windows look) over SEVERAL
+   non-ASCII to '?'). RichFont bakes a bundled TTF (GohuFont by default) over SEVERAL
    Unicode ranges (printable ASCII plus box-drawing, block-element/shade and arrow glyphs) into one
    GL_RED atlas via STBTruetype, and draws BY CODEPOINT. It reuses FML's public SimpleBufferBuilder +
    ElementShader.RenderType.FONT to draw, so the GL path is identical to SimpleFont's; only the glyph set and
