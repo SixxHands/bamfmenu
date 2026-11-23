@@ -4,7 +4,7 @@
 audio playback, terminal Tetris, the data-driven secrets, the shared asset loaders, and the creation/analysis
 tools. Everything here can run without a window, so the chart bootstrap charts songs headless, the editor's
 test/import paths reuse the exact classes the live boot screen does, and the repair window rasterises offline.
-The layout is the secrets model: `core/` is nine category folders, each root holds its definitions + machinery,
+The layout is the secrets model: `core/` is nine category folders, each root keeps its definitions + machinery,
 and data-driven members live as subfolders. `AudioPlayer` is pure playback, the analysis half lives in `tools/audio/SongAnalysis`, so plain
 playback carries no detector machinery. The load-bearing rule: `core/` never imports `bios/`. All OpenGL lives
 in the presentation half, `core/` only ever returns data (lines to draw, notes, colors, pixels) for `bios/` to
@@ -41,7 +41,7 @@ The control flow that threads through `core/` at boot:
   `tools/audio/SongAnalysis` (STB Vorbis decode, no audio device) are the only importers of `org.lwjgl.*`,
   everything else is pure Java. No Minecraft classes anywhere.
 - **Depended on by:** the `bios/` presentation half and the headless Gradle tools (`tools/gen/ChartBootstrap`
-  = `genCharts`, `tools/convert/OsuManiaImport` = `importOsu`, the `tools/probe/*` mains).
+  = `genCharts`, `rhythm/registry/OsuManiaImport` = `importOsu`, the `tools/probe/*` mains).
 - `core/` never imports `bios/`.
 - All of this runs on the single render thread, unsynchronized. Input arrives via the provider's concurrent
   queues, never by touching these classes from another thread.

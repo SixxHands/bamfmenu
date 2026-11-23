@@ -1,10 +1,9 @@
-package com.retro.bamfmenu.early.core.tools.convert;
+package com.retro.bamfmenu.early.core.rhythm.registry;
 
 import com.retro.bamfmenu.early.core.rhythm.model.Note;
 import com.retro.bamfmenu.early.core.rhythm.engine.RhythmEngine;
 import com.retro.bamfmenu.early.core.rhythm.chart.Chart;
 import com.retro.bamfmenu.early.core.rhythm.chart.ChartIO;
-import com.retro.bamfmenu.early.core.rhythm.registry.SongLoader;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -58,10 +57,22 @@ public final class OsuManiaImport {
         String ffmpegPath = args.length >= 4 ? args[3] : "";
         int minHold = args.length >= 5 && !args[4].isBlank() ? parseIntSafe(args[4], DEFAULT_MIN_HOLD_MS) : DEFAULT_MIN_HOLD_MS;
         try {
-            run(input, outRoot, diffSel, ffmpegPath, minHold);
+            run(input, outRoot, null, diffSel, ffmpegPath, minHold);
         } catch (Throwable t) {
             System.err.println("[osu] import failed: " + t);
         }
+    }
+
+    public static Path importDropIn(Path input, Path outRoot) throws IOException {
+        return run(input, outRoot, null, "", "", DEFAULT_MIN_HOLD_MS);
+    }
+
+    public static Path importDropInInto(Path input, Path targetDir) throws IOException {
+        return run(input, targetDir.getParent(), targetDir, "", "", DEFAULT_MIN_HOLD_MS);
+    }
+
+    public static Path importDropInFolder(Path songDir) throws IOException {
+        return importDropInInto(songDir, songDir);
     }
 
     /* A parsed source: the raw .osu texts + the chosen audio (OGG only; mp3 just flags hadMp3). */
@@ -80,10 +91,10 @@ public final class OsuManiaImport {
     private record Diff(String title, String artist, String version, int keyCount, int bpm, List<Note> notes) {
     }
 
-    private static void run(Path input, Path outRoot, String diffSel, String ffmpegPath, int minHold) throws IOException {
+    private static Path run(Path input, Path outRoot, Path targetDir, String diffSel, String ffmpegPath, int minHold) throws IOException {
         if (!Files.exists(input)) {
             System.out.println("[osu] not found: " + input);
-            return;
+            return null;
         }
         Source src = new Source();
         String low = input.getFileName().toString().toLowerCase();
@@ -101,7 +112,7 @@ public final class OsuManiaImport {
             }
         } else {
             System.out.println("[osu] unsupported input (need .osz, .osu, or a folder): " + input);
-            return;
+            return null;
         }
 
         List<Diff> diffs = new ArrayList<>();
@@ -113,7 +124,7 @@ public final class OsuManiaImport {
         }
         if (diffs.isEmpty()) {
             System.out.println("[osu] no osu!mania (Mode 3) charts with notes found in " + input);
-            return;
+            return null;
         }
         int collapsed = collapseShortHolds(diffs, minHold); // sub-window LNs -> taps (osu trill-LNs are a mess for us)
         if (collapsed > 0) {
@@ -132,7 +143,7 @@ public final class OsuManiaImport {
         List<Diff> chosen = select(diffSel, diffs);
         if (chosen.isEmpty()) {
             System.out.println("[osu] no difficulties matched -Pdiffs=\"" + diffSel + "\" -- use the names listed above.");
-            return;
+            return null;
         }
         chosen.sort(Comparator.comparingInt(d -> d.notes().size()));
 
@@ -144,7 +155,7 @@ public final class OsuManiaImport {
             id = "osu-song";
         }
 
-        Path dir = outRoot.resolve(id);
+        Path dir = targetDir != null ? targetDir : outRoot.resolve(id);
         Files.createDirectories(dir);
         Files.createDirectories(dir.resolve("panels"));
 
@@ -220,6 +231,7 @@ public final class OsuManiaImport {
         }
         System.out.println("[osu]   audio: " + audio[1]);
         System.out.println("[osu] Done. Drag '" + id + "' into BAMFOS/songs/ (to chart/test) or resources/songs/ (to bundle).");
+        return dir;
     }
 
     /* Pick which osu difficulties to convert. Blank = all; otherwise a comma list of [Version] names, matched

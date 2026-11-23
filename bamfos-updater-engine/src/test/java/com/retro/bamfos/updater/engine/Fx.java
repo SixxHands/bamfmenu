@@ -1,5 +1,6 @@
 package com.retro.bamfos.updater.engine;
 
+import com.retro.bamfos.updater.engine.config.ServerIpEnv;
 import com.retro.bamfos.updater.engine.manifest.FileEntry;
 import com.retro.bamfos.updater.engine.manifest.Manifest;
 import com.retro.bamfos.updater.engine.reconcile.Reconciler;
@@ -20,6 +21,11 @@ import java.util.zip.ZipOutputStream;
 public final class Fx {
 
     public static final Map<String, byte[]> CONTENT = new HashMap<>();
+
+    public static String serverIp() {
+        String configured = ServerIpEnv.raw();
+        return configured.isEmpty() ? "server.invalid" : configured;
+    }
 
     public static FileEntry entry(String path, byte[] bytes, FileEntry.Side side) {
         return entry(path, bytes, side, FileEntry.Policy.MANAGED, false, null, FileEntry.OnRemove.DELETE, List.of());

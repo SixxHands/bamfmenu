@@ -24,11 +24,10 @@ hs_err_pid*.log
 # Minecraft Runtime run directory
 run/
 
-# Local tokens
+# Local tokens and overrides
 bamfos-token.local
 *-token.local
-
-# Optional local-only earlywindow resources (extra music/songs excluded from the public repo)
+server-ip.local.env
 earlywindow/local-resources/
 
 # Python bytecode

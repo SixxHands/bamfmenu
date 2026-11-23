@@ -66,7 +66,7 @@ class M6ReconcilerTest {
      */
     @Test
     void aStagedSeed_refusesToEatAFileTheSessionCreated() throws IOException {
-        byte[] seed = Fx.serversDat("198.51.100.10");
+        byte[] seed = Fx.serversDat(Fx.serverIp());
         byte[] theirs = Fx.serversDat("their-own-server");
         FileEntry entry = serversEntry(seed);
         Manifest m = Fx.manifest("vT", List.of(), entry);
@@ -92,12 +92,12 @@ class M6ReconcilerTest {
         SyncPlan next = rec.plan(m, fresh);
         assertEquals(SyncPlan.Kind.MERGE_SERVERS, next.actions.get(0).kind());
         rec.apply(next, m, fresh, Fx.fetcher());
-        assertEquals("198.51.100.10", ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElseThrow());
     }
 
     @Test
     void mergeServers_rowsFire_andLedgerRecordsMergeName() throws IOException {
-        byte[] seed = Fx.serversDat("198.51.100.10");
+        byte[] seed = Fx.serversDat(Fx.serverIp());
         FileEntry entry = serversEntry(seed);
         Manifest m = Fx.manifest("vT", List.of(), entry);
         Reconciler rec = new Reconciler(dir, Reconciler.Side.CLIENT, List.of());
@@ -128,7 +128,7 @@ class M6ReconcilerTest {
         SyncPlan p3 = rec.plan(m, ledger);
         assertEquals(SyncPlan.Kind.MERGE_SERVERS, p3.actions.get(0).kind());
         rec.apply(p3, m, ledger, Fx.fetcher());
-        assertEquals("198.51.100.10", ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.entryIp(dir.resolve("servers.dat"), "BAMFOS").orElseThrow());
 
         // server IP changes -> new seed bytes -> refresh while preserving player entries
         byte[] seed2 = Fx.serversDat("99.99.99.99");

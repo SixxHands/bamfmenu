@@ -478,7 +478,7 @@ class ReconcilerTableTest {
      */
     @Test
     void ruleD_aSeededMergeRow_recordsItsName_soTheNextPlanFetchesNothing() throws IOException {
-        byte[] seedBytes = Fx.serversDat("198.51.100.10");
+        byte[] seedBytes = Fx.serversDat(Fx.serverIp());
         Fx.CONTENT.put("servers.dat@" + com.retro.bamfos.updater.engine.util.HashUtils.sha256(seedBytes), seedBytes);
         FileEntry seed = new FileEntry("servers.dat",
                 com.retro.bamfos.updater.engine.util.HashUtils.sha256(seedBytes), seedBytes.length,

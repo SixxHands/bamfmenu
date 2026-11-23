@@ -66,7 +66,7 @@ public final class SongLoader {
 
     /* Last-resort ids if enumeration finds nothing (each still loaded from its bundled song.json by known
        path, which is reliable in every classloader). Keeps SONGS non-empty so the shipped songs always work. */
-    private static final String[] FALLBACK_IDS = {"recovery", "far", "tetris"};
+    private static final String[] FALLBACK_IDS = {"recovery", "far"};
 
     /* Sentinel ogg value for a folder that holds more than one SONG OGG (intro.ogg excluded): the editor refuses
        to open it ("use only one song per chart"). Distinct from a real ref (classpath "/songs/..." or "file:..."). */
@@ -264,6 +264,7 @@ public final class SongLoader {
         if (!Files.isDirectory(songsDir)) {
             return out;
         }
+        importOsuDropIns(songsDir);
         try (var dirs = Files.newDirectoryStream(songsDir, Files::isDirectory)) {
             for (Path dir : dirs) {
                 SongDef sd = loadDisk(dir);
@@ -276,6 +277,83 @@ public final class SongLoader {
         }
         out.sort(Comparator.comparing(SongDef::id));
         return out;
+    }
+
+    private static void importOsuDropIns(Path songsDir) {
+        try (var entries = Files.newDirectoryStream(songsDir)) {
+            for (Path entry : entries) {
+                String name = entry.getFileName().toString();
+                if (Files.isRegularFile(entry) && name.toLowerCase().endsWith(".osz")) {
+                    try {
+                        Path imported = OsuManiaImport.importDropIn(entry, songsDir);
+                        if (imported != null) {
+                            markOszImported(entry);
+                        }
+                    } catch (Throwable t) {
+                        System.err.println("[bamfmenu] osu drop-in import failed for '" + name + "': " + t);
+                    }
+                } else if (Files.isDirectory(entry) && !Files.exists(entry.resolve("song.json"))) {
+                    Path nestedOsz = firstOsz(entry);
+                    if (nestedOsz != null) {
+                        try {
+                            Path imported = OsuManiaImport.importDropInInto(nestedOsz, entry);
+                            if (imported != null) {
+                                markOszImported(nestedOsz);
+                            }
+                        } catch (Throwable t) {
+                            System.err.println("[bamfmenu] osu folder osz import failed for '" + name + "': " + t);
+                        }
+                    } else if (hasOsuFiles(entry)) {
+                        try {
+                            OsuManiaImport.importDropInFolder(entry);
+                        } catch (Throwable t) {
+                            System.err.println("[bamfmenu] osu folder import failed for '" + name + "': " + t);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("[bamfmenu] osu drop-in scan error: " + t);
+        }
+    }
+
+    private static Path firstOsz(Path dir) {
+        try (var stream = Files.newDirectoryStream(dir)) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p) && p.getFileName().toString().toLowerCase().endsWith(".osz")) {
+                    return p;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean hasOsuFiles(Path dir) {
+        try (var stream = Files.newDirectoryStream(dir)) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p) && p.getFileName().toString().toLowerCase().endsWith(".osu")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static void markOszImported(Path osz) {
+        try {
+            String base = osz.getFileName().toString() + ".imported";
+            Path dest = osz.resolveSibling(base);
+            int n = 2;
+            while (Files.exists(dest) && n < 100) {
+                dest = osz.resolveSibling(base + "." + n);
+                n++;
+            }
+            Files.move(osz, dest);
+        } catch (Throwable t) {
+            System.err.println("[bamfmenu] could not mark imported osz '" + osz.getFileName() + "': " + t);
+        }
     }
 
     /* Build a SongDef from an on-disk folder. song.json is read if present; otherwise it is INFERRED from the
@@ -467,6 +545,11 @@ public final class SongLoader {
         sb.append("    panels/        art goes here\n");
         sb.append("```\n\n");
         sb.append("New song? You must provide an .ogg, or the chart editor won't let you edit a chart.\n\n");
+        sb.append("## osu!mania drop-in\n\n");
+        sb.append("Drop a `.osz` beatmap (or an extracted osu!mania folder) directly into `BAMFOS/songs/`.\n");
+        sb.append("BAMFOS converts it into a song folder automatically the next time you open Select Song or the Chart Editor.\n");
+        sb.append("Beatmaps with `.ogg` audio work right away; `.mp3` maps transcode automatically if `ffmpeg` is installed.\n\n");
+        sb.append("For custom Tetris music, drop `.ogg` files into `BAMFOS/tetris/`.\n\n");
         sb.append("## Editor keys\n\n");
         sb.append("Song / difficulty menus:\n");
         sb.append("```\n");

@@ -78,6 +78,40 @@ Press `DEL` during boot to open the BIOS menu where the update tools, settings, 
 
 ![Release notes](assets/bios-release-notes.png)
 
+## Minigames
+
+The BIOS has a few games built into the boot terminal while you wait for Minecraft to load (or if you just want to stall launch).
+
+**Tetris** (`Enable Mechanics`)
+
+![Tetris](assets/game-tetris.png)
+
+**Rhythm game** (`Enter Recovery Mode` / `Select Song`)
+
+![Rhythm game](assets/game-rhythm.png)
+
+**Chart editor** (`Open Chart Editor`)
+
+![Chart editor](assets/game-editor.png)
+
+**Hidden games** (there are secrets in the BIOS too: Snake, Galaga, and pure-Java ASCII DOOM)
+
+![Snake](assets/game-snake.png)
+
+![Galaga](assets/game-galaga.png)
+
+![ASCII DOOM](assets/game-doom.png)
+
+## Custom music and beatmaps
+
+You can add your own music and osu!mania beatmaps straight into your Minecraft folder without rebuilding the mod:
+
+- **Rhythm songs and osu!mania:** Drop song folders (`song.json`, `.ogg`, `.chart`), `.osz` beatmaps, or extracted osu!mania folders into `<gameDir>/BAMFOS/songs/`. `.osz` files convert automatically when you open Select Song or the Chart Editor.
+- **Tetris music (BYOM):** Drop `.ogg` files into `<gameDir>/BAMFOS/tetris/` to add them to the Tetris jukebox alongside the bundled tracks. The mod shuffles songs in that folder during gameplay.
+- **Build-time local assets:** Put extra tracks under `earlywindow/local-resources/` using the same layout as `earlywindow/src/main/resources/` (e.g. `earlywindow/local-resources/songs/tetris0.ogg`). That folder is gitignored, however local Gradle builds package anything inside it automatically.
+
+See [CREDITS.md](CREDITS.md) for bundled music, font, and DOOM licenses.
+
 ## On a dedicated server
 
 Servers don't have a boot window, so the updater prints the same status in the console before the game JVM starts. That way updates finish before anyone can join.
@@ -133,3 +167,5 @@ python tools/repair_render.py <outdir>
 ```
 
 `shoot.py` launches the real early window with mock `bus.log` events and saves screenshots of each boot state. `repair_render.py` renders the BIOS Update & Repair screens and checks for text/layout overlaps, and `bsod_render.py` captures the disconnect blue screen.
+
+Also: Yes I know that the recovery mode does not unlock the songs like it should when you beat it. Idk when I'll fix it cuz Im lazy.

@@ -17,7 +17,7 @@ class ServersMergeTest {
     @TempDir
     Path dir;
 
-    private static final byte[] SEED = Fx.serversDat("198.51.100.10");
+    private static final byte[] SEED = Fx.serversDat(Fx.serverIp());
 
     @Test
     void nbtTreeRoundTripsByteExact() throws IOException {
@@ -33,8 +33,8 @@ class ServersMergeTest {
         Files.write(local, Fx.serversDat("9.9.9.9", "friends.server.net"));
         String name = ServersDat.mergeFirstEntry(local, SEED);
         assertEquals("BAMFOS", name);
-        assertEquals("198.51.100.10", ServersDat.entryIp(local, "BAMFOS").orElseThrow());
-        assertEquals("198.51.100.10", ServersDat.firstIp(local).orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.entryIp(local, "BAMFOS").orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.firstIp(local).orElseThrow());
         // the player's entry survived with its ip intact
         Nbt.Root tree = Nbt.read(Files.newInputStream(local));
         assertTrue(new String(Nbt.write(tree)).contains("friends.server.net"));
@@ -56,7 +56,7 @@ class ServersMergeTest {
         Files.write(local, Nbt.write(tree));
 
         ServersDat.mergeFirstEntry(local, SEED);
-        assertEquals("198.51.100.10", ServersDat.firstIp(local).orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.firstIp(local).orElseThrow());
         assertEquals("friends.server.net", ServersDat.entryIp(local, "Friend 1").orElseThrow());
         assertEquals("other.net", ServersDat.entryIp(local, "Friend 2").orElseThrow());
     }
@@ -64,7 +64,7 @@ class ServersMergeTest {
     @Test
     void currentIp_noWrite_mtimePreserved() throws IOException {
         Path local = dir.resolve("servers.dat");
-        Files.write(local, Fx.serversDat("198.51.100.10"));
+        Files.write(local, Fx.serversDat(Fx.serverIp()));
         java.nio.file.attribute.FileTime before = Files.getLastModifiedTime(local);
         ServersDat.mergeFirstEntry(local, SEED);
         assertEquals(before, Files.getLastModifiedTime(local));

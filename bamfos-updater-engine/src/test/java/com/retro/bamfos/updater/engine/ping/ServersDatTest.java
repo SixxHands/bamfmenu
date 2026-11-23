@@ -20,8 +20,8 @@ class ServersDatTest {
     @Test
     void firstEntryIpWins() throws IOException {
         Path f = dir.resolve("servers.dat");
-        Files.write(f, Fx.serversDat("198.51.100.10", "other.example.com"));
-        assertEquals("198.51.100.10", ServersDat.firstIp(f).orElseThrow());
+        Files.write(f, Fx.serversDat(Fx.serverIp(), "other.example.com"));
+        assertEquals(Fx.serverIp(), ServersDat.firstIp(f).orElseThrow());
     }
 
     @Test
@@ -52,12 +52,12 @@ class ServersDatTest {
         out.write(new byte[]{1, 2, 3});
         out.writeByte(0x08);
         out.writeUTF("ip");
-        out.writeUTF("198.51.100.10");
+        out.writeUTF(Fx.serverIp());
         out.writeByte(0x00);
         out.writeByte(0x00);
         Path f = dir.resolve("servers.dat");
         Files.write(f, bos.toByteArray());
-        assertEquals("198.51.100.10", ServersDat.firstIp(f).orElseThrow());
+        assertEquals(Fx.serverIp(), ServersDat.firstIp(f).orElseThrow());
     }
 
     @Test

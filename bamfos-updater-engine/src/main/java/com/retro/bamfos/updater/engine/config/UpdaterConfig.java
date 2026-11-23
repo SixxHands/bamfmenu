@@ -42,11 +42,13 @@ public record UpdaterConfig(
                 pins.add(s.trim());
             }
         }
+        String envHost = ServerIpEnv.host();
+        int envPort = ServerIpEnv.port(25565);
         return new UpdaterConfig(
                 token(props, instanceDir),
                 props.getProperty("repo", DEFAULT_REPO),
-                props.getProperty("server_host", ""),
-                port(props.getProperty("server_port", "25565")),
+                props.getProperty("server_host", envHost),
+                port(props.getProperty("server_port", Integer.toString(envPort))),
                 List.copyOf(pins),
                 props.getProperty("tag", ""),
                 !"false".equalsIgnoreCase(props.getProperty("auto_restart", "true")));

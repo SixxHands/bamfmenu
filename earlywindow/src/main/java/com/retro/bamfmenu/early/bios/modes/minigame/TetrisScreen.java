@@ -2,12 +2,13 @@ package com.retro.bamfmenu.early.bios.modes.minigame;
 
 import com.retro.bamfmenu.early.bios.host.Mode;
 import com.retro.bamfmenu.early.core.audio.AudioPlayer;
-import com.retro.bamfmenu.early.core.util.ResourceScan;
 import com.retro.bamfmenu.early.core.tetris.TetrisGame;
+import com.retro.bamfmenu.early.core.tetris.TetrisPlaylist;
 import com.retro.bamfmenu.early.bios.screen.BiosContext;
 import com.retro.bamfmenu.early.bios.screen.Screen;
 import com.retro.bamfmenu.early.bios.gfx.TerminalCanvas;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Queue;
 import java.util.Random;
@@ -53,12 +54,14 @@ public final class TetrisScreen implements Screen {
         game = new TetrisGame();
         resumeAtNanos = 0;
         confirmedPlaying = false;
-        playlist = ResourceScan.listResources("songs", "tetris\\d+\\.ogg"); // data-driven: /songs/tetris<N>.ogg, ogg-only
+        String bamfos = ctx.bamfosDir();
+        Path tetrisDir = (bamfos == null || bamfos.isBlank()) ? null : Path.of(bamfos).resolve("tetris");
+        playlist = TetrisPlaylist.discover(tetrisDir);
         System.err.println("[bamfmenu] tetris music: " + playlist.size() + " track(s)");
         if (!playlist.isEmpty()) {
             startTrack(ctx, pickTrack());
         } else {
-            ctx.playMusic("/songs/tetris/tetris.ogg"); // fallback to the old single theme if no tetris<N>.ogg exist
+            ctx.playMusic("/songs/tetris1.ogg");
         }
         ctx.enterMode(Mode.TETRIS); // single atomic state write; sets the 50ms period
     }

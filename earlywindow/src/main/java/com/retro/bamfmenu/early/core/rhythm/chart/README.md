@@ -50,7 +50,7 @@ plays, so chart sources swap without consumers changing.
   `DetectorConfig`); the `impl/` children add `RhythmEngine` (`demoChart`), `tools.audio.dsp`, and
   `Difficulty`, all `early.core.*`, headless and editor-reusable.
 - Depended on by the rhythm and editor screens in `bios/`, `rhythm/editor`'s `EditChart`, `SongLoader` (the
-  USER-song scaffold chart), `ChartBootstrap`, and `tools/convert/OsuManiaImport`.
+  USER-song scaffold chart), `ChartBootstrap`, and `rhythm/registry/OsuManiaImport`.
 - Core never imports `bios/`, nothing here touches GL/OpenAL/Minecraft. `ChartIO.read` never throws,
   `Charter.build` never returns null, `Chart` notes sort ascending by `timeMs` after `read`/`write`.
 - Gameplay never analyzes audio: `SongAnalysis` is produced only by dev tools and the Recovery cutscene's

@@ -51,7 +51,27 @@ sourceSets.main.resources.srcDir(cargoDir)
 
 tasks.named('processResources') {
     dependsOn 'copyCargoCore'
+    dependsOn 'bundleServerIpEnv'
 }
+
+def serverIpEnvDir = layout.buildDirectory.dir('generated-server-ip')
+def serverIpEnvText = providers.fileContents(rootProject.layout.projectDirectory.file('server-ip.local.env')).asText
+        .orElse(providers.fileContents(rootProject.layout.projectDirectory.file('server-ip.env')).asText)
+        .orElse('')
+
+tasks.register('bundleServerIpEnv') {
+    inputs.property('serverIpEnv', serverIpEnvText)
+    outputs.dir(serverIpEnvDir)
+    def outDir = serverIpEnvDir
+    def text = serverIpEnvText
+    doLast {
+        File root = outDir.get().asFile
+        root.mkdirs()
+        new File(root, 'server-ip.env').setText(text.get(), 'UTF-8')
+    }
+}
+
+sourceSets.main.resources.srcDir(serverIpEnvDir)
 
 // Compile core_generation from gradle.properties into a constant so tests (classes dir) and shipped jars see the same value.
 def genDir = layout.buildDirectory.dir('generated-core-gen')

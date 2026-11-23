@@ -116,7 +116,7 @@ tasks.register('importOsu', JavaExec) {
     description = 'Convert an osu!mania beatmap (.osz / .osu / folder) to a BAMFBEAT song folder.'
     dependsOn tasks.named('classes')
     classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'com.retro.bamfmenu.early.core.tools.convert.OsuManiaImport'
+    mainClass = 'com.retro.bamfmenu.early.core.rhythm.registry.OsuManiaImport'
     args = [ (project.findProperty('osu') ?: '').toString(),
              (project.findProperty('out') ?: "${projectDir}/build/osu-import").toString(),
              (project.findProperty('diffs') ?: '').toString(),
