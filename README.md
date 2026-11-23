@@ -4,6 +4,36 @@ A POST-style boot screen for BAMFOS, with a built-in pack updater and BIOS minig
 
 Press `DEL` during boot to open the BIOS menu where the update tools, settings, and games live.
 
+## Building
+
+Requires Java 21 (Minecraft 1.21.1, NeoForge 21.1.235).
+
+```bash
+./gradlew :mainmenu:jar :earlywindow:jar
+```
+
+On Windows, use `.\gradlew.bat` instead. Place both built jars into your `mods/` folder:
+- `mainmenu/build/libs/bamfmenu-*.jar`
+- `earlywindow/build/libs/bamfmenu-earlywindow-*.jar`
+
+To run all tests and checks:
+
+```bash
+./gradlew test check
+```
+
+### Configuring the updater (optional)
+
+The two menu jars work standalone without the updater. If you also build and self-host the updater modules (`bamfos-updater-*`), create `.bamfos-updater/bamfos-updater.properties` in your instance folder to point it at your own pack repo:
+
+```properties
+repo=owner/your-pack-repo
+github_token=your_read_only_token
+server_host=play.example.com
+```
+
+You can also pass build-time defaults via gitignored `server-ip.local.env` (`SERVER_IP=host:port`) or `bamfos-token.local` (or `BAMFOS_GITHUB_TOKEN` in env).
+
 ## Booting
 
 **Normal boot, nothing to do**
